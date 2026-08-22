@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mojomanyana/scrum-pi-team-skills/schemas/execution-context.schema.json",
+  "title": "Execution context",
+  "description": "Minimal governance constraints for a future local Pi agent process.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["process", "governedBy", "systemOfRecord"],
+  "properties": {
+    "process": {
+      "const": "local-pi"
+    },
+    "governedBy": {
+      "const": "pi-daddy"
+    },
+    "systemOfRecord": {
+      "const": "paca"
+    }
+  }
+}
