@@ -60,6 +60,8 @@ npm ci
 
 Valid examples for all four roles are in `packages/contracts/examples`. Manifests contain logical skill and prompt-template references, never executable or installation paths. They also require canonical Pi tool ordering, an exactly matching pi-daddy grant, zero delegation depth, explicit authorization boundaries, and metadata-only receipts.
 
+Authorized objective and out-of-scope text is inert data: it may name a command such as `curl example.test`, but launch planning never interprets or adds that prose to executable arguments. Credential-shaped content remains prohibited and its validation diagnostics do not echo the suspected value. Execution-shaping paths and registries reject shell/injection characters, credential shapes, and `.` or `..` traversal segments without silently normalizing them.
+
 `createPiLaunchPlan` from `@scrum-pi-team-skills/runtime` is a pure planning function. Supply a validated manifest and explicit local Pi, pi-daddy grant-extension, governance-ledger, skill-registry, and prompt-template-registry paths. It returns:
 
 - the Pi executable, argument array, and repository working directory;

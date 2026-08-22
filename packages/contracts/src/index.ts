@@ -139,6 +139,21 @@ function hasCanonicalToolOrder(tools: readonly PiTool[]): boolean {
   return true;
 }
 
+const CREDENTIAL_SHAPE =
+  /(?:\b(?:password|token|api[_-]?key)\s*[:=]\s*\S+|\bbearer(?:\s+|:\s*)\S+|(?:sk|ghp|github_pat)_[A-Za-z0-9]+)/i;
+
+function hasCredentialShape(value: string): boolean {
+  return CREDENTIAL_SHAPE.test(value);
+}
+
+function credentialError(path: string): ContractValidationError {
+  return {
+    path,
+    code: "credential-shaped",
+    message: "must not contain credential-shaped content",
+  };
+}
+
 export function validateAgentExecutionManifest(
   value: unknown,
 ): ContractValidationResult<AgentExecutionManifest> {
@@ -150,6 +165,18 @@ export function validateAgentExecutionManifest(
   }
 
   const errors: ContractValidationError[] = [];
+  if (hasCredentialShape(value.repository.root)) {
+    errors.push(credentialError("/repository/root"));
+  }
+  if (hasCredentialShape(value.authorization.objective)) {
+    errors.push(credentialError("/authorization/objective"));
+  }
+  value.authorization.outOfScope.forEach((item, index) => {
+    if (hasCredentialShape(item)) {
+      errors.push(credentialError(`/authorization/outOfScope/${index}`));
+    }
+  });
+
   if (!hasCanonicalToolOrder(value.tools)) {
     errors.push({
       path: "/tools",

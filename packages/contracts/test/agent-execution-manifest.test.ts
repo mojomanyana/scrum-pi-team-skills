@@ -43,6 +43,23 @@ describe("spts.agent-execution-manifest", () => {
     expect(isAgentExecutionManifest(manifest)).toBe(true);
   });
 
+  it("accepts a normalized absolute WSL repository path", () => {
+    const manifest = cloneManifest();
+    manifest.repository.root = "/home/paca/work/private";
+
+    expect(validateAgentExecutionManifest(manifest).valid).toBe(true);
+  });
+
+  it.each(["/home/paca/work/../private", "/home/paca/work/./private"])(
+    "rejects repository path traversal without normalization: %s",
+    (root) => {
+      const manifest = cloneManifest();
+      manifest.repository.root = root;
+
+      expect(validateAgentExecutionManifest(manifest).valid).toBe(false);
+    },
+  );
+
   it("accepts an omitted expected Git identity", () => {
     const manifest = cloneManifest();
     delete manifest.repository.expectedGitIdentity;
@@ -157,6 +174,39 @@ describe("spts.agent-execution-manifest", () => {
         }),
       ],
     });
+  });
+
+  it("accepts inert natural-language objective text that names a command", () => {
+    const manifest = cloneManifest();
+    manifest.authorization.objective = "Inspect with curl example.test";
+
+    expect(validateAgentExecutionManifest(manifest).valid).toBe(true);
+  });
+
+  it.each([
+    "PASSWORD=SUSPECTED-VALUE-DO-NOT-ECHO",
+    "password : SUSPECTED-VALUE-DO-NOT-ECHO",
+    "ToKeN\t=\tSUSPECTED-VALUE-DO-NOT-ECHO",
+    "token:\tSUSPECTED-VALUE-DO-NOT-ECHO",
+    "Bearer SUSPECTED-VALUE-DO-NOT-ECHO",
+    "bEaReR:\tSUSPECTED-VALUE-DO-NOT-ECHO",
+    "API_KEY : SUSPECTED-VALUE-DO-NOT-ECHO",
+    "api-key= SUSPECTED-VALUE-DO-NOT-ECHO",
+    "GHP_SUSPECTEDVALUEDONOTECHO",
+  ])("rejects and redacts credential-shaped objective %j", (objective) => {
+    const manifest = cloneManifest();
+    manifest.authorization.objective = objective;
+
+    const result = validateAgentExecutionManifest(manifest);
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.errors).toContainEqual({
+        path: "/authorization/objective",
+        code: "credential-shaped",
+        message: "must not contain credential-shaped content",
+      });
+      expect(JSON.stringify(result.errors)).not.toContain("SUSPECTED");
+    }
   });
 
   it.each([

@@ -47,14 +47,75 @@ export class LaunchPlanInputError extends Error {
 }
 
 const ABSOLUTE_LOCAL_PATH = /^\/(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/;
+const SKILL_REFERENCE = /^skill:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const PROMPT_REFERENCE = /^prompt:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const CREDENTIAL_SHAPE =
+  /(?:\b(?:password|token|api[_-]?key)\s*[:=]\s*\S+|\bbearer(?:\s+|:\s*)\S+|(?:sk|ghp|github_pat)_[A-Za-z0-9]+)/i;
 
-function requireLocalPath(value: string, label: string): string {
-  if (!ABSOLUTE_LOCAL_PATH.test(value)) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasTraversalSegment(value: string): boolean {
+  return value
+    .split("/")
+    .some((segment) => segment === "." || segment === "..");
+}
+
+function requireLocalPath(value: unknown, label: string): string {
+  if (typeof value !== "string") {
+    throw new LaunchPlanInputError(`${label} must be a string`);
+  }
+  if (
+    !ABSOLUTE_LOCAL_PATH.test(value) ||
+    hasTraversalSegment(value) ||
+    CREDENTIAL_SHAPE.test(value)
+  ) {
     throw new LaunchPlanInputError(
-      `${label} must be an absolute local WSL path without traversal or injection characters`,
+      `${label} must be an absolute local WSL path without traversal, credential, or injection characters`,
     );
   }
   return value;
+}
+
+function validateRegistry(
+  value: unknown,
+  label: string,
+  referencePattern: RegExp,
+): asserts value is Readonly<Record<string, string>> {
+  if (!isRecord(value)) {
+    throw new LaunchPlanInputError(`${label} must be an object`);
+  }
+
+  for (const [reference, path] of Object.entries(value)) {
+    if (!referencePattern.test(reference) || CREDENTIAL_SHAPE.test(reference)) {
+      throw new LaunchPlanInputError(
+        `${label} contains an invalid logical resource identity`,
+      );
+    }
+    if (typeof path !== "string") {
+      throw new LaunchPlanInputError(`${label} paths must be strings`);
+    }
+    requireLocalPath(path, `${label} path`);
+  }
+}
+
+function validateLocalResources(
+  value: unknown,
+): asserts value is LocalPiResources {
+  if (!isRecord(value)) {
+    throw new LaunchPlanInputError("local resources must be an object");
+  }
+
+  requireLocalPath(value.executable, "Pi executable");
+  requireLocalPath(value.piDaddyExtension, "pi-daddy grants extension");
+  requireLocalPath(value.governanceLedgerPath, "governance ledger");
+  validateRegistry(value.skillRegistry, "skill registry", SKILL_REFERENCE);
+  validateRegistry(
+    value.promptTemplateRegistry,
+    "prompt template registry",
+    PROMPT_REFERENCE,
+  );
 }
 
 function resolveResources(
@@ -97,6 +158,8 @@ export function createPiLaunchPlan(
       .join("; ");
     throw new LaunchPlanInputError(`manifest is invalid: ${summary}`);
   }
+
+  validateLocalResources(localResources);
 
   const executable = requireLocalPath(
     localResources.executable,

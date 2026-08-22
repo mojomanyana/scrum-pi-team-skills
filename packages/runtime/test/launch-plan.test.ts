@@ -154,16 +154,156 @@ describe("createPiLaunchPlan", () => {
   });
 
   it.each([
-    ["executable", "/home/paca/bin/pi;touch-bad"],
-    ["piDaddyExtension", "/home/paca/ext/$(id).ts"],
-    ["governanceLedgerPath", "relative/ledger.jsonl"],
-  ] as const)("rejects injection-shaped local %s", (field, value) => {
+    ["null object", null, "local resources must be an object"],
+    [
+      "missing skill registry",
+      {
+        executable: localResources.executable,
+        piDaddyExtension: localResources.piDaddyExtension,
+        governanceLedgerPath: localResources.governanceLedgerPath,
+        promptTemplateRegistry: localResources.promptTemplateRegistry,
+      },
+      "skill registry must be an object",
+    ],
+    [
+      "null skill registry",
+      { ...localResources, skillRegistry: null },
+      "skill registry must be an object",
+    ],
+    [
+      "missing prompt-template registry",
+      {
+        executable: localResources.executable,
+        piDaddyExtension: localResources.piDaddyExtension,
+        governanceLedgerPath: localResources.governanceLedgerPath,
+        skillRegistry: localResources.skillRegistry,
+      },
+      "prompt template registry must be an object",
+    ],
+    [
+      "null prompt-template registry",
+      { ...localResources, promptTemplateRegistry: null },
+      "prompt template registry must be an object",
+    ],
+    [
+      "malformed nested registry value",
+      {
+        ...localResources,
+        skillRegistry: {
+          ...localResources.skillRegistry,
+          "skill:unused": null,
+        },
+      },
+      "skill registry paths must be strings",
+    ],
+    [
+      "malformed executable value",
+      { ...localResources, executable: null },
+      "Pi executable must be a string",
+    ],
+  ])(
+    "returns a stable LaunchPlanInputError for local-resource %s",
+    (_label, resources, message) => {
+      expect(() =>
+        createPiLaunchPlan(
+          principalDeveloperManifest,
+          resources as unknown as LocalPiResources,
+        ),
+      ).toThrow(new LaunchPlanInputError(message as string));
+    },
+  );
+
+  it("validates unused nested local-resource paths", () => {
     expect(() =>
       createPiLaunchPlan(principalDeveloperManifest, {
         ...localResources,
-        [field]: value,
+        skillRegistry: {
+          ...localResources.skillRegistry,
+          "skill:unused": "/home/paca/skills/../private/SKILL.md",
+        },
       }),
     ).toThrow(LaunchPlanInputError);
+  });
+
+  it("accepts normalized absolute WSL local-resource paths", () => {
+    expect(() =>
+      createPiLaunchPlan(principalDeveloperManifest, localResources),
+    ).not.toThrow();
+  });
+
+  it.each([
+    ["executable", "/home/paca/bin/pi;touch-bad"],
+    ["piDaddyExtension", "/home/paca/ext/$(id).ts"],
+    ["governanceLedgerPath", "relative/ledger.jsonl"],
+    ["executable", "/home/paca/bin/../evil"],
+    ["piDaddyExtension", "/home/paca/ext/./pi-daddy.ts"],
+    ["governanceLedgerPath", "/home/paca/state/../private.jsonl"],
+  ] as const)(
+    "rejects injection or traversal-shaped local %s",
+    (field, value) => {
+      expect(() =>
+        createPiLaunchPlan(principalDeveloperManifest, {
+          ...localResources,
+          [field]: value,
+        }),
+      ).toThrow(LaunchPlanInputError);
+    },
+  );
+
+  it.each([
+    ["skill", { "skill:build": "/home/paca/skills/../evil.md" }],
+    [
+      "prompt template",
+      {
+        "prompt:principal-feature": "/home/paca/prompts/../evil.md",
+      },
+    ],
+  ] as const)("rejects traversal in a resolved %s path", (kind, registry) => {
+    expect(() =>
+      createPiLaunchPlan(principalDeveloperManifest, {
+        ...localResources,
+        ...(kind === "skill"
+          ? {
+              skillRegistry: {
+                ...localResources.skillRegistry,
+                ...registry,
+              },
+            }
+          : {
+              promptTemplateRegistry: {
+                ...localResources.promptTemplateRegistry,
+                ...registry,
+              },
+            }),
+      }),
+    ).toThrow(LaunchPlanInputError);
+  });
+
+  it("rejects credential-shaped execution paths with redacted diagnostics", () => {
+    const suspected = "GHP_SUSPECTEDVALUEDONOTECHO";
+    const cases: LocalPiResources[] = [
+      {
+        ...localResources,
+        executable: `/home/paca/bin/${suspected}`,
+      },
+      {
+        ...localResources,
+        skillRegistry: {
+          ...localResources.skillRegistry,
+          "skill:build": `/home/paca/skills/${suspected}/SKILL.md`,
+        },
+      },
+    ];
+
+    for (const resources of cases) {
+      try {
+        createPiLaunchPlan(principalDeveloperManifest, resources);
+        throw new Error("expected LaunchPlanInputError");
+      } catch (error) {
+        expect(error).toBeInstanceOf(LaunchPlanInputError);
+        expect(String(error)).not.toContain("SUSPECTED");
+      }
+    }
   });
 
   it("refuses an unvalidated manifest", () => {

@@ -159,7 +159,7 @@
       "type": "string",
       "minLength": 2,
       "maxLength": 4096,
-      "pattern": "^/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
+      "pattern": "^(?!.*(?:/\\.{1,2})(?:/|$))/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
     },
     "skillReference": {
       "type": "string",
@@ -177,7 +177,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 1024,
-      "pattern": "^(?!.*(?:\\$\\(|`|[;&|<>]|\\r|\\n|\\u0000))(?!.*(?:[Bb]earer\\s|[Pp]assword\\s*=|[Tt]oken\\s*=|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]\\s*=|(?:sk|ghp|github_pat)_[A-Za-z0-9])).*\\S.*$"
+      "pattern": "^(?!.*(?:\\$\\(|`|[;&|<>]|\\r|\\n|\\u0000)).*\\S.*$"
     }
   }
 }
