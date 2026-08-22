@@ -56,11 +56,21 @@ npm ci
 
 ## Governed agent execution
 
-`packages/contracts` exports the `AgentExecutionManifest` TypeScript type and AJV-backed `validateAgentExecutionManifest` validator for `spts.agent-execution-manifest` version `1.0.0`. The manifest composes the existing execution-context contract, so every accepted execution remains local Pi, governed by pi-daddy, with Paca as the system of record.
+`packages/contracts` exports the `AgentExecutionManifest` TypeScript type and the AJV-backed `validateGovernedAgentExecutionManifest` composite validator for version `1.0.0`. That explicitly named composite validator is the sole authoritative acceptance boundary for governed execution. It composes structural validation with credential checks, canonical Pi tool ordering, and an exactly matching pi-daddy grant, so every accepted execution remains local Pi, governed by pi-daddy, with Paca as the system of record. The older `validateAgentExecutionManifest` name remains only as a deprecated compatibility alias to the same composite function.
 
-Valid examples for all four roles are in `packages/contracts/examples`. Manifests contain logical skill and prompt-template references, never executable or installation paths. They also require canonical Pi tool ordering, an exactly matching pi-daddy grant, zero delegation depth, explicit authorization boundaries, and metadata-only receipts.
+> **Warning:** `agent-execution-manifest.schema.json` is a portable, structural data-envelope artifact only. Direct AJV success does **not** authorize governed execution and does not evaluate cross-field invariants. Never use structure-only validation to launch an agent.
 
-Authorized objective and out-of-scope text is inert data: it may name a command such as `curl example.test`, but launch planning never interprets or adds that prose to executable arguments. Credential-shaped content remains prohibited and its validation diagnostics do not echo the suspected value. Execution-shaping paths and registries reject shell/injection characters, credential shapes, and `.` or `..` traversal segments without silently normalizing them.
+```ts
+import { validateGovernedAgentExecutionManifest } from "@scrum-pi-team-skills/contracts";
+
+const result = validateGovernedAgentExecutionManifest(candidate);
+if (!result.valid)
+  throw new Error("manifest is not authorized for governed execution");
+```
+
+Valid examples for all four roles are in `packages/contracts/examples`, and every example passes the governed composite validator. Manifests contain logical skill and prompt-template references, never executable or installation paths. They also require zero delegation depth, explicit authorization boundaries, and metadata-only receipts.
+
+Authorized objective and out-of-scope text is inert data: it may name a command such as `curl example.test`, but launch planning never interprets or adds that prose to executable arguments. Credential-shaped content remains prohibited and its validation diagnostics do not echo the suspected value. Normalized absolute WSL paths may contain spaces, which remain single argument values; execution-shaping paths and registries still reject controls, shell/injection characters, credential shapes, duplicate or trailing separators, and exact `.` or `..` segments without silently normalizing them.
 
 `createPiLaunchPlan` from `@scrum-pi-team-skills/runtime` is a pure planning function. Supply a validated manifest and explicit local Pi, pi-daddy grant-extension, governance-ledger, skill-registry, and prompt-template-registry paths. It returns:
 
@@ -68,7 +78,7 @@ Authorized objective and out-of-scope text is inert data: it may name a command 
 - only the governed `PI_GRANTS_GRANT`, `PI_GRANTS_MAX_DEPTH=0`, and `PI_GRANTS_LEDGER` environment additions;
 - an array-based redacted operator preview and execution/Paca correlation identity.
 
-The plan starts with `--no-extensions` and loads only the supplied pi-daddy grant extension. It also uses `--no-skills` and `--no-prompt-templates` before adding approved resources in manifest order, and passes the approved tools through `--tools`. It never returns a shell command and does not spawn a process, inspect the filesystem, modify Git, access the network, or update Paca.
+The plan starts with `--no-extensions` and loads only the supplied pi-daddy grant extension. It also uses `--no-skills` and `--no-prompt-templates` before adding approved resources in manifest order, then uses `--no-context-files` to disable global, ancestor, and repository `AGENTS.md`/`CLAUDE.md` discovery. No inherited context or undeclared system-prompt file is added: prompt content comes only from governed manifest resource references. The plan passes approved tools through `--tools`, always revalidates through `validateGovernedAgentExecutionManifest`, never returns a shell command, and does not spawn a process, inspect the filesystem, modify Git, access the network, or update Paca.
 
 ## Workspace structure
 

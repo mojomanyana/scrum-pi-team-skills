@@ -140,7 +140,7 @@ function hasCanonicalToolOrder(tools: readonly PiTool[]): boolean {
 }
 
 const CREDENTIAL_SHAPE =
-  /(?:\b(?:password|token|api[_-]?key)\s*[:=]\s*\S+|\bbearer(?:\s+|:\s*)\S+|(?:sk|ghp|github_pat)_[A-Za-z0-9]+)/i;
+  /(?:\b(?:password|token|api[_-]?key|bearer)(?:\s*[:=]\s*|\s+)\S+|(?:sk|ghp|github_pat)_[A-Za-z0-9]+)/i;
 
 function hasCredentialShape(value: string): boolean {
   return CREDENTIAL_SHAPE.test(value);
@@ -154,7 +154,11 @@ function credentialError(path: string): ContractValidationError {
   };
 }
 
-export function validateAgentExecutionManifest(
+/**
+ * The authoritative acceptance boundary for governed local Pi execution.
+ * Structural JSON Schema success alone is not authorization.
+ */
+export function validateGovernedAgentExecutionManifest(
   value: unknown,
 ): ContractValidationResult<AgentExecutionManifest> {
   if (!validateManifestSchema(value)) {
@@ -199,11 +203,18 @@ export function validateAgentExecutionManifest(
     : { valid: false, errors };
 }
 
-export function isAgentExecutionManifest(
+/** @deprecated Use validateGovernedAgentExecutionManifest. */
+export const validateAgentExecutionManifest =
+  validateGovernedAgentExecutionManifest;
+
+export function isGovernedAgentExecutionManifest(
   value: unknown,
 ): value is AgentExecutionManifest {
-  return validateAgentExecutionManifest(value).valid;
+  return validateGovernedAgentExecutionManifest(value).valid;
 }
+
+/** @deprecated Use isGovernedAgentExecutionManifest. */
+export const isAgentExecutionManifest = isGovernedAgentExecutionManifest;
 
 export function isExecutionContext(value: unknown): value is ExecutionContext {
   return validateExecutionContext(value);

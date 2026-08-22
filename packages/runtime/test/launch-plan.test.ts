@@ -57,6 +57,7 @@ describe("createPiLaunchPlan", () => {
         "--no-prompt-templates",
         "--prompt-template",
         "/home/paca/.pi/agent/prompts/principal-feature.md",
+        "--no-context-files",
         "--tools",
         "read,bash,edit,write",
       ],
@@ -81,6 +82,7 @@ describe("createPiLaunchPlan", () => {
           "--no-prompt-templates",
           "--prompt-template",
           "<prompt:principal-feature>",
+          "--no-context-files",
           "--tools",
           "read,bash,edit,write",
         ],
@@ -97,6 +99,34 @@ describe("createPiLaunchPlan", () => {
         pacaTaskId: "SPTS-7",
       },
     });
+  });
+
+  it("disables implicit context discovery without adding another prompt source", () => {
+    const plan = createPiLaunchPlan(principalDeveloperManifest, localResources);
+
+    expect(
+      plan.arguments.filter((value) => value === "--no-context-files"),
+    ).toHaveLength(1);
+    expect(plan.redactedOperatorPreview.arguments).toContain(
+      "--no-context-files",
+    );
+    expect(
+      plan.arguments.slice(
+        plan.arguments.indexOf("--prompt-template"),
+        plan.arguments.indexOf("--tools") + 1,
+      ),
+    ).toEqual([
+      "--prompt-template",
+      "/home/paca/.pi/agent/prompts/principal-feature.md",
+      "--no-context-files",
+      "--tools",
+    ]);
+    expect(plan.arguments).not.toContain("--context-file");
+    expect(plan.arguments).not.toContain("--system-prompt");
+    expect(plan.arguments).not.toContain("--append-system-prompt");
+    expect(
+      plan.arguments.some((value) => /(?:AGENTS|CLAUDE)\.md$/i.test(value)),
+    ).toBe(false);
   });
 
   it.each([
@@ -225,11 +255,109 @@ describe("createPiLaunchPlan", () => {
     ).toThrow(LaunchPlanInputError);
   });
 
-  it("accepts normalized absolute WSL local-resource paths", () => {
-    expect(() =>
-      createPiLaunchPlan(principalDeveloperManifest, localResources),
-    ).not.toThrow();
+  it("preserves spaces in normalized WSL paths across all launch inputs", () => {
+    const manifest = cloneManifest();
+    manifest.repository.root = "/home/paca/My Workspace/project";
+    const spacedResources: LocalPiResources = {
+      executable: "/home/paca/My Tools/pi",
+      piDaddyExtension: "/home/paca/My Extensions/pi daddy.ts",
+      governanceLedgerPath: "/home/paca/Local State/pi daddy/ledger.jsonl",
+      skillRegistry: {
+        "skill:build": "/home/paca/My Skills/build skill/SKILL.md",
+        "skill:review": "/home/paca/My Skills/review skill/SKILL.md",
+      },
+      promptTemplateRegistry: {
+        "prompt:principal-feature":
+          "/home/paca/My Prompts/principal feature.md",
+      },
+    };
+
+    const plan = createPiLaunchPlan(manifest, spacedResources);
+
+    expect(plan.executable).toBe(spacedResources.executable);
+    expect(plan.workingDirectory).toBe(manifest.repository.root);
+    expect(plan.environment.PI_GRANTS_LEDGER).toBe(
+      spacedResources.governanceLedgerPath,
+    );
+    expect(plan.arguments).toContain(spacedResources.piDaddyExtension);
+    expect(plan.arguments).toContain(
+      spacedResources.skillRegistry["skill:build"],
+    );
+    expect(plan.arguments).toContain(
+      spacedResources.promptTemplateRegistry["prompt:principal-feature"],
+    );
   });
+
+  it.each([
+    ["workspace duplicate separator", { manifestRoot: "/home/paca//work" }],
+    [
+      "executable trailing separator",
+      { resources: { executable: "/home/paca/My Tools/pi/" } },
+    ],
+    [
+      "extension control character",
+      {
+        resources: {
+          piDaddyExtension: "/home/paca/My Extensions/pi\u0001daddy.ts",
+        },
+      },
+    ],
+    [
+      "ledger execution metacharacter",
+      {
+        resources: {
+          governanceLedgerPath: "/home/paca/Local State/ledger|touch-bad",
+        },
+      },
+    ],
+    [
+      "skill backslash separator",
+      {
+        resources: {
+          skillRegistry: {
+            ...localResources.skillRegistry,
+            "skill:build": "/home/paca/My Skills\\build/SKILL.md",
+          },
+        },
+      },
+    ],
+    [
+      "prompt duplicate separator",
+      {
+        resources: {
+          promptTemplateRegistry: {
+            ...localResources.promptTemplateRegistry,
+            "prompt:principal-feature":
+              "/home/paca/My Prompts//principal feature.md",
+          },
+        },
+      },
+    ],
+  ] satisfies ReadonlyArray<
+    readonly [
+      string,
+      {
+        manifestRoot?: string;
+        resources?: Partial<LocalPiResources>;
+      },
+    ]
+  >)(
+    "rejects non-normalized or unsafe WSL path form in %s",
+    (_label, input) => {
+      const manifest = cloneManifest();
+      if ("manifestRoot" in input) {
+        manifest.repository.root = input.manifestRoot;
+      }
+      const resourceOverrides = "resources" in input ? input.resources : {};
+
+      expect(() =>
+        createPiLaunchPlan(manifest, {
+          ...localResources,
+          ...resourceOverrides,
+        }),
+      ).toThrow(LaunchPlanInputError);
+    },
+  );
 
   it.each([
     ["executable", "/home/paca/bin/pi;touch-bad"],
@@ -304,6 +432,38 @@ describe("createPiLaunchPlan", () => {
         expect(String(error)).not.toContain("SUSPECTED");
       }
     }
+  });
+
+  it.each([
+    [
+      "credential-shaped objective",
+      (manifest: AgentExecutionManifest) => {
+        const marker = ["PRIVATE", "INPUT"].join("-");
+        manifest.authorization.objective = `token ${marker}`;
+      },
+    ],
+    [
+      "noncanonical tool ordering",
+      (manifest: AgentExecutionManifest) => {
+        manifest.tools = ["bash", "read"];
+        manifest.piDaddyGrant = "tool:bash,tool:read";
+      },
+    ],
+    [
+      "mismatched pi-daddy grant",
+      (manifest: AgentExecutionManifest) => {
+        manifest.piDaddyGrant = "tool:read";
+      },
+    ],
+  ] satisfies ReadonlyArray<
+    readonly [string, (manifest: AgentExecutionManifest) => void]
+  >)("rejects structural-only validation for %s", (_label, mutate) => {
+    const manifest = cloneManifest();
+    mutate(manifest);
+
+    expect(() => createPiLaunchPlan(manifest, localResources)).toThrow(
+      LaunchPlanInputError,
+    );
   });
 
   it("refuses an unvalidated manifest", () => {

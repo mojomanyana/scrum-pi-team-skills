@@ -1,5 +1,9 @@
+import { Ajv } from "ajv";
 import { describe, expect, it } from "vitest";
 
+import * as contractApi from "../src/index.js";
+import agentExecutionManifestSchema from "../src/schemas/agent-execution-manifest.schema.json" with { type: "json" };
+import executionContextSchema from "../src/schemas/execution-context.schema.json" with { type: "json" };
 import flowManifest from "../examples/agent-execution-manifest.flow.json" with { type: "json" };
 import principalDeveloperManifest from "../examples/agent-execution-manifest.principal-developer.json" with { type: "json" };
 import productManifest from "../examples/agent-execution-manifest.product.json" with { type: "json" };
@@ -14,7 +18,9 @@ import {
   CANONICAL_PI_TOOLS,
   derivePiDaddyGrant,
   isAgentExecutionManifest,
+  isGovernedAgentExecutionManifest,
   validateAgentExecutionManifest,
+  validateGovernedAgentExecutionManifest,
   type AgentExecutionManifest,
 } from "../src/index.js";
 
@@ -29,6 +35,12 @@ function cloneManifest(): AgentExecutionManifest {
   return structuredClone(principalDeveloperManifest) as AgentExecutionManifest;
 }
 
+const structuralAjv = new Ajv({ allErrors: true });
+structuralAjv.addSchema(executionContextSchema);
+const validateManifestStructure = structuralAjv.compile(
+  agentExecutionManifestSchema,
+);
+
 describe("spts.agent-execution-manifest", () => {
   it.each([
     ["product", productManifest],
@@ -36,23 +48,84 @@ describe("spts.agent-execution-manifest", () => {
     ["principal_developer", principalDeveloperManifest],
     ["verifier", verifierManifest],
   ])("accepts the %s role", (_role, manifest) => {
-    expect(validateAgentExecutionManifest(manifest)).toEqual({
+    expect(validateGovernedAgentExecutionManifest(manifest)).toEqual({
       valid: true,
       value: manifest,
     });
-    expect(isAgentExecutionManifest(manifest)).toBe(true);
+    expect(isGovernedAgentExecutionManifest(manifest)).toBe(true);
   });
 
-  it("accepts a normalized absolute WSL repository path", () => {
+  it("labels the portable schema as a nonauthorizing structural artifact", () => {
+    const metadata = agentExecutionManifestSchema as Record<string, unknown>;
+
+    expect(metadata.title).toContain("structural");
+    expect(metadata.description).toContain("does not authorize");
+    expect(metadata.$comment).toContain("composite validator");
+  });
+
+  it("exports the explicitly named governed contract composite validator", () => {
+    expect(contractApi.validateGovernedAgentExecutionManifest).toBeTypeOf(
+      "function",
+    );
+    expect(contractApi.isGovernedAgentExecutionManifest).toBeTypeOf("function");
+    expect(validateAgentExecutionManifest).toBe(
+      validateGovernedAgentExecutionManifest,
+    );
+    expect(isAgentExecutionManifest).toBe(isGovernedAgentExecutionManifest);
+  });
+
+  it("treats structural success as nonauthorizing", () => {
+    const credentialShaped = cloneManifest();
+    const marker = ["PRIVATE", "INPUT"].join("-");
+    credentialShaped.authorization.objective = `token ${marker}`;
+    const noncanonical = cloneManifest();
+    noncanonical.tools = ["bash", "read"];
+    noncanonical.piDaddyGrant = "tool:bash,tool:read";
+    const mismatchedGrant = cloneManifest();
+    mismatchedGrant.piDaddyGrant = "tool:read";
+
+    for (const [label, manifest] of [
+      ["credential shape", credentialShaped],
+      ["noncanonical tools", noncanonical],
+      ["mismatched grant", mismatchedGrant],
+    ] as const) {
+      expect(validateManifestStructure(manifest), label).toBe(true);
+      expect(
+        validateGovernedAgentExecutionManifest(manifest).valid,
+        label,
+      ).toBe(false);
+    }
+  });
+
+  it("accepts every shipped example through the governed composite boundary", () => {
+    expect(
+      validManifests.every(
+        (manifest) => validateGovernedAgentExecutionManifest(manifest).valid,
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts a normalized absolute WSL repository path with spaces", () => {
     const manifest = cloneManifest();
-    manifest.repository.root = "/home/paca/work/private";
+    manifest.repository.root = "/home/paca/My Tools/private workspace";
 
     expect(validateAgentExecutionManifest(manifest).valid).toBe(true);
   });
 
-  it.each(["/home/paca/work/../private", "/home/paca/work/./private"])(
-    "rejects repository path traversal without normalization: %s",
-    (root) => {
+  it.each([
+    ["parent traversal", "/home/paca/work/../private"],
+    ["current-directory traversal", "/home/paca/work/./private"],
+    ["relative", "home/paca/work/private"],
+    ["duplicate separator", "/home/paca//work/private"],
+    ["trailing separator", "/home/paca/work/private/"],
+    ["NUL control", "/home/paca/work/\u0000private"],
+    ["non-NUL control", "/home/paca/work/\u0001private"],
+    ["command substitution", "/home/paca/work/$(id)"],
+    ["execution separator", "/home/paca/work/private;touch-bad"],
+    ["backslash separator", "/home/paca/work\\private"],
+  ])(
+    "rejects non-normalized or unsafe WSL repository path: %s",
+    (_label, root) => {
       const manifest = cloneManifest();
       manifest.repository.root = root;
 
@@ -183,42 +256,52 @@ describe("spts.agent-execution-manifest", () => {
     expect(validateAgentExecutionManifest(manifest).valid).toBe(true);
   });
 
-  it.each([
-    "PASSWORD=SUSPECTED-VALUE-DO-NOT-ECHO",
-    "password : SUSPECTED-VALUE-DO-NOT-ECHO",
-    "ToKeN\t=\tSUSPECTED-VALUE-DO-NOT-ECHO",
-    "token:\tSUSPECTED-VALUE-DO-NOT-ECHO",
-    "Bearer SUSPECTED-VALUE-DO-NOT-ECHO",
-    "bEaReR:\tSUSPECTED-VALUE-DO-NOT-ECHO",
-    "API_KEY : SUSPECTED-VALUE-DO-NOT-ECHO",
-    "api-key= SUSPECTED-VALUE-DO-NOT-ECHO",
-    "GHP_SUSPECTEDVALUEDONOTECHO",
-  ])("rejects and redacts credential-shaped objective %j", (objective) => {
-    const manifest = cloneManifest();
-    manifest.authorization.objective = objective;
+  const credentialCases: ReadonlyArray<
+    readonly [string, (suspectedValue: string) => string]
+  > = [
+    ["password assignment", (value) => `PASSWORD=${value}`],
+    ["password colon", (value) => `password : ${value}`],
+    ["password whitespace", (value) => `PaSsWoRd ${value}`],
+    ["token assignment", (value) => `ToKeN\t=\t${value}`],
+    ["token colon", (value) => `token:\t${value}`],
+    ["token whitespace", (value) => `ToKeN\t${value}`],
+    ["API key assignment", (value) => `api-key= ${value}`],
+    ["API key colon", (value) => `API_KEY : ${value}`],
+    ["API key whitespace", (value) => `Api_Key ${value}`],
+    ["Bearer assignment", (value) => `Bearer=${value}`],
+    ["Bearer colon", (value) => `bEaReR:\t${value}`],
+    ["Bearer whitespace", (value) => `Bearer ${value}`],
+    ["provider token prefix", (value) => `GHP_${value.replaceAll("-", "")}`],
+  ];
 
-    const result = validateAgentExecutionManifest(manifest);
-    expect(result.valid).toBe(false);
-    if (!result.valid) {
-      expect(result.errors).toContainEqual({
-        path: "/authorization/objective",
-        code: "credential-shaped",
-        message: "must not contain credential-shaped content",
-      });
-      expect(JSON.stringify(result.errors)).not.toContain("SUSPECTED");
-    }
-  });
+  it.each(credentialCases)(
+    "rejects and redacts credential-shaped objective: %s",
+    (_label, objectiveFor) => {
+      const suspectedValue = ["SENSITIVE", "VALUE", "DO", "NOT", "ECHO"].join(
+        "-",
+      );
+      const manifest = cloneManifest();
+      manifest.authorization.objective = objectiveFor(suspectedValue);
+
+      const result = validateAgentExecutionManifest(manifest);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.errors).toContainEqual({
+          path: "/authorization/objective",
+          code: "credential-shaped",
+          message: "must not contain credential-shaped content",
+        });
+        expect(JSON.stringify(result.errors)).not.toContain(suspectedValue);
+      }
+    },
+  );
 
   it.each([
     "Run tests; curl example.test",
     "Read $(whoami)",
     "Use `id` output",
-    "token=not-a-real-token",
-    "api_key=not-a-real-key",
-    "Bearer not-a-real-token",
-    "ghp_notarealtoken",
     "First line\nsecond line",
-  ])("rejects injection or credential-shaped objective %j", (objective) => {
+  ])("rejects injection-shaped objective %j", (objective) => {
     const manifest = cloneManifest();
     manifest.authorization.objective = objective;
 

@@ -1,5 +1,5 @@
 import {
-  validateAgentExecutionManifest,
+  validateGovernedAgentExecutionManifest,
   type AgentExecutionManifest,
   type PromptTemplateReference,
   type SkillReference,
@@ -46,11 +46,11 @@ export class LaunchPlanInputError extends Error {
   }
 }
 
-const ABSOLUTE_LOCAL_PATH = /^\/(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/;
 const SKILL_REFERENCE = /^skill:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const PROMPT_REFERENCE = /^prompt:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const PROHIBITED_LOCAL_PATH_CHARACTER = /[`$;&|<>"'\\]/;
 const CREDENTIAL_SHAPE =
-  /(?:\b(?:password|token|api[_-]?key)\s*[:=]\s*\S+|\bbearer(?:\s+|:\s*)\S+|(?:sk|ghp|github_pat)_[A-Za-z0-9]+)/i;
+  /(?:\b(?:password|token|api[_-]?key|bearer)(?:\s*[:=]\s*|\s+)\S+|(?:sk|ghp|github_pat)_[A-Za-z0-9]+)/i;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -62,15 +62,31 @@ function hasTraversalSegment(value: string): boolean {
     .some((segment) => segment === "." || segment === "..");
 }
 
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function isNormalizedAbsoluteWslPath(value: string): boolean {
+  return (
+    value.startsWith("/") &&
+    value !== "/" &&
+    !value.endsWith("/") &&
+    !value.includes("//") &&
+    !hasTraversalSegment(value) &&
+    !hasControlCharacter(value) &&
+    !PROHIBITED_LOCAL_PATH_CHARACTER.test(value)
+  );
+}
+
 function requireLocalPath(value: unknown, label: string): string {
   if (typeof value !== "string") {
     throw new LaunchPlanInputError(`${label} must be a string`);
   }
-  if (
-    !ABSOLUTE_LOCAL_PATH.test(value) ||
-    hasTraversalSegment(value) ||
-    CREDENTIAL_SHAPE.test(value)
-  ) {
+  if (!isNormalizedAbsoluteWslPath(value) || CREDENTIAL_SHAPE.test(value)) {
     throw new LaunchPlanInputError(
       `${label} must be an absolute local WSL path without traversal, credential, or injection characters`,
     );
@@ -151,7 +167,7 @@ export function createPiLaunchPlan(
   manifest: AgentExecutionManifest,
   localResources: LocalPiResources,
 ): PiLaunchPlan {
-  const validation = validateAgentExecutionManifest(manifest);
+  const validation = validateGovernedAgentExecutionManifest(manifest);
   if (!validation.valid) {
     const summary = validation.errors
       .map((error) => `${error.path} ${error.message}`)
@@ -193,6 +209,7 @@ export function createPiLaunchPlan(
     ...resourceArguments("--skill", skills),
     "--no-prompt-templates",
     ...resourceArguments("--prompt-template", promptTemplates),
+    "--no-context-files",
     "--tools",
     toolAllowlist,
   ];
@@ -220,6 +237,7 @@ export function createPiLaunchPlan(
           "--prompt-template",
           manifest.resources.promptTemplates,
         ),
+        "--no-context-files",
         "--tools",
         toolAllowlist,
       ],

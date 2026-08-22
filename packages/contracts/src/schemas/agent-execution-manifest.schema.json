@@ -1,8 +1,9 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/mojomanyana/scrum-pi-team-skills/schemas/spts.agent-execution-manifest/1.0.0",
-  "title": "spts.agent-execution-manifest",
-  "description": "Governed local Pi agent execution manifest version 1.0.0.",
+  "title": "spts.agent-execution-manifest structural envelope",
+  "description": "Portable data-envelope schema for local Pi execution manifest version 1.0.0; structural success does not authorize governed execution.",
+  "$comment": "NON-AUTHORIZING ARTIFACT: use the exported validateGovernedAgentExecutionManifest composite validator for governed execution acceptance, including credential and cross-field invariants.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -159,7 +160,7 @@
       "type": "string",
       "minLength": 2,
       "maxLength": 4096,
-      "pattern": "^(?!.*(?:/\\.{1,2})(?:/|$))/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
+      "pattern": "^(?!.*(?:/\\.{1,2})(?:/|$))(?!.*[\\u0000-\\u001F\\u007F`$;&|<>\"'\\\\])/(?:[^/]+/)*[^/]+$"
     },
     "skillReference": {
       "type": "string",
