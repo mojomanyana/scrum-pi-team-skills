@@ -54,10 +54,24 @@ npm ci
 | `npm run quality`      | Run all checks used by CI.                    |
 | `npm run clean`        | Remove TypeScript build outputs.              |
 
+## Governed agent execution
+
+`packages/contracts` exports the `AgentExecutionManifest` TypeScript type and AJV-backed `validateAgentExecutionManifest` validator for `spts.agent-execution-manifest` version `1.0.0`. The manifest composes the existing execution-context contract, so every accepted execution remains local Pi, governed by pi-daddy, with Paca as the system of record.
+
+Valid examples for all four roles are in `packages/contracts/examples`. Manifests contain logical skill and prompt-template references, never executable or installation paths. They also require canonical Pi tool ordering, an exactly matching pi-daddy grant, zero delegation depth, explicit authorization boundaries, and metadata-only receipts.
+
+`createPiLaunchPlan` from `@scrum-pi-team-skills/runtime` is a pure planning function. Supply a validated manifest and explicit local Pi, pi-daddy grant-extension, governance-ledger, skill-registry, and prompt-template-registry paths. It returns:
+
+- the Pi executable, argument array, and repository working directory;
+- only the governed `PI_GRANTS_GRANT`, `PI_GRANTS_MAX_DEPTH=0`, and `PI_GRANTS_LEDGER` environment additions;
+- an array-based redacted operator preview and execution/Paca correlation identity.
+
+The plan starts with `--no-extensions` and loads only the supplied pi-daddy grant extension. It also uses `--no-skills` and `--no-prompt-templates` before adding approved resources in manifest order, and passes the approved tools through `--tools`. It never returns a shell command and does not spawn a process, inspect the filesystem, modify Git, access the network, or update Paca.
+
 ## Workspace structure
 
-- `packages/contracts`: JSON Schemas and AJV-backed validation.
-- `packages/runtime`: reserved for approved local runtime behavior.
+- `packages/contracts`: JSON Schemas, examples, and AJV-backed validation.
+- `packages/runtime`: pure deterministic local Pi launch planning.
 - `packages/agents`: reserved for approved agent implementations.
 - `packages/tooling`: reserved for repository and development tooling.
 

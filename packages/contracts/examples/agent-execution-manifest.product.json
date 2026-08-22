@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "1.0.0",
+  "executionId": "exec-product-001",
+  "paca": {
+    "projectId": "SCRUM-PI",
+    "taskId": "SPTS-PRODUCT"
+  },
+  "agent": {
+    "name": "product-agent",
+    "role": "product"
+  },
+  "repository": {
+    "root": "/home/paca/work/scrum-pi-team-skills"
+  },
+  "executionContext": {
+    "process": "local-pi",
+    "governedBy": "pi-daddy",
+    "systemOfRecord": "paca"
+  },
+  "assurance": "lean",
+  "resources": {
+    "skills": ["skill:build", "skill:review"],
+    "promptTemplates": ["prompt:principal-feature"]
+  },
+  "tools": ["read", "bash", "edit", "write"],
+  "piDaddyGrant": "tool:read,tool:bash,tool:edit,tool:write",
+  "delegation": {
+    "maxDepth": 0
+  },
+  "authorization": {
+    "objective": "Refine the authorized product outcome",
+    "outOfScope": ["Do not change implementation"],
+    "outOfScopeBehavior": "stop-and-report",
+    "externalEffects": "prohibited"
+  },
+  "receiptPolicy": {
+    "mode": "metadata-only",
+    "includeTaskContent": false,
+    "includePromptContent": false
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0.0",
+  "executionId": "invalid-executable",
+  "paca": { "projectId": "SCRUM-PI", "taskId": "SPTS-7" },
+  "agent": { "name": "verifier-agent", "role": "verifier" },
+  "repository": { "root": "/home/paca/work/repository" },
+  "executionContext": {
+    "process": "local-pi",
+    "governedBy": "pi-daddy",
+    "systemOfRecord": "paca"
+  },
+  "assurance": "standard",
+  "resources": {
+    "skills": ["skill:review"],
+    "promptTemplates": ["prompt:principal-feature"]
+  },
+  "tools": ["read"],
+  "piDaddyGrant": "tool:read",
+  "delegation": { "maxDepth": 0 },
+  "authorization": {
+    "objective": "Verify the authorized candidate",
+    "outOfScope": ["Do not modify files"],
+    "outOfScopeBehavior": "stop-and-report",
+    "externalEffects": "prohibited"
+  },
+  "receiptPolicy": {
+    "mode": "metadata-only",
+    "includeTaskContent": false,
+    "includePromptContent": false
+  },
+  "executable": "/tmp/arbitrary-agent"
+}
