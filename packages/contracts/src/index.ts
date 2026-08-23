@@ -95,21 +95,22 @@ const validateManifestSchema = ajv.compile<AgentExecutionManifest>(
 );
 
 function toActionableError(error: ErrorObject): ContractValidationError {
-  const property =
+  const missingProperty =
     error.keyword === "required"
       ? String(error.params.missingProperty)
-      : error.keyword === "additionalProperties"
-        ? String(error.params.additionalProperty)
-        : undefined;
-  const path = property
-    ? `${error.instancePath}/${property}`
-    : error.instancePath || "/";
+      : undefined;
+  const path =
+    error.keyword === "additionalProperties"
+      ? error.instancePath || "/"
+      : missingProperty
+        ? `${error.instancePath}/${missingProperty}`
+        : error.instancePath || "/";
 
   let message = error.message ?? "is invalid";
   if (error.keyword === "required") {
     message = "is required";
   } else if (error.keyword === "additionalProperties") {
-    message = `must not include undeclared property ${JSON.stringify(property)}`;
+    message = "must not include undeclared properties";
   } else if (error.keyword === "const") {
     message += ` ${JSON.stringify(error.params.allowedValue)}`;
   } else if (error.keyword === "enum") {
@@ -139,11 +140,15 @@ function hasCanonicalToolOrder(tools: readonly PiTool[]): boolean {
   return true;
 }
 
-const CREDENTIAL_SHAPE =
-  /(?:\b(?:password|token|api[_-]?key|bearer)(?:\s*[:=]\s*|\s+)\S+|(?:sk|ghp|github_pat)_[A-Za-z0-9]+)/i;
+const CREDENTIAL_ASSIGNMENT =
+  /(?:^|[^A-Za-z0-9_])(?:[A-Za-z0-9]+_)*(?:password|passwd|token|api[_-]?key|bearer|secret(?:[_-]access[_-]key)?)(?:[ \t]*[:=][ \t]*|[ \t]+)\S+/i;
+const CREDENTIAL_TOKEN_PREFIX =
+  /(?:^|[^A-Za-z0-9])(?:sk|ghp|github_pat)_[A-Za-z0-9]+/i;
 
 function hasCredentialShape(value: string): boolean {
-  return CREDENTIAL_SHAPE.test(value);
+  return (
+    CREDENTIAL_ASSIGNMENT.test(value) || CREDENTIAL_TOKEN_PREFIX.test(value)
+  );
 }
 
 function credentialError(path: string): ContractValidationError {
@@ -152,6 +157,30 @@ function credentialError(path: string): ContractValidationError {
     code: "credential-shaped",
     message: "must not contain credential-shaped content",
   };
+}
+
+function escapeJsonPointerSegment(value: string): string {
+  return value.replaceAll("~", "~0").replaceAll("/", "~1");
+}
+
+function findCredentialErrors(
+  value: unknown,
+  path = "",
+): ContractValidationError[] {
+  if (typeof value === "string") {
+    return hasCredentialShape(value) ? [credentialError(path || "/")] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) =>
+      findCredentialErrors(item, `${path}/${String(index)}`),
+    );
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.entries(value).flatMap(([key, item]) =>
+      findCredentialErrors(item, `${path}/${escapeJsonPointerSegment(key)}`),
+    );
+  }
+  return [];
 }
 
 /**
@@ -168,18 +197,7 @@ export function validateGovernedAgentExecutionManifest(
     };
   }
 
-  const errors: ContractValidationError[] = [];
-  if (hasCredentialShape(value.repository.root)) {
-    errors.push(credentialError("/repository/root"));
-  }
-  if (hasCredentialShape(value.authorization.objective)) {
-    errors.push(credentialError("/authorization/objective"));
-  }
-  value.authorization.outOfScope.forEach((item, index) => {
-    if (hasCredentialShape(item)) {
-      errors.push(credentialError(`/authorization/outOfScope/${index}`));
-    }
-  });
+  const errors = findCredentialErrors(value);
 
   if (!hasCanonicalToolOrder(value.tools)) {
     errors.push({

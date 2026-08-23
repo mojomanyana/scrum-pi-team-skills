@@ -190,16 +190,11 @@ describe("spts.agent-execution-manifest", () => {
       "/resources/skills",
       "uniqueItems",
     ],
-    [
-      "a manifest executable",
-      arbitraryExecutable,
-      "/executable",
-      "additionalProperties",
-    ],
+    ["a manifest executable", arbitraryExecutable, "/", "additionalProperties"],
     [
       "manifest environment variables",
       unrestrictedEnvironment,
-      "/environment",
+      "/",
       "additionalProperties",
     ],
   ])("rejects %s", (_label, fixture, path, code) => {
@@ -249,9 +244,13 @@ describe("spts.agent-execution-manifest", () => {
     });
   });
 
-  it("accepts inert natural-language objective text that names a command", () => {
+  it.each([
+    "Inspect with curl example.test",
+    "Count tokenizer output without logging values",
+    "Review bearer-independent authentication prose",
+  ])("accepts inert prose without credential assignments: %s", (objective) => {
     const manifest = cloneManifest();
-    manifest.authorization.objective = "Inspect with curl example.test";
+    manifest.authorization.objective = objective;
 
     expect(validateAgentExecutionManifest(manifest).valid).toBe(true);
   });
@@ -272,6 +271,10 @@ describe("spts.agent-execution-manifest", () => {
     ["Bearer colon", (value) => `bEaReR:\t${value}`],
     ["Bearer whitespace", (value) => `Bearer ${value}`],
     ["provider token prefix", (value) => `GHP_${value.replaceAll("-", "")}`],
+    ["OpenAI API key", (value) => `OPENAI_API_KEY=${value}`],
+    ["Anthropic API key", (value) => `ANTHROPIC_API_KEY=${value}`],
+    ["AWS secret access key", (value) => `AWS_SECRET_ACCESS_KEY=${value}`],
+    ["client secret", (value) => `CLIENT_SECRET=${value}`],
   ];
 
   it.each(credentialCases)(
@@ -295,6 +298,132 @@ describe("spts.agent-execution-manifest", () => {
       }
     },
   );
+
+  it.each([
+    [
+      "execution ID",
+      (manifest: AgentExecutionManifest, value: string) => {
+        manifest.executionId = `token:${value}`;
+      },
+      "/executionId",
+    ],
+    [
+      "Paca project ID",
+      (manifest: AgentExecutionManifest, value: string) => {
+        manifest.paca.projectId = `token:${value}`;
+      },
+      "/paca/projectId",
+    ],
+    [
+      "Paca task ID",
+      (manifest: AgentExecutionManifest, value: string) => {
+        manifest.paca.taskId = `token:${value}`;
+      },
+      "/paca/taskId",
+    ],
+    [
+      "agent name",
+      (manifest: AgentExecutionManifest, value: string) => {
+        manifest.agent.name = `PASSWORD ${value}`;
+      },
+      "/agent/name",
+    ],
+    [
+      "repository root",
+      (manifest: AgentExecutionManifest, value: string) => {
+        manifest.repository.root = `/home/paca/token=${value}/project`;
+      },
+      "/repository/root",
+    ],
+    [
+      "Git identity name",
+      (manifest: AgentExecutionManifest, value: string) => {
+        manifest.repository.expectedGitIdentity = {
+          name: `PASSWORD ${value}`,
+          email: "operator@example.test",
+        };
+      },
+      "/repository/expectedGitIdentity/name",
+    ],
+    [
+      "Git identity email",
+      (manifest: AgentExecutionManifest, value: string) => {
+        manifest.repository.expectedGitIdentity = {
+          name: "Operator",
+          email: `token=${value}@example.test`,
+        };
+      },
+      "/repository/expectedGitIdentity/email",
+    ],
+    [
+      "objective",
+      (manifest: AgentExecutionManifest, value: string) => {
+        manifest.authorization.objective = `PASSWORD ${value}`;
+      },
+      "/authorization/objective",
+    ],
+    [
+      "out-of-scope prose",
+      (manifest: AgentExecutionManifest, value: string) => {
+        manifest.authorization.outOfScope[0] = `PASSWORD ${value}`;
+      },
+      "/authorization/outOfScope/0",
+    ],
+  ] satisfies ReadonlyArray<
+    readonly [
+      string,
+      (manifest: AgentExecutionManifest, value: string) => void,
+      string,
+    ]
+  >)(
+    "rejects and redacts credential-shaped accepted string: %s",
+    (_label, mutate, path) => {
+      const suspectedValue = "SENSITIVE_VALUE_DO_NOT_ECHO";
+      const manifest = cloneManifest();
+      mutate(manifest, suspectedValue);
+
+      const result = validateGovernedAgentExecutionManifest(manifest);
+
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.errors).toContainEqual({
+          path,
+          code: "credential-shaped",
+          message: "must not contain credential-shaped content",
+        });
+        expect(JSON.stringify(result.errors)).not.toContain(suspectedValue);
+      }
+    },
+  );
+
+  it("sanitizes structural diagnostics for credential-shaped undeclared properties", () => {
+    const manifest = cloneManifest() as unknown as Record<string, unknown>;
+    const propertyName = "OPENAI_API_KEY=SENSITIVE_PROPERTY_DO_NOT_ECHO";
+    manifest[propertyName] = "SENSITIVE_VALUE_DO_NOT_ECHO";
+
+    const result = validateGovernedAgentExecutionManifest(manifest);
+
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      const diagnostics = JSON.stringify(result.errors);
+      expect(diagnostics).not.toContain(propertyName);
+      expect(diagnostics).not.toContain("SENSITIVE_PROPERTY_DO_NOT_ECHO");
+      expect(diagnostics).not.toContain("SENSITIVE_VALUE_DO_NOT_ECHO");
+      expect(result.errors).toContainEqual({
+        path: "/",
+        code: "additionalProperties",
+        message: "must not include undeclared properties",
+      });
+    }
+  });
+
+  it("scans logical resource strings without bare credential substrings", () => {
+    const manifest = cloneManifest();
+    manifest.resources.skills = ["skill:token-review"];
+    manifest.resources.promptTemplates = ["prompt:bearer-report"];
+
+    expect(validateGovernedAgentExecutionManifest(manifest).valid).toBe(true);
+  });
 
   it.each([
     "Run tests; curl example.test",
