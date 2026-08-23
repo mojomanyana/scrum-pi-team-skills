@@ -31,6 +31,8 @@ export interface RuntimePolicyDefinition {
   readonly policyId: string;
   readonly maximumRuntimeMs: number;
   readonly terminationGraceMs: number;
+  readonly killConfirmationMs: number;
+  readonly processGroupPollIntervalMs: number;
   readonly maximumArgvCount: number;
   readonly maximumArgvBytes: number;
   readonly maximumEnvironmentEntries: number;
@@ -187,6 +189,8 @@ const RUNTIME_PROPERTIES = [
   "policyId",
   "maximumRuntimeMs",
   "terminationGraceMs",
+  "killConfirmationMs",
+  "processGroupPollIntervalMs",
   "maximumArgvCount",
   "maximumArgvBytes",
   "maximumEnvironmentEntries",
@@ -233,6 +237,18 @@ export function createRuntimePolicy(input: unknown): RuntimePolicy {
       1,
       300_000,
       "termination grace",
+    ),
+    killConfirmationMs: boundedInteger(
+      value.killConfirmationMs,
+      1,
+      60_000,
+      "kill confirmation",
+    ),
+    processGroupPollIntervalMs: boundedInteger(
+      value.processGroupPollIntervalMs,
+      1,
+      1_000,
+      "process group poll interval",
     ),
     maximumArgvCount: boundedInteger(
       value.maximumArgvCount,

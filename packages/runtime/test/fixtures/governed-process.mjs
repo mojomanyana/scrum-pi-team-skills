@@ -10,7 +10,9 @@ const knownModes = new Set([
   "stream",
   "large",
   "ignore-term",
+  "ignore-term-ready",
   "tree",
+  "leader-exit-tree",
 ]);
 const directMode = input[0];
 const systemPromptIndex = input.indexOf("--system-prompt");
@@ -58,6 +60,12 @@ switch (mode) {
   }
   case "ignore-term":
     process.on("SIGTERM", () => {});
+    if (process.send) process.send("ready");
+    setInterval(() => {}, 1_000);
+    break;
+  case "ignore-term-ready":
+    process.on("SIGTERM", () => {});
+    process.stdout.write("ready\n");
     setInterval(() => {}, 1_000);
     break;
   case "tree": {
@@ -70,6 +78,21 @@ switch (mode) {
     );
     process.stdout.write(`${String(child.pid)}\n`);
     process.on("SIGTERM", () => {});
+    setInterval(() => {}, 1_000);
+    break;
+  }
+  case "leader-exit-tree": {
+    const child = spawn(
+      process.execPath,
+      [new URL(import.meta.url).pathname, "ignore-term"],
+      {
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      },
+    );
+    child.once("message", () => {
+      process.stdout.write(`${String(child.pid)}\n`);
+    });
+    process.on("SIGTERM", () => process.exit(0));
     setInterval(() => {}, 1_000);
     break;
   }

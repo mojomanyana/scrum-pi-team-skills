@@ -51,6 +51,7 @@ export interface ProcessAdapter {
     arguments_: readonly string[],
     options: SpawnOptions,
   ): ManagedChild;
+  isProcessGroupAlive(processGroupId: number): boolean;
   killProcessGroup(processGroupId: number, signal: "SIGTERM" | "SIGKILL"): void;
 }
 
@@ -138,6 +139,19 @@ export function createNodeProcessAdapter(): ProcessAdapter {
         [...arguments_],
         options,
       ) as unknown as ManagedChild;
+    },
+    isProcessGroupAlive(processGroupId: number) {
+      try {
+        process.kill(-processGroupId, 0);
+        return true;
+      } catch (error) {
+        const code =
+          typeof error === "object" && error !== null && "code" in error
+            ? (error as { code?: unknown }).code
+            : undefined;
+        if (code === "ESRCH") return false;
+        throw error;
+      }
     },
     killProcessGroup(processGroupId: number, signal: "SIGTERM" | "SIGKILL") {
       process.kill(-processGroupId, signal);
@@ -347,6 +361,10 @@ export async function startGovernedLocalProcess(
   let finalized = false;
   let timedOut = false;
   let supervisorFailed = false;
+  let supervisorFailureRecorded = false;
+  let processGroupId: number | null = null;
+  let processGroupAbsent = false;
+  let groupKillDelivered = false;
   let terminationPromise: Promise<void> | null = null;
   let runtimeTimer: unknown;
   let abortListener: (() => void) | null = null;
@@ -354,39 +372,118 @@ export async function startGovernedLocalProcess(
   let stderrPending = Promise.resolve();
 
   const cleanup = (): void => {
-    if (runtimeTimer !== undefined) clock.clearTimeout(runtimeTimer);
+    if (runtimeTimer !== undefined) {
+      clock.clearTimeout(runtimeTimer);
+      runtimeTimer = undefined;
+    }
     if (abortListener && options.signal) {
       options.signal.removeEventListener("abort", abortListener);
     }
     abortListener = null;
   };
 
-  const sendGroupSignal = async (
-    signal: "SIGTERM" | "SIGKILL",
+  type SupervisorFailureCode =
+    | "output_callback_failed"
+    | "signal_failed"
+    | "group_liveness_failed"
+    | "group_cleanup_unconfirmed"
+    | "descendant_cleanup_required";
+
+  const markSupervisorFailure = async (
+    code: SupervisorFailureCode,
+    stream?: "stdout" | "stderr",
   ): Promise<void> => {
-    if (
-      closed ||
-      !spawned ||
-      child.pid === undefined ||
-      child.exitCode !== null ||
-      child.signalCode !== null
-    ) {
-      return;
-    }
+    supervisorFailed = true;
+    if (supervisorFailureRecorded) return;
+    supervisorFailureRecorded = true;
     try {
-      adapter.killProcessGroup(child.pid, signal);
+      await record("supervisor_failed", {
+        code,
+        ...(stream === undefined ? {} : { stream }),
+      });
+    } catch {
+      sinkFailed = true;
+    }
+  };
+
+  const requireProcessGroupId = (): number => {
+    if (
+      processGroupId === null ||
+      !Number.isSafeInteger(processGroupId) ||
+      processGroupId <= 0 ||
+      processGroupId === process.pid
+    ) {
+      throw new RuntimeHostError("spawned process group is invalid");
+    }
+    return processGroupId;
+  };
+
+  const isProcessGroupPresent = async (): Promise<boolean> => {
+    if (processGroupAbsent) return false;
+    const groupId = requireProcessGroupId();
+    try {
+      if (adapter.isProcessGroupAlive(groupId)) return true;
+      processGroupAbsent = true;
+      return false;
     } catch (error) {
       const code =
         typeof error === "object" && error !== null && "code" in error
           ? (error as { code?: unknown }).code
           : undefined;
-      if (code === "ESRCH" || closed) return;
-      supervisorFailed = true;
-      try {
-        await record("supervisor_failed", { code: "signal_failed" });
-      } catch {
-        // Cleanup continues even when the receipt sink is the failing component.
+      if (code === "ESRCH") {
+        processGroupAbsent = true;
+        return false;
       }
+      await markSupervisorFailure("group_liveness_failed");
+      throw new RuntimeHostError(
+        code === "EPERM"
+          ? "process-group liveness probe was denied"
+          : "process-group liveness probe failed",
+      );
+    }
+  };
+
+  const waitForProcessGroupAbsence = async (
+    maximumWaitMs: number,
+  ): Promise<boolean> => {
+    let elapsed = 0;
+    while (await isProcessGroupPresent()) {
+      if (elapsed >= maximumWaitMs) return false;
+      const delay = Math.min(
+        options.runtimePolicy.processGroupPollIntervalMs,
+        maximumWaitMs - elapsed,
+      );
+      let timer: unknown;
+      try {
+        await new Promise<void>((resolve) => {
+          timer = clock.setTimeout(resolve, delay);
+        });
+      } finally {
+        if (timer !== undefined) clock.clearTimeout(timer);
+      }
+      elapsed += delay;
+    }
+    return true;
+  };
+
+  const sendGroupSignal = async (
+    signal: "SIGTERM" | "SIGKILL",
+  ): Promise<boolean> => {
+    if (processGroupAbsent || !spawned) return false;
+    const groupId = requireProcessGroupId();
+    try {
+      adapter.killProcessGroup(groupId, signal);
+      return true;
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (code === "ESRCH") {
+        processGroupAbsent = true;
+        return false;
+      }
+      await markSupervisorFailure("signal_failed");
       throw new RuntimeHostError("process-group signaling failed");
     }
   };
@@ -394,13 +491,18 @@ export async function startGovernedLocalProcess(
   const terminate = (reason: TerminationReason = "caller"): Promise<void> => {
     if (terminationPromise) return terminationPromise;
     terminationPromise = (async () => {
+      cleanup();
       if (!spawned && !closed) {
         await Promise.race([
           started.promise.catch(() => {}),
           rawClosed.promise,
         ]);
       }
-      if (closed || !spawned) return;
+      if (!spawned) return;
+      if (!(await isProcessGroupPresent())) {
+        await rawClosed.promise;
+        return;
+      }
       try {
         await record("termination_requested", { reason });
       } catch {
@@ -409,36 +511,45 @@ export async function startGovernedLocalProcess(
       try {
         await sendGroupSignal("SIGTERM");
       } catch {
-        // Escalation still runs so a supervision failure cannot abandon the group.
+        // Bounded escalation still runs so signaling failure cannot claim cleanup.
       }
-      let localGraceTimer: unknown;
-      try {
-        if (!rawCloseObserved) {
-          const graceElapsed = new Promise<void>((resolve) => {
-            if (rawCloseObserved) {
-              resolve();
-              return;
-            }
-            localGraceTimer = clock.setTimeout(
-              resolve,
-              options.runtimePolicy.terminationGraceMs,
-            );
-          });
-          await Promise.race([rawClosed.promise, graceElapsed]);
+      if (
+        !processGroupAbsent &&
+        !(await waitForProcessGroupAbsence(
+          options.runtimePolicy.terminationGraceMs,
+        ))
+      ) {
+        if (
+          rawCloseObserved ||
+          child.exitCode !== null ||
+          child.signalCode !== null
+        ) {
+          await markSupervisorFailure("descendant_cleanup_required");
         }
-      } finally {
-        if (localGraceTimer !== undefined) clock.clearTimeout(localGraceTimer);
-      }
-      if (!rawCloseObserved) {
+        let killDelivered = false;
         try {
-          await record("process_killed", { signal: "SIGKILL" });
+          killDelivered = await sendGroupSignal("SIGKILL");
         } catch {
-          supervisorFailed = true;
+          // Confirmation below remains authoritative and fails closed.
         }
-        try {
-          await sendGroupSignal("SIGKILL");
-        } catch {
-          // The final wait and fixed failure reporting remain deterministic.
+        if (killDelivered) {
+          groupKillDelivered = true;
+          try {
+            await record("process_killed", { signal: "SIGKILL" });
+          } catch {
+            supervisorFailed = true;
+          }
+        }
+        if (
+          !processGroupAbsent &&
+          !(await waitForProcessGroupAbsence(
+            options.runtimePolicy.killConfirmationMs,
+          ))
+        ) {
+          await markSupervisorFailure("group_cleanup_unconfirmed");
+          throw new RuntimeHostError(
+            "process-group absence confirmation timed out",
+          );
         }
       }
       await rawClosed.promise;
@@ -449,16 +560,7 @@ export async function startGovernedLocalProcess(
   const supervisorFailure = async (
     stream: "stdout" | "stderr",
   ): Promise<void> => {
-    if (supervisorFailed) return;
-    supervisorFailed = true;
-    try {
-      await record("supervisor_failed", {
-        code: "output_callback_failed",
-        stream,
-      });
-    } catch {
-      sinkFailed = true;
-    }
+    await markSupervisorFailure("output_callback_failed", stream);
     await terminate("supervisor_failure");
   };
 
@@ -539,11 +641,26 @@ export async function startGovernedLocalProcess(
   );
 
   child.once("spawn", () => {
+    const spawnedProcessGroupId = child.pid;
+    if (
+      spawnedProcessGroupId === undefined ||
+      !Number.isSafeInteger(spawnedProcessGroupId) ||
+      spawnedProcessGroupId <= 0 ||
+      spawnedProcessGroupId === process.pid
+    ) {
+      const error = new RuntimeHostError("spawned process group is invalid");
+      supervisorFailed = true;
+      started.reject(error);
+      started.promise.catch(() => {});
+      child.kill("SIGKILL");
+      return;
+    }
+    processGroupId = spawnedProcessGroupId;
     spawned = true;
     void record("process_started", {})
       .then(() => {
         started.resolve();
-        if (!closed) {
+        if (!closed && !terminationPromise) {
           runtimeTimer = clock.setTimeout(() => {
             if (closed || terminationPromise) return;
             timedOut = true;
@@ -553,7 +670,10 @@ export async function startGovernedLocalProcess(
               .catch(() => {
                 supervisorFailed = true;
               })
-              .then(() => terminate("timeout"));
+              .then(() => terminate("timeout"))
+              .catch(() => {
+                // The close/finalization path reports the fixed cleanup failure.
+              });
           }, options.runtimePolicy.maximumRuntimeMs);
         }
       })
@@ -617,7 +737,22 @@ export async function startGovernedLocalProcess(
     void (async () => {
       let result: ExecutionResult | undefined;
       await withWriterFinalization(async () => {
-        await Promise.all([stdoutPending, stderrPending, receiptQueue]);
+        await Promise.all([stdoutPending, stderrPending]);
+        if (groupKillDelivered && exitCode !== null) {
+          await markSupervisorFailure("descendant_cleanup_required");
+        }
+        if (await isProcessGroupPresent()) {
+          if (!groupKillDelivered) {
+            await markSupervisorFailure("descendant_cleanup_required");
+          }
+          await terminate("supervisor_failure");
+        } else if (terminationPromise) {
+          await terminationPromise;
+        }
+        if (await isProcessGroupPresent()) {
+          throw new RuntimeHostError("process-group cleanup was not confirmed");
+        }
+        await receiptQueue;
         const stdout = streamEvidence(stdoutBytes, stdoutHash);
         const stderr = streamEvidence(stderrBytes, stderrHash);
         const outcome = outcomeFor(

@@ -12,6 +12,10 @@ vi.mock(
 
 import manifestJson from "../../contracts/examples/agent-execution-manifest.principal-developer.json" with { type: "json" };
 import {
+  verifyLifecycleReceiptChain,
+  type LifecycleReceipt,
+} from "../../contracts/src/index.js";
+import {
   createNodeProcessAdapter,
   createOperatorEnvironmentPolicy,
   createPiLaunchPlan,
@@ -75,6 +79,8 @@ function runtime(overrides: Record<string, unknown> = {}) {
     policyId: "runtime-policy-test",
     maximumRuntimeMs: 2_000,
     terminationGraceMs: 40,
+    killConfirmationMs: 500,
+    processGroupPollIntervalMs: 5,
     maximumArgvCount: 128,
     maximumArgvBytes: 64_000,
     maximumEnvironmentEntries: 32,
@@ -116,16 +122,33 @@ function memorySink(): ReceiptSink & {
   };
 }
 
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function eventuallyNotRunning(pid: number): Promise<boolean> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
-    try {
-      process.kill(pid, 0);
-    } catch {
-      return true;
-    }
+    if (!isRunning(pid)) return true;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   return false;
+}
+
+function forceSignal(pid: number, signal: "SIGKILL"): void {
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    if (code !== "ESRCH") throw error;
+  }
 }
 
 describe("governed local process host", () => {
@@ -169,6 +192,8 @@ describe("governed local process host", () => {
   it("passes exact executable, argv, cwd, environment, and containment options to spawn", async () => {
     const expectedPlan = plan("success");
     const nodeAdapter = createNodeProcessAdapter();
+    const probedGroupIds: number[] = [];
+    let spawnedPid = 0;
     let captured:
       | {
           executable: string;
@@ -186,7 +211,13 @@ describe("governed local process host", () => {
         platform: "linux",
         spawn(executable, arguments_, options) {
           captured = { executable, arguments_: [...arguments_], options };
-          return nodeAdapter.spawn(executable, arguments_, options);
+          const child = nodeAdapter.spawn(executable, arguments_, options);
+          spawnedPid = child.pid ?? 0;
+          return child;
+        },
+        isProcessGroupAlive(processGroupId) {
+          probedGroupIds.push(processGroupId);
+          return nodeAdapter.isProcessGroupAlive(processGroupId);
         },
         killProcessGroup: nodeAdapter.killProcessGroup,
       },
@@ -206,6 +237,9 @@ describe("governed local process host", () => {
       PATH: dirname(process.execPath),
       ...expectedPlan.environment,
     });
+    expect(spawnedPid).toBeGreaterThan(0);
+    expect(spawnedPid).not.toBe(process.pid);
+    expect(probedGroupIds).toEqual([spawnedPid]);
   });
 
   it.each([
@@ -277,11 +311,23 @@ describe("governed local process host", () => {
     expect(Object.isFrozen(environmentPolicy)).toBe(true);
     expect(Object.isFrozen(environmentPolicy.names)).toBe(true);
     expect(Object.isFrozen(runtimePolicy)).toBe(true);
+    expect(runtimePolicy.killConfirmationMs).toBe(500);
+    expect(runtimePolicy.processGroupPollIntervalMs).toBe(5);
     expect(() =>
       Object.assign(environmentPolicy as unknown as Record<string, unknown>, {
         policyId: "forged",
       }),
     ).toThrow(TypeError);
+  });
+
+  it.each([
+    ["missing kill confirmation", { killConfirmationMs: undefined }],
+    ["unbounded kill confirmation", { killConfirmationMs: 60_001 }],
+    ["zero kill confirmation", { killConfirmationMs: 0 }],
+    ["unbounded poll interval", { processGroupPollIntervalMs: 1_001 }],
+    ["zero poll interval", { processGroupPollIntervalMs: 0 }],
+  ])("rejects a %s runtime policy", (_label, overrides) => {
+    expect(() => runtime(overrides)).toThrow(RuntimeHostError);
   });
 
   it("fails closed off Linux and on bounded argv overflow", async () => {
@@ -299,6 +345,9 @@ describe("governed local process host", () => {
           platform: "darwin",
           spawn() {
             throw new Error("must not spawn");
+          },
+          isProcessGroupAlive() {
+            return false;
           },
           killProcessGroup() {},
         },
@@ -353,27 +402,131 @@ describe("governed local process host", () => {
     ]);
   });
 
+  it("waits for a SIGTERM-surviving descendant after its group leader exits", async () => {
+    const sink = memorySink();
+    const nodeAdapter = createNodeProcessAdapter();
+    const signals: Array<{ signal: string; leaderClosed: boolean }> = [];
+    let leaderPid = 0;
+    let descendantPid = 0;
+    let leaderClosed = false;
+    const handle = await startGovernedLocalProcess({
+      plan: plan("leader-exit-tree"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime({ terminationGraceMs: 20 }),
+      receiptSink: sink,
+      executionIdSource: () => "runtime-execution-leader-exit-tree",
+      processAdapter: {
+        platform: "linux",
+        spawn(executable, arguments_, options) {
+          const child = nodeAdapter.spawn(executable, arguments_, options);
+          leaderPid = child.pid ?? 0;
+          child.once("close", () => {
+            leaderClosed = true;
+          });
+          return child;
+        },
+        isProcessGroupAlive: nodeAdapter.isProcessGroupAlive,
+        killProcessGroup(processGroupId, signal) {
+          signals.push({ signal, leaderClosed });
+          nodeAdapter.killProcessGroup(processGroupId, signal);
+        },
+      },
+      onStdout(chunk) {
+        descendantPid = Number(Buffer.from(chunk).toString().trim());
+      },
+    });
+
+    try {
+      await handle.started;
+      while (descendantPid === 0)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+      await handle.terminate("caller");
+      const result = await handle.exit;
+      const receipts = sink.lines.map((line) => JSON.parse(line));
+
+      expect(result.outcome).toBe("supervisor_failed");
+      expect(descendantPid).toBeGreaterThan(0);
+      expect(isRunning(descendantPid)).toBe(false);
+      expect(signals).toContainEqual({
+        signal: "SIGTERM",
+        leaderClosed: false,
+      });
+      expect(signals).toContainEqual({ signal: "SIGKILL", leaderClosed: true });
+      expect(receipts.map((receipt) => receipt.eventType)).toEqual([
+        "launch_requested",
+        "process_started",
+        "termination_requested",
+        "supervisor_failed",
+        "process_killed",
+        "process_exited",
+      ]);
+      expect(
+        verifyLifecycleReceiptChain(receipts as LifecycleReceipt[]).valid,
+      ).toBe(true);
+      expect(sink.closeCount).toBe(1);
+    } finally {
+      if (leaderPid > 0) forceSignal(-leaderPid, "SIGKILL");
+      if (descendantPid > 0 && isRunning(descendantPid))
+        forceSignal(descendantPid, "SIGKILL");
+      if (descendantPid > 0) await eventuallyNotRunning(descendantPid);
+    }
+  });
+
   it("terminates a child-process tree idempotently without leaving the child", async () => {
+    const nodeAdapter = createNodeProcessAdapter();
+    const signals: Array<{ signal: string; leaderClosed: boolean }> = [];
+    let leaderPid = 0;
     let childPid = 0;
+    let leaderClosed = false;
     const handle = await startGovernedLocalProcess({
       plan: plan("tree"),
       environmentPolicy: environment(),
       runtimePolicy: runtime({ terminationGraceMs: 20 }),
       receiptSink: memorySink(),
       executionIdSource: () => "runtime-execution-tree",
+      processAdapter: {
+        platform: "linux",
+        spawn(executable, arguments_, options) {
+          const child = nodeAdapter.spawn(executable, arguments_, options);
+          leaderPid = child.pid ?? 0;
+          child.once("close", () => {
+            leaderClosed = true;
+          });
+          return child;
+        },
+        isProcessGroupAlive: nodeAdapter.isProcessGroupAlive,
+        killProcessGroup(processGroupId, signal) {
+          signals.push({ signal, leaderClosed });
+          nodeAdapter.killProcessGroup(processGroupId, signal);
+        },
+      },
       onStdout(chunk) {
         childPid = Number(Buffer.from(chunk).toString().trim());
       },
     });
-    await handle.started;
-    while (childPid === 0)
-      await new Promise((resolve) => setTimeout(resolve, 5));
+    try {
+      await handle.started;
+      while (childPid === 0)
+        await new Promise((resolve) => setTimeout(resolve, 5));
 
-    await Promise.all([handle.terminate("caller"), handle.terminate("caller")]);
-    await handle.exit;
+      await Promise.all([
+        handle.terminate("caller"),
+        handle.terminate("caller"),
+      ]);
+      await handle.exit;
 
-    expect(childPid).toBeGreaterThan(0);
-    expect(await eventuallyNotRunning(childPid)).toBe(true);
+      expect(childPid).toBeGreaterThan(0);
+      expect(await eventuallyNotRunning(childPid)).toBe(true);
+      expect(signals).toContainEqual({
+        signal: "SIGKILL",
+        leaderClosed: false,
+      });
+    } finally {
+      if (leaderPid > 0) forceSignal(-leaderPid, "SIGKILL");
+      if (childPid > 0 && isRunning(childPid)) forceSignal(childPid, "SIGKILL");
+      if (childPid > 0) await eventuallyNotRunning(childPid);
+    }
   });
 
   it("uses the injected clock and clears runtime timers", async () => {
@@ -411,6 +564,167 @@ describe("governed local process host", () => {
     ).toBe(true);
   });
 
+  it("stops probing and signaling permanently after confirmed group absence", async () => {
+    const nodeAdapter = createNodeProcessAdapter();
+    const signals: string[] = [];
+    let probes = 0;
+    const handle = await startGovernedLocalProcess({
+      plan: plan("delay", "20"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime(),
+      receiptSink: memorySink(),
+      executionIdSource: () => "runtime-execution-absence-sticky",
+      processAdapter: {
+        platform: "linux",
+        spawn: nodeAdapter.spawn,
+        isProcessGroupAlive() {
+          probes += 1;
+          return false;
+        },
+        killProcessGroup(_processGroupId, signal) {
+          signals.push(signal);
+        },
+      },
+    });
+
+    await handle.started;
+    await handle.terminate();
+    expect((await handle.exit).outcome).toBe("succeeded");
+    expect(probes).toBe(1);
+    expect(signals).toEqual([]);
+  });
+
+  it("observes group absence during grace polling without escalating", async () => {
+    const nodeAdapter = createNodeProcessAdapter();
+    const signals: string[] = [];
+    let probes = 0;
+    const handle = await startGovernedLocalProcess({
+      plan: plan("delay", "10000"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime({ terminationGraceMs: 20 }),
+      receiptSink: memorySink(),
+      executionIdSource: () => "runtime-execution-absence-during-grace",
+      processAdapter: {
+        platform: "linux",
+        spawn: nodeAdapter.spawn,
+        isProcessGroupAlive() {
+          probes += 1;
+          return probes === 1;
+        },
+        killProcessGroup(processGroupId, signal) {
+          signals.push(signal);
+          nodeAdapter.killProcessGroup(processGroupId, signal);
+        },
+      },
+    });
+
+    await handle.started;
+    await handle.terminate();
+    await handle.exit;
+    expect(signals).toEqual(["SIGTERM"]);
+    expect(probes).toBe(2);
+  });
+
+  it("fails closed on bounded SIGKILL confirmation and clears every poll timer", async () => {
+    const nodeAdapter = createNodeProcessAdapter();
+    const timers = new Set<object>();
+    const signals: string[] = [];
+    let leaderPid = 0;
+    const handle = await startGovernedLocalProcess({
+      plan: plan("delay", "10000"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime({
+        terminationGraceMs: 2,
+        killConfirmationMs: 3,
+        processGroupPollIntervalMs: 1,
+      }),
+      receiptSink: memorySink(),
+      executionIdSource: () => "runtime-execution-kill-confirmation-timeout",
+      processAdapter: {
+        platform: "linux",
+        spawn(executable, arguments_, options) {
+          const child = nodeAdapter.spawn(executable, arguments_, options);
+          leaderPid = child.pid ?? 0;
+          return child;
+        },
+        isProcessGroupAlive() {
+          return true;
+        },
+        killProcessGroup(_processGroupId, signal) {
+          signals.push(signal);
+        },
+      },
+      clock: {
+        now: () => "2026-08-23T12:00:00.000Z",
+        setTimeout(callback, milliseconds) {
+          const timer = {};
+          if (milliseconds < 100) {
+            timers.add(timer);
+            callback();
+          }
+          return timer;
+        },
+        clearTimeout(timer) {
+          timers.delete(timer as object);
+        },
+      },
+    });
+
+    await handle.started;
+    try {
+      await expect(handle.terminate()).rejects.toThrow(
+        "process-group absence confirmation timed out",
+      );
+      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(timers.size).toBe(0);
+    } finally {
+      if (leaderPid > 0) forceSignal(-leaderPid, "SIGKILL");
+    }
+    await expect(handle.exit).rejects.toThrow(
+      "process-group absence confirmation timed out",
+    );
+    expect(timers.size).toBe(0);
+  });
+
+  it.each([
+    ["EPERM", "process-group liveness probe was denied"],
+    ["EIO", "process-group liveness probe failed"],
+  ])("fails closed on a %s group-liveness probe", async (code, diagnostic) => {
+    const nodeAdapter = createNodeProcessAdapter();
+    let leaderPid = 0;
+    let signals = 0;
+    const sink = memorySink();
+    const handle = await startGovernedLocalProcess({
+      plan: plan("delay", "10000"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime(),
+      receiptSink: sink,
+      executionIdSource: () => `runtime-execution-probe-${code.toLowerCase()}`,
+      processAdapter: {
+        platform: "linux",
+        spawn(executable, arguments_, options) {
+          const child = nodeAdapter.spawn(executable, arguments_, options);
+          leaderPid = child.pid ?? 0;
+          return child;
+        },
+        isProcessGroupAlive() {
+          throw Object.assign(new Error(marker), { code });
+        },
+        killProcessGroup() {
+          signals += 1;
+        },
+      },
+    });
+
+    await handle.started;
+    await expect(handle.terminate()).rejects.toThrow(diagnostic);
+    expect(signals).toBe(0);
+    if (leaderPid > 0) forceSignal(-leaderPid, "SIGKILL");
+    await expect(handle.exit).rejects.toThrow(diagnostic);
+    expect(sink.lines.join("\n")).not.toContain(marker);
+    expect(sink.closeCount).toBe(1);
+  });
+
   it("reports a normal non-zero exit", async () => {
     const handle = await startGovernedLocalProcess({
       plan: plan("nonzero", "9"),
@@ -443,6 +757,76 @@ describe("governed local process host", () => {
     expect(result.outcome).toBe("signaled");
     expect(add).toHaveBeenCalledTimes(1);
     expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it("converges simultaneous abort and caller termination on exactly one cleanup", async () => {
+    const controller = new AbortController();
+    const sink = memorySink();
+    let ready = false;
+    const handle = await startGovernedLocalProcess({
+      plan: plan("ignore-term-ready"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime({ terminationGraceMs: 10 }),
+      receiptSink: sink,
+      executionIdSource: () => "runtime-execution-abort-caller-race",
+      signal: controller.signal,
+      onStdout() {
+        ready = true;
+      },
+    });
+    await handle.started;
+    while (!ready) await new Promise((resolve) => setTimeout(resolve, 5));
+
+    controller.abort();
+    await Promise.all([handle.terminate("caller"), handle.terminate("caller")]);
+    await handle.exit;
+
+    const events = sink.lines.map((line) => JSON.parse(line).eventType);
+    expect(
+      events.filter((event) => event === "termination_requested"),
+    ).toHaveLength(1);
+    expect(events.filter((event) => event === "process_killed")).toHaveLength(
+      1,
+    );
+    expect(sink.closeCount).toBe(1);
+  });
+
+  it("clears the maximum-runtime timer as soon as termination owns cleanup", async () => {
+    const timers = new Map<NodeJS.Timeout, number>();
+    let ready = false;
+    const handle = await startGovernedLocalProcess({
+      plan: plan("ignore-term-ready"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime({
+        maximumRuntimeMs: 300_000,
+        terminationGraceMs: 10,
+      }),
+      receiptSink: memorySink(),
+      executionIdSource: () => "runtime-execution-termination-clears-runtime",
+      clock: {
+        now: () => "2026-08-23T12:00:00.000Z",
+        setTimeout(callback, milliseconds) {
+          const timer = setTimeout(callback, milliseconds);
+          timers.set(timer, milliseconds);
+          return timer;
+        },
+        clearTimeout(timer) {
+          clearTimeout(timer as NodeJS.Timeout);
+          timers.delete(timer as NodeJS.Timeout);
+        },
+      },
+      onStdout() {
+        ready = true;
+      },
+    });
+    await handle.started;
+    while (!ready) await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const termination = handle.terminate();
+    expect([...timers.values()]).not.toContain(300_000);
+    await termination;
+    await handle.exit;
+    expect(timers.size).toBe(0);
   });
 
   it("does not allocate a grace timer after raw close wins termination receipt recording", async () => {
@@ -532,6 +916,60 @@ describe("governed local process host", () => {
     expect(closeCount).toBe(1);
   });
 
+  it("finishes descendant cleanup when the process_killed receipt append fails", async () => {
+    const nodeAdapter = createNodeProcessAdapter();
+    let leaderPid = 0;
+    let descendantPid = 0;
+    let closeCount = 0;
+    const handle = await startGovernedLocalProcess({
+      plan: plan("leader-exit-tree"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime({ terminationGraceMs: 20 }),
+      receiptSink: {
+        open() {
+          return {
+            append(line) {
+              if (JSON.parse(line).eventType === "process_killed")
+                throw new Error(marker);
+            },
+            close() {
+              closeCount += 1;
+            },
+          };
+        },
+      },
+      executionIdSource: () => "runtime-execution-descendant-receipt-failure",
+      processAdapter: {
+        platform: "linux",
+        spawn(executable, arguments_, options) {
+          const child = nodeAdapter.spawn(executable, arguments_, options);
+          leaderPid = child.pid ?? 0;
+          return child;
+        },
+        isProcessGroupAlive: nodeAdapter.isProcessGroupAlive,
+        killProcessGroup: nodeAdapter.killProcessGroup,
+      },
+      onStdout(chunk) {
+        descendantPid = Number(Buffer.from(chunk).toString().trim());
+      },
+    });
+
+    try {
+      await handle.started;
+      while (descendantPid === 0)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      await handle.terminate();
+      expect(isRunning(descendantPid)).toBe(false);
+      await expect(handle.exit).rejects.toThrow("receipt sink failed");
+      expect(closeCount).toBe(1);
+    } finally {
+      if (leaderPid > 0) forceSignal(-leaderPid, "SIGKILL");
+      if (descendantPid > 0 && isRunning(descendantPid))
+        forceSignal(descendantPid, "SIGKILL");
+      if (descendantPid > 0) await eventuallyNotRunning(descendantPid);
+    }
+  });
+
   it("retains the primary spawn diagnostic when writer close also fails", async () => {
     let closeCount = 0;
     const handle = await startGovernedLocalProcess({
@@ -583,6 +1021,7 @@ describe("governed local process host", () => {
           pid = child.pid ?? 0;
           return child;
         },
+        isProcessGroupAlive: nodeAdapter.isProcessGroupAlive,
         killProcessGroup: nodeAdapter.killProcessGroup,
       },
     });

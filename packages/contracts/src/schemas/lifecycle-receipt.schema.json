@@ -224,7 +224,10 @@
           "enum": [
             "output_callback_failed",
             "receipt_sink_failed",
-            "signal_failed"
+            "signal_failed",
+            "group_liveness_failed",
+            "group_cleanup_unconfirmed",
+            "descendant_cleanup_required"
           ]
         },
         "stream": { "enum": ["stdout", "stderr"] }

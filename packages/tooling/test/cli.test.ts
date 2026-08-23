@@ -53,6 +53,8 @@ function setup(mode = "success", value = "0") {
         policyId: "cli-runtime",
         maximumRuntimeMs: 2000,
         terminationGraceMs: 50,
+        killConfirmationMs: 500,
+        processGroupPollIntervalMs: 5,
         maximumArgvCount: 128,
         maximumArgvBytes: 64000,
         maximumEnvironmentEntries: 32,

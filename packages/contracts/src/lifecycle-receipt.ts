@@ -44,7 +44,12 @@ export type LifecycleEventPayload =
   | { readonly signal: "SIGKILL" }
   | {
       readonly code:
-        "output_callback_failed" | "receipt_sink_failed" | "signal_failed";
+        | "output_callback_failed"
+        | "receipt_sink_failed"
+        | "signal_failed"
+        | "group_liveness_failed"
+        | "group_cleanup_unconfirmed"
+        | "descendant_cleanup_required";
       readonly stream?: "stdout" | "stderr";
     };
 
@@ -310,8 +315,7 @@ function validExitOutcome(
       hasSignal &&
       !evidence.timedOut &&
       !evidence.supervisorFailed &&
-      (payload.signal !== "SIGKILL" || evidence.killed) &&
-      (!evidence.killed || payload.signal === "SIGKILL")
+      (payload.signal !== "SIGKILL" || evidence.killed)
     );
   }
   if (payload.outcome === "timed_out") {
@@ -319,8 +323,7 @@ function validExitOutcome(
       !hasExitCode &&
       hasSignal &&
       evidence.timedOut &&
-      (payload.signal !== "SIGKILL" || evidence.killed) &&
-      (!evidence.killed || payload.signal === "SIGKILL")
+      (payload.signal !== "SIGKILL" || evidence.killed)
     );
   }
   return evidence.supervisorFailed;

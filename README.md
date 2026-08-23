@@ -98,7 +98,11 @@ The runtime exports these primary APIs from `@scrum-pi-team-skills/runtime`:
 
 Core runtime code never reads or enumerates `process.env`. The operator supplies an explicit baseline whose names exactly match an allowlist. Values, including legitimate model-provider credentials, are opaque secrets: they are passed only to the exact child environment and are never returned, logged, hashed, persisted, or included in receipts. Fixed launch-plan additions are validated after the baseline and any name collision is rejected rather than overwritten. Names and values containing NUL, invalid environment names, and configured size-limit overflow fail closed.
 
-Version 1 supports Linux/WSL only. It uses Node `spawn` with the exact executable, argv, cwd, and constructed environment, with `shell:false`. `detached:true` is used specifically to create a dedicated POSIX process group; the child is **not** `unref`'ed or backgrounded, so the supervisor retains pipes and wait ownership. Caller termination, abort, timeout, or forwarded CLI SIGINT/SIGTERM sends SIGTERM to the live handle's process group, waits the configured grace duration, sends SIGKILL if the group is still live, and awaits final exit. There is deliberately no cross-process kill-by-PID command.
+Version 1 supports Linux/WSL only. It uses Node `spawn` with the exact executable, argv, cwd, and constructed environment, with `shell:false`. `detached:true` is used specifically to create a dedicated POSIX process group; the child is **not** `unref`'ed or backgrounded, so the supervisor retains pipes and wait ownership. Successful spawn captures the positive child PID as the dedicated PGID in the live in-memory handle; it rejects the supervisor PID and never accepts a caller-supplied PID or PGID. Direct-child close and process-group absence are separate states. The default adapter probes `kill(-pgid, 0)`: ESRCH confirms absence, success confirms presence, and EPERM or unexpected errors fail closed with fixed diagnostics.
+
+Caller termination, abort, timeout, forwarded CLI SIGINT/SIGTERM, or descendants surviving leader close use one idempotent sequence: probe presence, send group SIGTERM only when present, monitor presence through the bounded grace period, send group SIGKILL when still present, and poll through the separately bounded `killConfirmationMs` using `processGroupPollIntervalMs`. Terminal receipt creation, authenticated anchor creation, writer close, `terminate()`, and `exit` do not complete successfully until the group is confirmed absent. A leader that otherwise exits cleanly but requires descendant containment is reported as `supervisor_failed`, with safe `descendant_cleanup_required` and `process_killed` lifecycle evidence rather than an ordinary success. There is deliberately no cross-process kill-by-PID command.
+
+The first confirmed absence is sticky and permanently disables further signaling, so long grace or confirmation bounds cannot retain the host after disappearance. POSIX does not provide an unforgeable process-group handle: PGID reuse between a presence result and the next signal remains a residual kernel identity race, and orphan/zombie reaping can delay ESRCH until the OS reports the group absent. The bounded confirmation fails closed rather than claiming cleanup when absence cannot be established.
 
 Stdout and stderr are streamed to callbacks with backpressure rather than buffered. Receipts persist only incremental byte counts and SHA-256 digests. Callback and receipt-sink failures become fixed supervisor failures while process-group cleanup continues.
 
@@ -123,7 +127,7 @@ node packages/tooling/dist/cli.js run --manifest ./operator/manifest.json --oper
 node packages/tooling/dist/cli.js inspect --execution-id runtime-EXAMPLE --operator-config ./operator/runtime.json
 ```
 
-Operator configuration supplies a `trustedLaunchPolicy`, bounded `runtimePolicy`, and an environment block such as:
+Operator configuration supplies a `trustedLaunchPolicy`, bounded `runtimePolicy` (including `terminationGraceMs`, `killConfirmationMs`, and `processGroupPollIntervalMs`), and an environment block such as:
 
 ```json
 {

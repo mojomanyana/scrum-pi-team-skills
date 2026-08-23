@@ -176,6 +176,32 @@ describe("spts.lifecycle-receipt", () => {
     expect(verifyLifecycleReceiptChain(missing).valid).toBe(false);
   });
 
+  it("keeps direct-child signal state separate from process-group kill evidence", () => {
+    const receipts = structuredClone(example) as LifecycleReceipt[];
+    const termination = structuredClone(receipts[1]!);
+    (termination as { sequence: number }).sequence = 3;
+    (termination as { eventType: string }).eventType = "termination_requested";
+    (termination as { payload: unknown }).payload = { reason: "caller" };
+    const killed = structuredClone(receipts[1]!);
+    (killed as { sequence: number }).sequence = 4;
+    (killed as { eventType: string }).eventType = "process_killed";
+    (killed as { payload: unknown }).payload = { signal: "SIGKILL" };
+    const exit = receipts.at(-1)!;
+    (exit as { sequence: number }).sequence = 5;
+    const payload = exit.payload as {
+      exitCode: number | null;
+      signal: string | null;
+      outcome: string;
+    };
+    payload.exitCode = null;
+    payload.signal = "SIGTERM";
+    payload.outcome = "signaled";
+    receipts.splice(2, 0, termination, killed);
+    rehash(receipts);
+
+    expect(verifyLifecycleReceiptChain(receipts).valid).toBe(true);
+  });
+
   it.each([
     "2026-02-30T12:00:00.000Z",
     "2026-08-23T12:00:00Z",
