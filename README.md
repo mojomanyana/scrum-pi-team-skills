@@ -93,7 +93,8 @@ The runtime exports these primary APIs from `@scrum-pi-team-skills/runtime`:
 - `createOperatorEnvironmentPolicy({ policyId, baseline, allowlist })` validates, copies, and freezes operator-owned environment authority while keeping all values in private storage;
 - `createRuntimePolicy(...)` issues immutable bounded runtime limits;
 - `startGovernedLocalProcess(...)` returns a live `SupervisedExecution` with `started`, `exit`, and idempotent `terminate()` lifecycles;
-- `createLocalFilesystemReceiptSink({ root })` and `inspectLifecycleReceiptFile(path)` write and verify one execution chain.
+- `createReceiptAuthenticator({ authenticatorId, key })` copies at least 32 key bytes into private factory-issued authority;
+- `createLocalFilesystemReceiptSink({ trustedParent, authenticator })` and `inspectLifecycleReceipts({ trustedParent, executionId, authenticator })` write and authenticate one execution chain.
 
 Core runtime code never reads or enumerates `process.env`. The operator supplies an explicit baseline whose names exactly match an allowlist. Values, including legitimate model-provider credentials, are opaque secrets: they are passed only to the exact child environment and are never returned, logged, hashed, persisted, or included in receipts. Fixed launch-plan additions are validated after the baseline and any name collision is rejected rather than overwritten. Names and values containing NUL, invalid environment names, and configured size-limit overflow fail closed.
 
@@ -103,17 +104,13 @@ Stdout and stderr are streamed to callbacks with backpressure rather than buffer
 
 ### Lifecycle receipts
 
-`packages/contracts/src/schemas/lifecycle-receipt.schema.json` defines `spts.lifecycle-receipt` version `1.0.0`; the matching TypeScript types, validator, canonical serializer, digest function, chain verifier, and a successful example are exported by `packages/contracts`. Each execution is an append-only JSONL hash chain containing sequence, injected ISO timestamp, runtime execution identity, Paca/manifest correlation, plan digest, launch/environment/runtime policy identifiers, safe event payload, and previous/current receipt digests. Events cover launch request, process start, termination request, exit, spawn failure, timeout, forced kill, and supervisor failure. A complete chain must end in `process_exited` or startup `process_failed`, allowing deterministic detection of contract-level truncation.
+`packages/contracts/src/schemas/lifecycle-receipt.schema.json` defines `spts.lifecycle-receipt/1.0.0`. Its canonical SHA-256 JSONL chain remains ordering and corruption evidence. The authoritative verifier requires `launch_requested` first, the applicable start/termination/timeout/escalation predecessors, exactly one terminal event, contiguous sequences, constant execution/plan/policy identity, canonical UTC timestamps with milliseconds, nondecreasing time, and consistent outcome/exit-code/signal evidence.
 
-No receipt contains environment values, raw output, prompts, credentials, arbitrary exception messages, or configuration/file contents. The local sink creates its root with mode `0700`, creates one execution file exclusively with mode `0600`, appends without recursive deletion, and refuses an existing receipt path or symlink.
+`packages/contracts/src/schemas/lifecycle-receipt-anchor.schema.json` separately defines `spts.lifecycle-receipt-anchor/1.0.0`, avoiding digest circularity. The terminal anchor HMAC covers its contract/version, execution ID, receipt count, terminal receipt digest, plan digest, environment/runtime policy IDs, and non-secret authenticator ID. Inspection requires both the chain and a valid HMAC-SHA256 anchor, so chain modification plus complete rehashing, reorder, insertion, deletion, terminal truncation, missing or modified anchors, and wrong keys fail.
 
-For the private CLI, the receipt root is selected in this order:
+No receipt or anchor contains environment values, authentication keys, raw output, prompts, credentials, arbitrary exception messages, or configuration/file contents. Factory-issued authenticators copy at least 32 bytes into private storage; APIs expose only the immutable non-secret authenticator ID. Tags use timing-safe comparison, and temporary decoded buffers are zeroed where practical. Operator key provisioning and rotation remain operator responsibilities. JavaScript cannot reliably erase the original immutable environment string used by the CLI, so operators should minimize that process lifetime and environment exposure.
 
-1. explicit `receiptRoot` in operator configuration;
-2. `$XDG_STATE_HOME/scrum-pi-team-skills/receipts`;
-3. `$HOME/.local/state/scrum-pi-team-skills/receipts`.
-
-Only the named `XDG_STATE_HOME` and `HOME` entries are read for this fallback; the shell environment is never enumerated.
+The filesystem API accepts an existing absolute, lexically normalized trusted parent, not an arbitrary receipt/file path. It rejects dot/dot-dot/NUL, symlinked components, normalized mismatches, non-Linux operation, and parents not owned by the process uid with mode `0700`. It exclusively creates one mode-`0700` execution child and mode-`0600` receipt/anchor files, uses `O_NOFOLLOW` where available, compares opened descriptor identity, and never recursively deletes storage. Appends write the complete UTF-8 line with EINTR/short-write handling and synchronization; zero, invalid, or failed progress poisons and closes the writer. Replacement of an operator-owned trusted parent by the same privileged owner is outside this process-local boundary and requires stronger OS-level directory-handle/sandbox controls.
 
 ### Private operator CLI
 
@@ -123,7 +120,7 @@ After `npm run build`:
 node packages/tooling/dist/cli.js --help
 node packages/tooling/dist/cli.js plan --manifest ./operator/manifest.json --operator-config ./operator/runtime.json
 node packages/tooling/dist/cli.js run --manifest ./operator/manifest.json --operator-config ./operator/runtime.json
-node packages/tooling/dist/cli.js inspect --receipt-file /home/operator/.local/state/scrum-pi-team-skills/receipts/runtime-EXAMPLE.jsonl
+node packages/tooling/dist/cli.js inspect --execution-id runtime-EXAMPLE --operator-config ./operator/runtime.json
 ```
 
 Operator configuration supplies a `trustedLaunchPolicy`, bounded `runtimePolicy`, and an environment block such as:
@@ -134,11 +131,15 @@ Operator configuration supplies a `trustedLaunchPolicy`, bounded `runtimePolicy`
     "policyId": "operator-environment-v1",
     "importNames": ["PATH", "MODEL_PROVIDER_API_KEY"]
   },
-  "receiptRoot": "/home/operator/.local/state/scrum-pi-team-skills/receipts"
+  "trustedReceiptParent": "/home/operator/.local/state/scrum-pi-team-skills/receipts",
+  "authentication": {
+    "authenticatorId": "operator-receipts-v1",
+    "keyEnvironmentVariable": "SPTS_RECEIPT_AUTH_KEY"
+  }
 }
 ```
 
-The CLI adapter reads only the explicitly listed shell names; values do not belong in this JSON. `plan` prints a redacted object marked `"executableAuthority": false`. `run` stays foregrounded, streams output without persistence, and forwards SIGINT/SIGTERM through its live handle. Exit codes are stable: `0` success, `2` usage, `3` validation/storage failure, `4` invalid inspected chain, `10` child non-zero, `11` signal exit, `12` timeout, and `13` spawn/supervisor failure. The CLI performs no implicit Paca or network call.
+The CLI adapter reads only the explicitly listed environment names and never enumerates `process.env`; values do not belong in this JSON. For `run` and `inspect`, it additionally reads only the single configured authentication-key variable, requires canonical base64 decoding to at least 32 bytes, never prints it, and uses one fixed redacted failure diagnostic. `plan` does not import the key and prints a redacted object marked `"executableAuthority": false`. `run` stays foregrounded, streams output without persistence, and forwards SIGINT/SIGTERM through its live handle. Exit codes are stable: `0` success, `2` usage, `3` validation/storage failure, `4` invalid inspected chain, `10` child non-zero, `11` signal exit, `12` timeout, and `13` spawn/supervisor failure. The CLI performs no implicit Paca or network call.
 
 Automated tests launch only repository-controlled fixture processes. Launching real Pi, including a smoke test, requires separate stakeholder approval and is not part of normal validation. ACP bridge / `paca-acp-bridge` integration and Paca mutation remain explicitly unimplemented.
 

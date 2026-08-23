@@ -85,8 +85,12 @@ function runtime(overrides: Record<string, unknown> = {}) {
   });
 }
 
-function memorySink(): ReceiptSink & { lines: string[]; closed: boolean } {
-  const state = { lines: [] as string[], closed: false };
+function memorySink(): ReceiptSink & {
+  lines: string[];
+  closed: boolean;
+  closeCount: number;
+} {
+  const state = { lines: [] as string[], closed: false, closeCount: 0 };
   return {
     ...state,
     async open() {
@@ -96,6 +100,7 @@ function memorySink(): ReceiptSink & { lines: string[]; closed: boolean } {
         },
         close() {
           state.closed = true;
+          state.closeCount += 1;
         },
       };
     },
@@ -104,6 +109,9 @@ function memorySink(): ReceiptSink & { lines: string[]; closed: boolean } {
     },
     get closed() {
       return state.closed;
+    },
+    get closeCount() {
+      return state.closeCount;
     },
   };
 }
@@ -146,6 +154,7 @@ describe("governed local process host", () => {
     expect(Buffer.concat(stdout).toString()).toBe("fixture-stdout");
     expect(Buffer.concat(stderr).toString()).toBe("fixture-stderr");
     expect(sink.closed).toBe(true);
+    expect(sink.closeCount).toBe(1);
     expect(sink.lines.join("\n")).not.toContain(marker);
     const receipts = sink.lines.map(
       (line) => JSON.parse(line) as { eventType: string },
@@ -333,6 +342,7 @@ describe("governed local process host", () => {
 
     const result = await handle.exit;
     expect(result.outcome).toBe("timed_out");
+    expect(sink.closeCount).toBe(1);
     expect(sink.lines.map((line) => JSON.parse(line).eventType)).toEqual([
       "launch_requested",
       "process_started",
@@ -435,6 +445,117 @@ describe("governed local process host", () => {
     expect(remove).toHaveBeenCalledTimes(1);
   });
 
+  it("does not allocate a grace timer after raw close wins termination receipt recording", async () => {
+    const timers = new Set<object>();
+    const sink = memorySink();
+    sink.open = async () => ({
+      async append(line) {
+        sink.lines.push(line);
+        if (JSON.parse(line).eventType === "termination_requested") {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      },
+      close() {},
+    });
+    const handle = await startGovernedLocalProcess({
+      plan: plan("delay", "10"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime({ terminationGraceMs: 300_000 }),
+      receiptSink: sink,
+      executionIdSource: () => "runtime-execution-close-race",
+      clock: {
+        now: () => "2026-08-23T12:00:00.000Z",
+        setTimeout() {
+          const timer = {};
+          timers.add(timer);
+          return timer;
+        },
+        clearTimeout(timer) {
+          timers.delete(timer as object);
+        },
+      },
+    });
+    await handle.started;
+    await Promise.all([handle.terminate(), handle.exit]);
+    expect(timers.size).toBe(0);
+  });
+
+  it("closes the receipt writer exactly once when launch_requested append fails", async () => {
+    let closeCount = 0;
+    await expect(
+      startGovernedLocalProcess({
+        plan: plan("success"),
+        environmentPolicy: environment(),
+        runtimePolicy: runtime(),
+        receiptSink: {
+          open() {
+            return {
+              append() {
+                throw new Error(marker);
+              },
+              close() {
+                closeCount += 1;
+              },
+            };
+          },
+        },
+        executionIdSource: () => "runtime-execution-launch-receipt-failure",
+      }),
+    ).rejects.toThrow("receipt sink failed");
+    expect(closeCount).toBe(1);
+  });
+
+  it("closes the receipt writer exactly once after a post-open append failure", async () => {
+    let appendCount = 0;
+    let closeCount = 0;
+    const handle = await startGovernedLocalProcess({
+      plan: plan("ignore-term"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime({ terminationGraceMs: 20 }),
+      receiptSink: {
+        open() {
+          return {
+            append() {
+              appendCount += 1;
+              if (appendCount === 2) throw new Error(marker);
+            },
+            close() {
+              closeCount += 1;
+            },
+          };
+        },
+      },
+      executionIdSource: () => "runtime-execution-close-on-failure",
+    });
+    await expect(handle.started).rejects.toThrow("receipt sink failed");
+    await expect(handle.exit).rejects.toThrow("receipt sink failed");
+    expect(closeCount).toBe(1);
+  });
+
+  it("retains the primary spawn diagnostic when writer close also fails", async () => {
+    let closeCount = 0;
+    const handle = await startGovernedLocalProcess({
+      plan: plan("success", "0", "/fixture/does-not-exist"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime(),
+      receiptSink: {
+        open() {
+          return {
+            append() {},
+            close() {
+              closeCount += 1;
+              throw new Error(marker);
+            },
+          };
+        },
+      },
+      executionIdSource: () => "runtime-execution-spawn-close-failure",
+    });
+    await expect(handle.started).rejects.toThrow("process spawn failed");
+    expect((await handle.exit).outcome).toBe("spawn_failed");
+    expect(closeCount).toBe(1);
+  });
+
   it("contains a receipt sink failure and does not abandon the child", async () => {
     const nodeAdapter = createNodeProcessAdapter();
     let pid = 0;
@@ -491,6 +612,7 @@ describe("governed local process host", () => {
     expect(sink.lines.some((line) => line.includes("supervisor_failed"))).toBe(
       true,
     );
+    expect(sink.closeCount).toBe(1);
   });
 
   it("records a fixed spawn failure without echoing exception details", async () => {
@@ -506,6 +628,7 @@ describe("governed local process host", () => {
     await expect(handle.started).rejects.toThrow("process spawn failed");
     const result = await handle.exit;
     expect(result.outcome).toBe("spawn_failed");
+    expect(sink.closeCount).toBe(1);
     expect(sink.lines.join("\n")).not.toContain("does-not-exist");
   });
 

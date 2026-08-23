@@ -38,6 +38,28 @@
     },
     "sequence": 2,
     "timestamp": "2026-08-23T00:00:01.000Z",
+    "eventType": "process_started",
+    "payload": {},
+    "previousReceiptDigest": "7f3d78712d95f9dd99ec9cecacbf6212a2dd37ba5a8bff8a8f5ded43b0617dc4",
+    "receiptDigest": "4149af92e9177d612e9e5c53e4c9425f57e9d69e0b8bbfa84b6c4a83ef82f231"
+  },
+  {
+    "contractId": "spts.lifecycle-receipt",
+    "contractVersion": "1.0.0",
+    "executionId": "runtime-example-001",
+    "correlation": {
+      "manifestExecutionId": "exec-spts7-001",
+      "pacaProjectId": "SCRUM-PI",
+      "pacaTaskId": "SPTS-8"
+    },
+    "planDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "trustedPolicyIds": {
+      "launch": "launch-policy-example",
+      "environment": "environment-policy-example",
+      "runtime": "runtime-policy-example"
+    },
+    "sequence": 3,
+    "timestamp": "2026-08-23T00:00:02.000Z",
     "eventType": "process_exited",
     "payload": {
       "exitCode": 0,
@@ -52,7 +74,7 @@
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       }
     },
-    "previousReceiptDigest": "7f3d78712d95f9dd99ec9cecacbf6212a2dd37ba5a8bff8a8f5ded43b0617dc4",
-    "receiptDigest": "46fafdb0e61b9f0bbdda4d10053863077e15183778029bd02bbfa6ae6e417e77"
+    "previousReceiptDigest": "4149af92e9177d612e9e5c53e4c9425f57e9d69e0b8bbfa84b6c4a83ef82f231",
+    "receiptDigest": "3f6ab90f9411a5960159967a71764027d672585125bad4c1211f3544084e1dfe"
   }
 ]

@@ -6,6 +6,7 @@ import { containsCredentialShapedContent } from "./credential-shape.js";
 
 export { containsCredentialShapedContent } from "./credential-shape.js";
 export * from "./lifecycle-receipt.js";
+export * from "./lifecycle-receipt-anchor.js";
 
 export interface ExecutionContext {
   process: "local-pi";

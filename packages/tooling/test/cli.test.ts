@@ -5,8 +5,6 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import receiptExample from "../../contracts/examples/lifecycle-receipts.success.json" with { type: "json" };
-import { canonicalSerializeLifecycleValue } from "../../contracts/src/index.js";
 import manifestExample from "../../contracts/examples/agent-execution-manifest.principal-developer.json" with { type: "json" };
 import { runCli } from "../src/index.js";
 
@@ -14,11 +12,15 @@ const fixture = fileURLToPath(
   new URL("../../runtime/test/fixtures/governed-process.mjs", import.meta.url),
 );
 const roots: string[] = [];
+const authenticationKey = Buffer.alloc(32, 0x5a).toString("base64");
 
 function setup(mode = "success", value = "0") {
   const root = join(tmpdir(), `spts-cli-${process.pid}-${roots.length}`);
   roots.push(root);
-  mkdirSync(root, { recursive: true });
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  chmodSync(root, 0o700);
+  const trustedReceiptParent = join(root, "receipts");
+  mkdirSync(trustedReceiptParent, { mode: 0o700 });
   const manifest = structuredClone(manifestExample);
   manifest.repository.root = process.cwd();
   manifest.paca.taskId = "SPTS-8";
@@ -58,7 +60,11 @@ function setup(mode = "success", value = "0") {
         maximumReceiptPayloadBytes: 4096,
         maximumListeners: 16,
       },
-      receiptRoot: join(root, "receipts"),
+      trustedReceiptParent,
+      authentication: {
+        authenticatorId: "cli-receipt-authenticator",
+        keyEnvironmentVariable: "SPTS_RECEIPT_AUTH_KEY",
+      },
     }),
   );
   chmodSync(fixture, 0o755);
@@ -116,21 +122,64 @@ describe("private governed runtime CLI", () => {
           reads.push(name);
           if (name === "PATH") return dirname(process.execPath);
           if (name === "MODEL_PROVIDER_VALUE") return "OPAQUE_DO_NOT_PERSIST";
+          if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
           return undefined;
         },
       },
     );
 
     expect(code).toBe(0);
-    expect(reads).toEqual(["PATH", "MODEL_PROVIDER_VALUE"]);
+    expect(reads).toEqual([
+      "PATH",
+      "MODEL_PROVIDER_VALUE",
+      "SPTS_RECEIPT_AUTH_KEY",
+    ]);
     const { readdir, readFile } = await import("node:fs/promises");
     const names = await readdir(join(files.root, "receipts"));
     const receiptText = await readFile(
-      join(files.root, "receipts", names[0]!),
+      join(files.root, "receipts", names[0]!, "receipts.jsonl"),
       "utf8",
     );
     expect(receiptText).not.toContain("OPAQUE_DO_NOT_PERSIST");
   });
+
+  it.each([undefined, "not-base64", Buffer.alloc(31).toString("base64")])(
+    "fails run with a fixed redacted diagnostic for a missing or malformed authentication key",
+    async (authenticationValue) => {
+      const files = setup();
+      const errors: string[] = [];
+      const reads: string[] = [];
+      expect(
+        await runCli(
+          [
+            "run",
+            "--manifest",
+            files.manifestPath,
+            "--operator-config",
+            files.configPath,
+          ],
+          {
+            writeOutput: () => {},
+            writeError: (value) => errors.push(value),
+            readEnvironment(name) {
+              reads.push(name);
+              if (name === "PATH") return dirname(process.execPath);
+              if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+              if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationValue;
+              return undefined;
+            },
+          },
+        ),
+      ).toBe(3);
+      expect(reads).toEqual([
+        "PATH",
+        "MODEL_PROVIDER_VALUE",
+        "SPTS_RECEIPT_AUTH_KEY",
+      ]);
+      expect(errors).toEqual(["governed runtime operation failed"]);
+      expect(errors.join("\n")).not.toContain(authenticationValue ?? "never");
+    },
+  );
 
   it("forwards supervisor signals through the live handle and cleans listeners", async () => {
     const files = setup("delay", "10000");
@@ -150,6 +199,7 @@ describe("private governed runtime CLI", () => {
         readEnvironment(name) {
           if (name === "PATH") return dirname(process.execPath);
           if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+          if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
           return undefined;
         },
         addSignalListener(signal, listener) {
@@ -169,24 +219,56 @@ describe("private governed runtime CLI", () => {
     expect(removed.sort()).toEqual(["SIGINT", "SIGTERM"]);
   });
 
-  it("inspects one explicit chain and has stable help/usage codes", async () => {
+  it("requires authenticated trusted-parent inspection and has stable usage codes", async () => {
     const files = setup();
-    const receiptPath = join(files.root, "chain.jsonl");
-    writeFileSync(
-      receiptPath,
-      `${receiptExample
-        .map((receipt) => canonicalSerializeLifecycleValue(receipt))
-        .join("\n")}\n`,
-    );
-    const output: string[] = [];
-
+    const environment = (name: string) => {
+      if (name === "PATH") return dirname(process.execPath);
+      if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+      if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+      return undefined;
+    };
     expect(
-      await runCli(["inspect", "--receipt-file", receiptPath], {
-        writeOutput: (value) => output.push(value),
-        writeError: () => {},
-        readEnvironment: () => undefined,
-      }),
+      await runCli(
+        [
+          "run",
+          "--manifest",
+          files.manifestPath,
+          "--operator-config",
+          files.configPath,
+        ],
+        {
+          writeOutput: () => {},
+          writeError: () => {},
+          readEnvironment: environment,
+        },
+      ),
     ).toBe(0);
+    const { readdir } = await import("node:fs/promises");
+    const [executionId] = await readdir(join(files.root, "receipts"));
+    const output: string[] = [];
+    const reads: string[] = [];
+    expect(
+      await runCli(
+        [
+          "inspect",
+          "--execution-id",
+          executionId!,
+          "--operator-config",
+          files.configPath,
+        ],
+        {
+          writeOutput: (value) => output.push(value),
+          writeError: () => {},
+          readEnvironment(name) {
+            reads.push(name);
+            return name === "SPTS_RECEIPT_AUTH_KEY"
+              ? authenticationKey
+              : undefined;
+          },
+        },
+      ),
+    ).toBe(0);
+    expect(reads).toEqual(["SPTS_RECEIPT_AUTH_KEY"]);
     expect(output.join("\n")).toContain('"valid": true');
     expect(
       await runCli(["unknown"], {

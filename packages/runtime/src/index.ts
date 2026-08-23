@@ -11,9 +11,16 @@ export {
 } from "./policies.js";
 export {
   createLocalFilesystemReceiptSink,
-  inspectLifecycleReceiptFile,
+  inspectLifecycleReceipts,
+  writeAllReceiptBytes,
   ReceiptStorageError,
+  type ReceiptFileOperations,
 } from "./receipt-filesystem.js";
+export {
+  createReceiptAuthenticator,
+  ReceiptAuthenticationError,
+  type ReceiptAuthenticator,
+} from "./receipt-authenticator.js";
 export {
   createNodeProcessAdapter,
   startGovernedLocalProcess,

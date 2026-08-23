@@ -231,10 +231,38 @@ export async function startGovernedLocalProcess(
     throw fixedSinkError();
   }
 
+  let writerFinalization: Promise<void> | null = null;
+  let sinkFailed = false;
+  const finalizeWriter = (): Promise<void> => {
+    if (writerFinalization) return writerFinalization;
+    writerFinalization = Promise.resolve()
+      .then(() => writer.close())
+      .catch(() => {
+        sinkFailed = true;
+        throw fixedSinkError();
+      });
+    return writerFinalization;
+  };
+  const withWriterFinalization = async (
+    operation: () => void | Promise<void>,
+  ): Promise<void> => {
+    let primary: unknown;
+    try {
+      await operation();
+    } catch (error) {
+      primary = error;
+    }
+    try {
+      await finalizeWriter();
+    } catch (error) {
+      if (primary === undefined) primary = error;
+    }
+    if (primary !== undefined) throw primary;
+  };
+
   let sequence = 0;
   let previousReceiptDigest: string | null = null;
   let receiptQueue = Promise.resolve();
-  let sinkFailed = false;
   const record = (
     eventType: LifecycleEventType,
     payload: LifecycleEventPayload,
@@ -298,9 +326,9 @@ export async function startGovernedLocalProcess(
     await record("launch_requested", {});
   } catch (error) {
     try {
-      await writer.close();
+      await finalizeWriter();
     } catch {
-      // The fixed sink error below remains the only exposed diagnostic.
+      // The primary fixed receipt diagnostic remains authoritative.
     }
     throw error;
   }
@@ -315,32 +343,22 @@ export async function startGovernedLocalProcess(
   let child: ManagedChild;
   let spawned = false;
   let closed = false;
+  let rawCloseObserved = false;
   let finalized = false;
   let timedOut = false;
   let supervisorFailed = false;
   let terminationPromise: Promise<void> | null = null;
   let runtimeTimer: unknown;
-  let graceTimer: unknown;
   let abortListener: (() => void) | null = null;
   let stdoutPending = Promise.resolve();
   let stderrPending = Promise.resolve();
 
   const cleanup = (): void => {
     if (runtimeTimer !== undefined) clock.clearTimeout(runtimeTimer);
-    if (graceTimer !== undefined) clock.clearTimeout(graceTimer);
     if (abortListener && options.signal) {
       options.signal.removeEventListener("abort", abortListener);
     }
     abortListener = null;
-  };
-
-  const closeWriter = async (): Promise<void> => {
-    try {
-      await writer.close();
-    } catch {
-      sinkFailed = true;
-      throw fixedSinkError();
-    }
   };
 
   const sendGroupSignal = async (
@@ -373,14 +391,6 @@ export async function startGovernedLocalProcess(
     }
   };
 
-  const waitGrace = (): Promise<void> =>
-    new Promise((resolve) => {
-      graceTimer = clock.setTimeout(
-        resolve,
-        options.runtimePolicy.terminationGraceMs,
-      );
-    });
-
   const terminate = (reason: TerminationReason = "caller"): Promise<void> => {
     if (terminationPromise) return terminationPromise;
     terminationPromise = (async () => {
@@ -401,8 +411,25 @@ export async function startGovernedLocalProcess(
       } catch {
         // Escalation still runs so a supervision failure cannot abandon the group.
       }
-      await Promise.race([rawClosed.promise, waitGrace()]);
-      if (!closed) {
+      let localGraceTimer: unknown;
+      try {
+        if (!rawCloseObserved) {
+          const graceElapsed = new Promise<void>((resolve) => {
+            if (rawCloseObserved) {
+              resolve();
+              return;
+            }
+            localGraceTimer = clock.setTimeout(
+              resolve,
+              options.runtimePolicy.terminationGraceMs,
+            );
+          });
+          await Promise.race([rawClosed.promise, graceElapsed]);
+        }
+      } finally {
+        if (localGraceTimer !== undefined) clock.clearTimeout(localGraceTimer);
+      }
+      if (!rawCloseObserved) {
         try {
           await record("process_killed", { signal: "SIGKILL" });
         } catch {
@@ -469,11 +496,24 @@ export async function startGovernedLocalProcess(
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch {
-    await record("process_failed", { code: "spawn_failed" });
-    await closeWriter();
+    let receiptFailure: unknown;
+    try {
+      await record("process_failed", { code: "spawn_failed" });
+    } catch (error) {
+      receiptFailure = error;
+    }
+    try {
+      await finalizeWriter();
+    } catch {
+      // Writer-close failure does not replace spawn or receipt-append failure.
+    }
+    if (receiptFailure !== undefined) throw receiptFailure;
     const error = new RuntimeHostError("process spawn failed");
     started.reject(error);
     started.promise.catch(() => {});
+    finalized = true;
+    closed = true;
+    rawCloseObserved = true;
     rawClosed.resolve();
     exited.resolve({
       executionId,
@@ -533,38 +573,51 @@ export async function startGovernedLocalProcess(
     if (finalized) return;
     finalized = true;
     closed = true;
+    rawCloseObserved = true;
     rawClosed.resolve();
     cleanup();
-    void record("process_failed", { code: "spawn_failed" })
-      .then(closeWriter)
-      .then(() => {
-        const error = new RuntimeHostError("process spawn failed");
-        started.reject(error);
-        started.promise.catch(() => {});
-        exited.resolve({
-          executionId,
-          outcome: "spawn_failed",
-          exitCode: null,
-          signal: null,
-          stdout: streamEvidence(stdoutBytes, stdoutHash),
-          stderr: streamEvidence(stderrBytes, stderrHash),
-        });
-      })
-      .catch((error) => {
-        started.reject(error);
-        started.promise.catch(() => {});
-        exited.reject(error);
+    void (async () => {
+      let receiptFailure: unknown;
+      try {
+        await record("process_failed", { code: "spawn_failed" });
+      } catch (error) {
+        receiptFailure = error;
+      }
+      try {
+        await finalizeWriter();
+      } catch {
+        // Writer-close failure does not replace spawn or receipt-append failure.
+      }
+      if (receiptFailure !== undefined) throw receiptFailure;
+      const error = new RuntimeHostError("process spawn failed");
+      started.reject(error);
+      started.promise.catch(() => {});
+      exited.resolve({
+        executionId,
+        outcome: "spawn_failed",
+        exitCode: null,
+        signal: null,
+        stdout: streamEvidence(stdoutBytes, stdoutHash),
+        stderr: streamEvidence(stderrBytes, stderrHash),
       });
+    })().catch((error) => {
+      started.reject(error);
+      started.promise.catch(() => {});
+      exited.reject(error);
+    });
   });
 
   child.once("close", (exitCode, signal) => {
     if (finalized) return;
     finalized = true;
     closed = true;
+    rawCloseObserved = true;
     rawClosed.resolve();
     cleanup();
-    void Promise.all([stdoutPending, stderrPending, receiptQueue])
-      .then(async () => {
+    void (async () => {
+      let result: ExecutionResult | undefined;
+      await withWriterFinalization(async () => {
+        await Promise.all([stdoutPending, stderrPending, receiptQueue]);
         const stdout = streamEvidence(stdoutBytes, stdoutHash);
         const stderr = streamEvidence(stderrBytes, stderrHash);
         const outcome = outcomeFor(
@@ -580,17 +633,17 @@ export async function startGovernedLocalProcess(
           stdout,
           stderr,
         });
-        await closeWriter();
-        exited.resolve({
+        result = {
           executionId,
           outcome,
           exitCode,
           signal: normalizeSignal(signal),
           stdout,
           stderr,
-        });
-      })
-      .catch((error) => exited.reject(error));
+        };
+      });
+      exited.resolve(result!);
+    })().catch((error) => exited.reject(error));
   });
 
   if (options.signal) {

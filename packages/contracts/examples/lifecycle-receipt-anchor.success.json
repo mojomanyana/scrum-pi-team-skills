@@ -1,0 +1,12 @@
+{
+  "contractId": "spts.lifecycle-receipt-anchor",
+  "contractVersion": "1.0.0",
+  "executionId": "runtime-example-001",
+  "receiptCount": 3,
+  "terminalReceiptDigest": "3f6ab90f9411a5960159967a71764027d672585125bad4c1211f3544084e1dfe",
+  "planDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "environmentPolicyId": "environment-policy-example",
+  "runtimePolicyId": "runtime-policy-example",
+  "authenticatorId": "authenticator-example",
+  "authenticationTag": "d5ec447e3fe5ca2c5e59eec595c2915820cde366f90092a3ff58455c0f3d66ed"
+}

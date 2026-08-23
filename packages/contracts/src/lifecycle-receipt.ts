@@ -26,21 +26,19 @@ export interface StreamEvidence {
   readonly sha256: string;
 }
 
+export interface ProcessExitPayload {
+  readonly exitCode: number | null;
+  readonly signal: "SIGINT" | "SIGTERM" | "SIGKILL" | null;
+  readonly outcome:
+    "succeeded" | "nonzero" | "signaled" | "timed_out" | "supervisor_failed";
+  readonly stdout: StreamEvidence;
+  readonly stderr: StreamEvidence;
+}
+
 export type LifecycleEventPayload =
   | Record<string, never>
   | { readonly reason: TerminationReason }
-  | {
-      readonly exitCode: number | null;
-      readonly signal: "SIGINT" | "SIGTERM" | "SIGKILL" | null;
-      readonly outcome:
-        | "succeeded"
-        | "nonzero"
-        | "signaled"
-        | "timed_out"
-        | "supervisor_failed";
-      readonly stdout: StreamEvidence;
-      readonly stderr: StreamEvidence;
-    }
+  | ProcessExitPayload
   | { readonly code: "spawn_failed" }
   | { readonly maximumRuntimeMs: number }
   | { readonly signal: "SIGKILL" }
@@ -84,17 +82,20 @@ export type LifecycleReceiptValidationResult =
       }>;
     };
 
+export type LifecycleReceiptChainFailureCode =
+  | "receipt-invalid"
+  | "receipt-sequence-invalid"
+  | "receipt-chain-mismatch"
+  | "receipt-digest-mismatch"
+  | "receipt-chain-incomplete"
+  | "receipt-lifecycle-invalid"
+  | "receipt-timestamp-invalid"
+  | "receipt-anchor-invalid"
+  | "receipt-authentication-failed";
+
 export type LifecycleReceiptChainResult =
   | { readonly valid: true; readonly receipts: readonly LifecycleReceipt[] }
-  | {
-      readonly valid: false;
-      readonly code:
-        | "receipt-invalid"
-        | "receipt-sequence-invalid"
-        | "receipt-chain-mismatch"
-        | "receipt-digest-mismatch"
-        | "receipt-chain-incomplete";
-    };
+  | { readonly valid: false; readonly code: LifecycleReceiptChainFailureCode };
 
 type JsonValue =
   | null
@@ -122,9 +123,8 @@ function encodeCanonical(value: JsonValue, ancestors: Set<object>): string {
       throw new TypeError("canonical JSON requires finite numbers");
     return JSON.stringify(value);
   }
-  if (typeof value !== "object") {
+  if (typeof value !== "object")
     throw new TypeError("canonical JSON requires JSON values");
-  }
   if (ancestors.has(value))
     throw new TypeError("canonical JSON rejects circular values");
   ancestors.add(value);
@@ -140,9 +140,8 @@ function encodeCanonical(value: JsonValue, ancestors: Set<object>): string {
         Reflect.ownKeys(value).some(
           (key) => typeof key !== "string" || !expectedKeys.has(key),
         )
-      ) {
+      )
         throw new TypeError();
-      }
       const encoded: string[] = [];
       for (let index = 0; index < value.length; index += 1) {
         const descriptor = Object.getOwnPropertyDescriptor(value, index);
@@ -175,7 +174,7 @@ function encodeCanonical(value: JsonValue, ancestors: Set<object>): string {
   }
 }
 
-/** RFC-8785-style deterministic JSON for the receipt contract's JSON subset. */
+/** RFC-8785-style deterministic JSON for the contracts' JSON subset. */
 export function canonicalSerializeLifecycleValue(value: unknown): string {
   return encodeCanonical(value as JsonValue, new Set<object>());
 }
@@ -202,13 +201,23 @@ function receiptError(error: ErrorObject): {
   };
 }
 
+export function isCanonicalLifecycleTimestamp(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value))
+    return false;
+  const milliseconds = Date.parse(value);
+  return (
+    Number.isFinite(milliseconds) &&
+    new Date(milliseconds).toISOString() === value
+  );
+}
+
 export function validateLifecycleReceipt(
   value: unknown,
 ): LifecycleReceiptValidationResult {
   try {
     const snapshot = JSON.parse(
       canonicalSerializeLifecycleValue(value),
-    ) as unknown;
+    ) as LifecycleReceipt;
     if (!validateReceiptSchema(snapshot)) {
       return {
         valid: false,
@@ -237,14 +246,14 @@ export function validateLifecycleReceipt(
         ],
       };
     }
-    if (!Number.isFinite(Date.parse(snapshot.timestamp))) {
+    if (!isCanonicalLifecycleTimestamp(snapshot.timestamp)) {
       return {
         valid: false,
         errors: [
           {
             path: "/timestamp",
             code: "date-time",
-            message: "must be a valid ISO timestamp",
+            message: "must be a canonical UTC timestamp with milliseconds",
           },
         ],
       };
@@ -264,6 +273,59 @@ export function validateLifecycleReceipt(
   }
 }
 
+function validExitOutcome(
+  payload: ProcessExitPayload,
+  evidence: {
+    timedOut: boolean;
+    terminationRequested: boolean;
+    killed: boolean;
+    supervisorFailed: boolean;
+  },
+): boolean {
+  const hasExitCode = payload.exitCode !== null;
+  const hasSignal = payload.signal !== null;
+  if (hasExitCode === hasSignal) return false;
+  if (payload.outcome === "succeeded") {
+    return (
+      payload.exitCode === 0 &&
+      !hasSignal &&
+      !evidence.timedOut &&
+      !evidence.killed &&
+      !evidence.supervisorFailed
+    );
+  }
+  if (payload.outcome === "nonzero") {
+    return (
+      typeof payload.exitCode === "number" &&
+      payload.exitCode !== 0 &&
+      !hasSignal &&
+      !evidence.timedOut &&
+      !evidence.killed &&
+      !evidence.supervisorFailed
+    );
+  }
+  if (payload.outcome === "signaled") {
+    return (
+      !hasExitCode &&
+      hasSignal &&
+      !evidence.timedOut &&
+      !evidence.supervisorFailed &&
+      (payload.signal !== "SIGKILL" || evidence.killed) &&
+      (!evidence.killed || payload.signal === "SIGKILL")
+    );
+  }
+  if (payload.outcome === "timed_out") {
+    return (
+      !hasExitCode &&
+      hasSignal &&
+      evidence.timedOut &&
+      (payload.signal !== "SIGKILL" || evidence.killed) &&
+      (!evidence.killed || payload.signal === "SIGKILL")
+    );
+  }
+  return evidence.supervisorFailed;
+}
+
 const terminalEvents = new Set<LifecycleEventType>([
   "process_exited",
   "process_failed",
@@ -272,45 +334,102 @@ const terminalEvents = new Set<LifecycleEventType>([
 export function verifyLifecycleReceiptChain(
   values: readonly unknown[],
 ): LifecycleReceiptChainResult {
-  if (!Array.isArray(values) || values.length === 0) {
+  if (!Array.isArray(values) || values.length === 0)
     return { valid: false, code: "receipt-chain-incomplete" };
-  }
 
   const receipts: LifecycleReceipt[] = [];
   let previousDigest: string | null = null;
+  let previousTimestamp = -Infinity;
   let identity: string | null = null;
+  let state: "initial" | "launch-requested" | "started" | "terminal" =
+    "initial";
+  let timedOut = false;
+  let terminationRequested = false;
+  let killed = false;
+  let supervisorFailed = false;
+
   for (let index = 0; index < values.length; index += 1) {
     const validation = validateLifecycleReceipt(values[index]);
     if (!validation.valid) return { valid: false, code: "receipt-invalid" };
     const receipt = validation.value;
-    if (receipt.sequence !== index + 1) {
+    if (receipt.sequence !== index + 1)
       return { valid: false, code: "receipt-sequence-invalid" };
-    }
+    const timestamp = Date.parse(receipt.timestamp);
+    if (timestamp < previousTimestamp)
+      return { valid: false, code: "receipt-timestamp-invalid" };
+    previousTimestamp = timestamp;
+
     const currentIdentity = canonicalSerializeLifecycleValue({
       executionId: receipt.executionId,
       correlation: receipt.correlation,
       planDigest: receipt.planDigest,
       trustedPolicyIds: receipt.trustedPolicyIds,
     });
-    if (identity !== null && currentIdentity !== identity) {
+    if (identity !== null && currentIdentity !== identity)
       return { valid: false, code: "receipt-chain-mismatch" };
-    }
     identity = currentIdentity;
-    if (receipt.previousReceiptDigest !== previousDigest) {
+    if (receipt.previousReceiptDigest !== previousDigest)
       return { valid: false, code: "receipt-chain-mismatch" };
-    }
-    if (computeLifecycleReceiptDigest(receipt) !== receipt.receiptDigest) {
+    if (computeLifecycleReceiptDigest(receipt) !== receipt.receiptDigest)
       return { valid: false, code: "receipt-digest-mismatch" };
-    }
-    if (index < values.length - 1 && terminalEvents.has(receipt.eventType)) {
-      return { valid: false, code: "receipt-chain-mismatch" };
+    if (state === "terminal")
+      return { valid: false, code: "receipt-lifecycle-invalid" };
+
+    switch (receipt.eventType) {
+      case "launch_requested":
+        if (state !== "initial")
+          return { valid: false, code: "receipt-lifecycle-invalid" };
+        state = "launch-requested";
+        break;
+      case "process_started":
+        if (state !== "launch-requested")
+          return { valid: false, code: "receipt-lifecycle-invalid" };
+        state = "started";
+        break;
+      case "process_failed":
+        if (state !== "launch-requested")
+          return { valid: false, code: "receipt-lifecycle-invalid" };
+        state = "terminal";
+        break;
+      case "process_timed_out":
+        if (state !== "started" || timedOut)
+          return { valid: false, code: "receipt-lifecycle-invalid" };
+        timedOut = true;
+        break;
+      case "termination_requested":
+        if (state !== "started" || terminationRequested)
+          return { valid: false, code: "receipt-lifecycle-invalid" };
+        terminationRequested = true;
+        break;
+      case "process_killed":
+        if (state !== "started" || !terminationRequested || killed)
+          return { valid: false, code: "receipt-lifecycle-invalid" };
+        killed = true;
+        break;
+      case "supervisor_failed":
+        if (state !== "started" || supervisorFailed)
+          return { valid: false, code: "receipt-lifecycle-invalid" };
+        supervisorFailed = true;
+        break;
+      case "process_exited":
+        if (
+          state !== "started" ||
+          !validExitOutcome(receipt.payload as ProcessExitPayload, {
+            timedOut,
+            terminationRequested,
+            killed,
+            supervisorFailed,
+          })
+        )
+          return { valid: false, code: "receipt-lifecycle-invalid" };
+        state = "terminal";
+        break;
     }
     previousDigest = receipt.receiptDigest;
     receipts.push(receipt);
   }
 
-  if (!terminalEvents.has(receipts.at(-1)!.eventType)) {
+  if (state !== "terminal" || !terminalEvents.has(receipts.at(-1)!.eventType))
     return { valid: false, code: "receipt-chain-incomplete" };
-  }
   return { valid: true, receipts };
 }

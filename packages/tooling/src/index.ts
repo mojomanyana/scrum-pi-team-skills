@@ -1,24 +1,24 @@
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 
 import {
   createLocalFilesystemReceiptSink,
   createOperatorEnvironmentPolicy,
+  createReceiptAuthenticator,
   createPiLaunchPlan,
   createRuntimePolicy,
   createTrustedLaunchPolicy,
-  inspectLifecycleReceiptFile,
+  inspectLifecycleReceipts,
   startGovernedLocalProcess,
 } from "@scrum-pi-team-skills/runtime";
 
 export const GOVERNED_RUNTIME_USAGE = `Usage:
   spts-runtime plan --manifest FILE --operator-config FILE
   spts-runtime run --manifest FILE --operator-config FILE
-  spts-runtime inspect --receipt-file FILE
+  spts-runtime inspect --execution-id ID --operator-config FILE
 
 plan prints redacted preview evidence only. run rebuilds authority in-process.
-inspect verifies one explicit lifecycle receipt JSONL chain.
+inspect verifies one trusted-parent lifecycle receipt chain and authenticated anchor.
 Exit codes: 0 success, 2 usage, 3 validation/storage, 4 invalid chain,
 10 child non-zero, 11 signal exit, 12 timeout, 13 spawn/supervisor failure.`;
 
@@ -42,7 +42,7 @@ interface ParsedOptions {
   readonly command: "plan" | "run" | "inspect";
   readonly manifest?: string;
   readonly operatorConfig?: string;
-  readonly receiptFile?: string;
+  readonly executionId?: string;
 }
 
 function parseArguments(argv: readonly string[]): ParsedOptions | null {
@@ -66,8 +66,17 @@ function parseArguments(argv: readonly string[]): ParsedOptions | null {
     values.set(flag, value);
   }
   if (command === "inspect") {
-    if (values.size !== 1 || !values.has("--receipt-file")) return null;
-    return { command, receiptFile: values.get("--receipt-file") };
+    if (
+      values.size !== 2 ||
+      !values.has("--execution-id") ||
+      !values.has("--operator-config")
+    )
+      return null;
+    return {
+      command,
+      executionId: values.get("--execution-id"),
+      operatorConfig: values.get("--operator-config"),
+    };
   }
   if (
     values.size !== 2 ||
@@ -95,7 +104,11 @@ function readOperatorConfig(path: string): {
   trustedLaunchPolicy: unknown;
   environment: { policyId: unknown; importNames: unknown };
   runtimePolicy: unknown;
-  receiptRoot?: unknown;
+  trustedReceiptParent: unknown;
+  authentication: {
+    authenticatorId: unknown;
+    keyEnvironmentVariable: unknown;
+  };
 } {
   const value = readJson(path);
   if (!isRecord(value)) throw new TypeError();
@@ -103,11 +116,13 @@ function readOperatorConfig(path: string): {
     "trustedLaunchPolicy",
     "environment",
     "runtimePolicy",
-    "receiptRoot",
+    "trustedReceiptParent",
+    "authentication",
   ]);
   if (Object.keys(value).some((key) => !allowed.has(key)))
     throw new TypeError();
-  if (!isRecord(value.environment)) throw new TypeError();
+  if (!isRecord(value.environment) || !isRecord(value.authentication))
+    throw new TypeError();
   if (
     Object.keys(value.environment).some(
       (key) => key !== "policyId" && key !== "importNames",
@@ -115,6 +130,12 @@ function readOperatorConfig(path: string): {
   ) {
     throw new TypeError();
   }
+  if (
+    Object.keys(value.authentication).some(
+      (key) => key !== "authenticatorId" && key !== "keyEnvironmentVariable",
+    )
+  )
+    throw new TypeError();
   return {
     trustedLaunchPolicy: value.trustedLaunchPolicy,
     environment: {
@@ -122,7 +143,11 @@ function readOperatorConfig(path: string): {
       importNames: value.environment.importNames,
     },
     runtimePolicy: value.runtimePolicy,
-    receiptRoot: value.receiptRoot,
+    trustedReceiptParent: value.trustedReceiptParent,
+    authentication: {
+      authenticatorId: value.authentication.authenticatorId,
+      keyEnvironmentVariable: value.authentication.keyEnvironmentVariable,
+    },
   };
 }
 
@@ -133,20 +158,39 @@ function buildPlan(manifestPath: string, operatorConfigPath: string) {
   return { plan: createPiLaunchPlan(manifest, launchPolicy), config };
 }
 
-function receiptRoot(
-  configured: unknown,
+function createConfiguredAuthenticator(
+  config: ReturnType<typeof readOperatorConfig>,
   readEnvironment: (name: string) => string | undefined,
-): string {
-  if (configured !== undefined) {
-    if (typeof configured !== "string") throw new TypeError();
-    return configured;
+) {
+  if (
+    typeof config.authentication.authenticatorId !== "string" ||
+    typeof config.authentication.keyEnvironmentVariable !== "string" ||
+    !/^[A-Za-z_][A-Za-z0-9_]*$/.test(
+      config.authentication.keyEnvironmentVariable,
+    )
+  )
+    throw new TypeError();
+  const encoded = readEnvironment(config.authentication.keyEnvironmentVariable);
+  if (
+    typeof encoded !== "string" ||
+    encoded.length === 0 ||
+    encoded.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      encoded,
+    )
+  )
+    throw new TypeError();
+  const temporary = Buffer.from(encoded, "base64");
+  try {
+    if (temporary.byteLength < 32 || temporary.toString("base64") !== encoded)
+      throw new TypeError();
+    return createReceiptAuthenticator({
+      authenticatorId: config.authentication.authenticatorId,
+      key: temporary,
+    });
+  } finally {
+    temporary.fill(0);
   }
-  const xdgStateHome = readEnvironment("XDG_STATE_HOME");
-  if (xdgStateHome)
-    return join(xdgStateHome, "scrum-pi-team-skills", "receipts");
-  const home = readEnvironment("HOME");
-  if (!home) throw new TypeError();
-  return join(home, ".local", "state", "scrum-pi-team-skills", "receipts");
 }
 
 function exitCodeFor(outcome: string): number {
@@ -204,7 +248,18 @@ export async function runCli(
 
   try {
     if (parsed.command === "inspect") {
-      const result = inspectLifecycleReceiptFile(parsed.receiptFile!);
+      const config = readOperatorConfig(parsed.operatorConfig!);
+      if (typeof config.trustedReceiptParent !== "string")
+        throw new TypeError();
+      const authenticator = createConfiguredAuthenticator(
+        config,
+        readEnvironment,
+      );
+      const result = inspectLifecycleReceipts({
+        trustedParent: config.trustedReceiptParent,
+        executionId: parsed.executionId!,
+        authenticator,
+      });
       writeOutput(JSON.stringify(result, null, 2));
       return result.valid ? 0 : 4;
     }
@@ -236,6 +291,11 @@ export async function runCli(
       throw new TypeError();
     }
     const importNames = config.environment.importNames as string[];
+    if (
+      typeof config.authentication.keyEnvironmentVariable !== "string" ||
+      importNames.includes(config.authentication.keyEnvironmentVariable)
+    )
+      throw new TypeError();
     const baseline: Record<string, string> = Object.create(null) as Record<
       string,
       string
@@ -251,8 +311,14 @@ export async function runCli(
       allowlist: importNames,
     });
     const runtimePolicy = createRuntimePolicy(config.runtimePolicy);
+    if (typeof config.trustedReceiptParent !== "string") throw new TypeError();
+    const authenticator = createConfiguredAuthenticator(
+      config,
+      readEnvironment,
+    );
     const sink = createLocalFilesystemReceiptSink({
-      root: receiptRoot(config.receiptRoot, readEnvironment),
+      trustedParent: config.trustedReceiptParent,
+      authenticator,
     });
     const handle = await startGovernedLocalProcess({
       plan,
