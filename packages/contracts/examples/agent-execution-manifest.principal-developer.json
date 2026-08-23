@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0.0",
+  "executionId": "exec-spts7-001",
+  "paca": {
+    "projectId": "SCRUM-PI",
+    "taskId": "SPTS-7"
+  },
+  "agent": {
+    "name": "principal-developer",
+    "role": "principal_developer"
+  },
+  "repository": {
+    "root": "/home/paca/work/scrum-pi-team-skills",
+    "expectedGitIdentity": {
+      "name": "Paca Agent",
+      "email": "paca@example.test"
+    }
+  },
+  "executionContext": {
+    "process": "local-pi",
+    "governedBy": "pi-daddy",
+    "systemOfRecord": "paca"
+  },
+  "assurance": "standard",
+  "resources": {
+    "skills": ["skill:build", "skill:review"],
+    "promptTemplates": ["prompt:principal-feature"]
+  },
+  "tools": ["read", "bash", "edit", "write"],
+  "piDaddyGrant": "tool:read,tool:bash,tool:edit,tool:write",
+  "delegation": {
+    "maxDepth": 0
+  },
+  "authorization": {
+    "objective": "Implement the authorized Paca task",
+    "outOfScope": ["Do not publish packages"],
+    "outOfScopeBehavior": "stop-and-report",
+    "externalEffects": "explicit-user-approval-required"
+  },
+  "receiptPolicy": {
+    "mode": "metadata-only",
+    "includeTaskContent": false,
+    "includePromptContent": false
+  }
+}
