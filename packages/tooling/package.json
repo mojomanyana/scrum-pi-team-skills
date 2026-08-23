@@ -12,5 +12,11 @@
   },
   "files": [
     "dist"
-  ]
+  ],
+  "bin": {
+    "spts-runtime": "./dist/cli.js"
+  },
+  "dependencies": {
+    "@scrum-pi-team-skills/runtime": "0.0.0"
+  }
 }

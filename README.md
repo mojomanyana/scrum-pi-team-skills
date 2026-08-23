@@ -2,7 +2,7 @@
 
 Development baseline for locally executed Pi agents supporting a Scrum team.
 
-Paca is the Scrum control plane and system of record. Future agents run as local Pi processes governed by pi-daddy. This repository currently contains only the development baseline and a minimal contract that records those constraints; it does not implement the agent system.
+Paca is the Scrum control plane and system of record. Agents are planned and supervised as local Pi processes governed by pi-daddy. The repository implements the governed manifest/planning boundary and a Linux/WSL-local foreground process host; ACP and Paca adapters remain future scope.
 
 ## Prerequisites
 
@@ -84,12 +84,70 @@ The plan starts with `--no-extensions` and loads only the policy-bound pi-daddy 
 
 The portable schema intentionally stops at structure. The composite validator owns manifest credential, semantic, cross-field, canonical-order, and exact-grant checks. The runtime policy factory and planner own trusted physical binding and uniqueness checks. A launch is acceptable only after both authoritative stages succeed. The planner passes approved tools through `--tools`, always revalidates the manifest composite, never returns a shell command, and does not spawn a process, inspect the filesystem, modify Git, access the network, or update Paca.
 
+### Governed Linux/WSL runtime (SPTS-8)
+
+SPTS-7 planning and SPTS-8 execution are separate boundaries. `createPiLaunchPlan` remains pure, but each result is now deeply frozen and carries unforgeable in-process issuance authority in a private `WeakMap`. `startGovernedLocalProcess` accepts only the exact live object issued by that planner in the current process. A spread copy, clone, proxy, prototype object, or serialized preview is evidence only and cannot be executed. The CLI `run` path always rebuilds the trusted policy and launch plan from the manifest and operator configuration in the same process.
+
+The runtime exports these primary APIs from `@scrum-pi-team-skills/runtime`:
+
+- `createOperatorEnvironmentPolicy({ policyId, baseline, allowlist })` validates, copies, and freezes operator-owned environment authority while keeping all values in private storage;
+- `createRuntimePolicy(...)` issues immutable bounded runtime limits;
+- `startGovernedLocalProcess(...)` returns a live `SupervisedExecution` with `started`, `exit`, and idempotent `terminate()` lifecycles;
+- `createLocalFilesystemReceiptSink({ root })` and `inspectLifecycleReceiptFile(path)` write and verify one execution chain.
+
+Core runtime code never reads or enumerates `process.env`. The operator supplies an explicit baseline whose names exactly match an allowlist. Values, including legitimate model-provider credentials, are opaque secrets: they are passed only to the exact child environment and are never returned, logged, hashed, persisted, or included in receipts. Fixed launch-plan additions are validated after the baseline and any name collision is rejected rather than overwritten. Names and values containing NUL, invalid environment names, and configured size-limit overflow fail closed.
+
+Version 1 supports Linux/WSL only. It uses Node `spawn` with the exact executable, argv, cwd, and constructed environment, with `shell:false`. `detached:true` is used specifically to create a dedicated POSIX process group; the child is **not** `unref`'ed or backgrounded, so the supervisor retains pipes and wait ownership. Caller termination, abort, timeout, or forwarded CLI SIGINT/SIGTERM sends SIGTERM to the live handle's process group, waits the configured grace duration, sends SIGKILL if the group is still live, and awaits final exit. There is deliberately no cross-process kill-by-PID command.
+
+Stdout and stderr are streamed to callbacks with backpressure rather than buffered. Receipts persist only incremental byte counts and SHA-256 digests. Callback and receipt-sink failures become fixed supervisor failures while process-group cleanup continues.
+
+### Lifecycle receipts
+
+`packages/contracts/src/schemas/lifecycle-receipt.schema.json` defines `spts.lifecycle-receipt` version `1.0.0`; the matching TypeScript types, validator, canonical serializer, digest function, chain verifier, and a successful example are exported by `packages/contracts`. Each execution is an append-only JSONL hash chain containing sequence, injected ISO timestamp, runtime execution identity, Paca/manifest correlation, plan digest, launch/environment/runtime policy identifiers, safe event payload, and previous/current receipt digests. Events cover launch request, process start, termination request, exit, spawn failure, timeout, forced kill, and supervisor failure. A complete chain must end in `process_exited` or startup `process_failed`, allowing deterministic detection of contract-level truncation.
+
+No receipt contains environment values, raw output, prompts, credentials, arbitrary exception messages, or configuration/file contents. The local sink creates its root with mode `0700`, creates one execution file exclusively with mode `0600`, appends without recursive deletion, and refuses an existing receipt path or symlink.
+
+For the private CLI, the receipt root is selected in this order:
+
+1. explicit `receiptRoot` in operator configuration;
+2. `$XDG_STATE_HOME/scrum-pi-team-skills/receipts`;
+3. `$HOME/.local/state/scrum-pi-team-skills/receipts`.
+
+Only the named `XDG_STATE_HOME` and `HOME` entries are read for this fallback; the shell environment is never enumerated.
+
+### Private operator CLI
+
+After `npm run build`:
+
+```bash
+node packages/tooling/dist/cli.js --help
+node packages/tooling/dist/cli.js plan --manifest ./operator/manifest.json --operator-config ./operator/runtime.json
+node packages/tooling/dist/cli.js run --manifest ./operator/manifest.json --operator-config ./operator/runtime.json
+node packages/tooling/dist/cli.js inspect --receipt-file /home/operator/.local/state/scrum-pi-team-skills/receipts/runtime-EXAMPLE.jsonl
+```
+
+Operator configuration supplies a `trustedLaunchPolicy`, bounded `runtimePolicy`, and an environment block such as:
+
+```json
+{
+  "environment": {
+    "policyId": "operator-environment-v1",
+    "importNames": ["PATH", "MODEL_PROVIDER_API_KEY"]
+  },
+  "receiptRoot": "/home/operator/.local/state/scrum-pi-team-skills/receipts"
+}
+```
+
+The CLI adapter reads only the explicitly listed shell names; values do not belong in this JSON. `plan` prints a redacted object marked `"executableAuthority": false`. `run` stays foregrounded, streams output without persistence, and forwards SIGINT/SIGTERM through its live handle. Exit codes are stable: `0` success, `2` usage, `3` validation/storage failure, `4` invalid inspected chain, `10` child non-zero, `11` signal exit, `12` timeout, and `13` spawn/supervisor failure. The CLI performs no implicit Paca or network call.
+
+Automated tests launch only repository-controlled fixture processes. Launching real Pi, including a smoke test, requires separate stakeholder approval and is not part of normal validation. ACP bridge / `paca-acp-bridge` integration and Paca mutation remain explicitly unimplemented.
+
 ## Workspace structure
 
 - `packages/contracts`: JSON Schemas, examples, and AJV-backed validation.
-- `packages/runtime`: pure deterministic local Pi launch planning.
+- `packages/runtime`: deterministic launch planning, governed Linux/WSL supervision, and local receipt storage.
 - `packages/agents`: reserved for approved agent implementations.
-- `packages/tooling`: reserved for repository and development tooling.
+- `packages/tooling`: private plan/run/inspect operator CLI.
 
 All workspaces are private during this baseline phase. Publishing requires a separate Paca task and explicit design.
 

@@ -1,0 +1,58 @@
+[
+  {
+    "contractId": "spts.lifecycle-receipt",
+    "contractVersion": "1.0.0",
+    "executionId": "runtime-example-001",
+    "correlation": {
+      "manifestExecutionId": "exec-spts7-001",
+      "pacaProjectId": "SCRUM-PI",
+      "pacaTaskId": "SPTS-8"
+    },
+    "planDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "trustedPolicyIds": {
+      "launch": "launch-policy-example",
+      "environment": "environment-policy-example",
+      "runtime": "runtime-policy-example"
+    },
+    "sequence": 1,
+    "timestamp": "2026-08-23T00:00:00.000Z",
+    "eventType": "launch_requested",
+    "payload": {},
+    "previousReceiptDigest": null,
+    "receiptDigest": "7f3d78712d95f9dd99ec9cecacbf6212a2dd37ba5a8bff8a8f5ded43b0617dc4"
+  },
+  {
+    "contractId": "spts.lifecycle-receipt",
+    "contractVersion": "1.0.0",
+    "executionId": "runtime-example-001",
+    "correlation": {
+      "manifestExecutionId": "exec-spts7-001",
+      "pacaProjectId": "SCRUM-PI",
+      "pacaTaskId": "SPTS-8"
+    },
+    "planDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "trustedPolicyIds": {
+      "launch": "launch-policy-example",
+      "environment": "environment-policy-example",
+      "runtime": "runtime-policy-example"
+    },
+    "sequence": 2,
+    "timestamp": "2026-08-23T00:00:01.000Z",
+    "eventType": "process_exited",
+    "payload": {
+      "exitCode": 0,
+      "signal": null,
+      "outcome": "succeeded",
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "previousReceiptDigest": "7f3d78712d95f9dd99ec9cecacbf6212a2dd37ba5a8bff8a8f5ded43b0617dc4",
+    "receiptDigest": "46fafdb0e61b9f0bbdda4d10053863077e15183778029bd02bbfa6ae6e417e77"
+  }
+]
