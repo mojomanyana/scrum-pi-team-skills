@@ -16,6 +16,7 @@ import unrestrictedEnvironment from "./fixtures/invalid/unrestricted-environment
 import unknownTool from "./fixtures/invalid/unknown-tool.json" with { type: "json" };
 import {
   CANONICAL_PI_TOOLS,
+  containsCredentialShapedContent,
   derivePiDaddyGrant,
   isAgentExecutionManifest,
   isGovernedAgentExecutionManifest,
@@ -42,6 +43,35 @@ const providerTokenCases = [
   ["Anthropic", `sk-ant-${credentialLikePayload}`],
   ["OpenAI service account", `sk-svcacct-${credentialLikePayload}`],
   ["legacy OpenAI", `sk-${credentialLikePayload}`],
+] as const;
+
+const canonicalGrant =
+  "tool:read,tool:bash,tool:edit,tool:write,tool:grep,tool:find,tool:ls";
+const canonicalToolMutationAttempts = [
+  ["splice", () => (CANONICAL_PI_TOOLS as unknown as string[]).splice(0, 2)],
+  ["reverse", () => (CANONICAL_PI_TOOLS as unknown as string[]).reverse()],
+  ["push", () => (CANONICAL_PI_TOOLS as unknown as string[]).push("read")],
+  [
+    "index assignment",
+    () => {
+      (CANONICAL_PI_TOOLS as unknown as { 0: string })[0] = "bash";
+    },
+  ],
+  [
+    "deletion",
+    () => {
+      delete (CANONICAL_PI_TOOLS as unknown as { 0?: string })[0];
+    },
+  ],
+  [
+    "prototype manipulation",
+    () => Object.setPrototypeOf(CANONICAL_PI_TOOLS, []),
+  ],
+  [
+    "mutation through a TypeScript cast",
+    () =>
+      Object.assign(CANONICAL_PI_TOOLS as unknown as string[], { 0: "bash" }),
+  ],
 ] as const;
 
 const exceptionalInputError = {
@@ -323,6 +353,46 @@ describe("spts.agent-execution-manifest", () => {
       ],
     });
   });
+
+  it.each(canonicalToolMutationAttempts)(
+    "keeps private canonical authority after exported-state mutation attempt: %s",
+    (_label, attemptMutation) => {
+      let thrown: unknown;
+      try {
+        attemptMutation();
+      } catch (error) {
+        thrown = error;
+      }
+
+      const canonical = cloneManifest();
+      const noncanonical = cloneManifest();
+      noncanonical.tools = ["bash", "read"];
+      noncanonical.piDaddyGrant = "tool:bash,tool:read";
+
+      expect(thrown).toBeInstanceOf(TypeError);
+      expect(CANONICAL_PI_TOOLS).toEqual([
+        "read",
+        "bash",
+        "edit",
+        "write",
+        "grep",
+        "find",
+        "ls",
+      ]);
+      expect(Object.isFrozen(CANONICAL_PI_TOOLS)).toBe(true);
+      expect(derivePiDaddyGrant(CANONICAL_PI_TOOLS)).toBe(canonicalGrant);
+      expect(derivePiDaddyGrant(["bash", "read"])).toBe("tool:bash,tool:read");
+      expect(validateGovernedAgentExecutionManifest(canonical).valid).toBe(
+        true,
+      );
+      expect(validateGovernedAgentExecutionManifest(noncanonical)).toEqual({
+        valid: false,
+        errors: [
+          expect.objectContaining({ path: "/tools", code: "canonical-order" }),
+        ],
+      });
+    },
+  );
 
   it.each([
     "Inspect with curl example.test",
@@ -723,10 +793,146 @@ describe("spts.agent-execution-manifest", () => {
     expect(validateAgentExecutionManifest(manifest).valid).toBe(false);
   });
 
+  it("derives grants without invoking hostile get or iterator traps", () => {
+    let getTrapCalled = false;
+    let iteratorTrapCalled = false;
+    const tools = new Proxy(["read", "edit"] as const, {
+      get(_target, property) {
+        if (property === Symbol.iterator) {
+          iteratorTrapCalled = true;
+        } else {
+          getTrapCalled = true;
+        }
+        return throwExceptionalInput();
+      },
+    });
+
+    expect(derivePiDaddyGrant(tools)).toBe("tool:read,tool:edit");
+    expect(getTrapCalled).toBe(false);
+    expect(iteratorTrapCalled).toBe(false);
+  });
+
+  it.each([
+    [
+      "throwing element getter",
+      () => {
+        const tools = ["read"];
+        Object.defineProperty(tools, 0, {
+          enumerable: true,
+          get: throwExceptionalInput,
+        });
+        return tools;
+      },
+    ],
+    [
+      "ownKeys trap",
+      () => new Proxy(["read"], { ownKeys: throwExceptionalInput }),
+    ],
+    [
+      "getOwnPropertyDescriptor trap",
+      () =>
+        new Proxy(["read"], {
+          getOwnPropertyDescriptor: throwExceptionalInput,
+        }),
+    ],
+    [
+      "own Symbol.iterator getter",
+      () => {
+        const tools = ["read"];
+        Object.defineProperty(tools, Symbol.iterator, {
+          get: throwExceptionalInput,
+        });
+        return tools;
+      },
+    ],
+    [
+      "revoked proxy",
+      () => {
+        const revocable = Proxy.revocable(["read"], {});
+        revocable.revoke();
+        return revocable.proxy;
+      },
+    ],
+    [
+      "hostile array element",
+      () => [
+        {
+          toString: throwExceptionalInput,
+          valueOf: throwExceptionalInput,
+          [Symbol.toPrimitive]: throwExceptionalInput,
+        },
+      ],
+    ],
+    ["ordinary JavaScript null", () => null],
+    ["ordinary JavaScript object", () => ({ 0: "read", length: 1 })],
+  ] satisfies ReadonlyArray<readonly [string, () => unknown]>)(
+    "returns only the fixed redacted grant diagnostic for %s",
+    (_label, createInput) => {
+      let thrown: unknown;
+      try {
+        (derivePiDaddyGrant as (value: unknown) => string)(createInput());
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toEqual(
+        new TypeError("input could not be safely inspected"),
+      );
+      expect(String(thrown)).not.toContain(exceptionalMarker());
+      expect(String(thrown)).not.toContain("HostileCredentialTrap");
+      expect(String(thrown)).not.toContain("schemaVersion");
+    },
+  );
+
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["number", 42],
+    ["boolean", true],
+    ["symbol", Symbol("credential")],
+    [
+      "hostile coercion object",
+      {
+        toString: throwExceptionalInput,
+        valueOf: throwExceptionalInput,
+        [Symbol.toPrimitive]: throwExceptionalInput,
+      },
+    ],
+    ["get-trapping proxy", new Proxy({}, { get: throwExceptionalInput })],
+    [
+      "revoked proxy",
+      (() => {
+        const revocable = Proxy.revocable({}, {});
+        revocable.revoke();
+        return revocable.proxy;
+      })(),
+    ],
+  ] as const)(
+    "fails the credential helper closed without coercion for %s",
+    (_label, value) => {
+      expect(
+        (containsCredentialShapedContent as (input: unknown) => boolean)(value),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    ["assignment", `${exceptionalMarker()}`],
+    ["provider token", `sk-proj-${credentialLikePayload}`],
+  ])("preserves credential helper detection for %s", (_label, value) => {
+    expect(containsCredentialShapedContent(value)).toBe(true);
+  });
+
+  it.each([
+    "Inspect with curl example.test",
+    "Keep ordinary sk fragments in prose",
+    "/home/paca/My sk-work/project files",
+  ])("preserves harmless credential helper negatives: %s", (value) => {
+    expect(containsCredentialShapedContent(value)).toBe(false);
+  });
+
   it("derives grants in the documented canonical Pi tool order", () => {
-    expect(derivePiDaddyGrant(CANONICAL_PI_TOOLS)).toBe(
-      "tool:read,tool:bash,tool:edit,tool:write,tool:grep,tool:find,tool:ls",
-    );
+    expect(derivePiDaddyGrant(CANONICAL_PI_TOOLS)).toBe(canonicalGrant);
     expect(
       validManifests.every((manifest) => manifest.schemaVersion === "1.0.0"),
     ).toBe(true);

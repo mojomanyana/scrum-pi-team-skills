@@ -17,7 +17,7 @@ export const AGENT_ROLES = [
 ] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
 
-export const CANONICAL_PI_TOOLS = [
+const CANONICAL_PI_TOOL_AUTHORITY = Object.freeze([
   "read",
   "bash",
   "edit",
@@ -25,8 +25,12 @@ export const CANONICAL_PI_TOOLS = [
   "grep",
   "find",
   "ls",
-] as const;
-export type PiTool = (typeof CANONICAL_PI_TOOLS)[number];
+] as const);
+export type PiTool = (typeof CANONICAL_PI_TOOL_AUTHORITY)[number];
+
+export const CANONICAL_PI_TOOLS = Object.freeze([
+  ...CANONICAL_PI_TOOL_AUTHORITY,
+]) as typeof CANONICAL_PI_TOOL_AUTHORITY;
 
 export type Assurance = "lean" | "standard" | "critical";
 export type SkillReference = `skill:${string}`;
@@ -179,14 +183,68 @@ function toActionableError(error: ErrorObject): ContractValidationError {
   return { path, code: error.keyword, message };
 }
 
+function fixedInputIntrospectionError(): TypeError {
+  return new TypeError(exceptionalInputError.message);
+}
+
+function snapshotPiTools(value: unknown): readonly PiTool[] {
+  try {
+    if (!Array.isArray(value)) throw new TypeError();
+
+    const keys = Reflect.ownKeys(value);
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    if (
+      !lengthDescriptor ||
+      !("value" in lengthDescriptor) ||
+      typeof lengthDescriptor.value !== "number" ||
+      !Number.isSafeInteger(lengthDescriptor.value) ||
+      lengthDescriptor.value < 0 ||
+      lengthDescriptor.value > CANONICAL_PI_TOOL_AUTHORITY.length
+    ) {
+      throw new TypeError();
+    }
+
+    const length = lengthDescriptor.value;
+    const expectedKeys = new Set([
+      "length",
+      ...Array.from({ length }, (_, index) => String(index)),
+    ]);
+    if (
+      keys.length !== expectedKeys.size ||
+      keys.some((key) => typeof key !== "string" || !expectedKeys.has(key))
+    ) {
+      throw new TypeError();
+    }
+
+    const snapshot: PiTool[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, index);
+      if (
+        !descriptor?.enumerable ||
+        !("value" in descriptor) ||
+        typeof descriptor.value !== "string" ||
+        !CANONICAL_PI_TOOL_AUTHORITY.includes(descriptor.value as PiTool)
+      ) {
+        throw new TypeError();
+      }
+      snapshot.push(descriptor.value as PiTool);
+    }
+    return Object.freeze(snapshot);
+  } catch {
+    throw fixedInputIntrospectionError();
+  }
+}
+
 export function derivePiDaddyGrant(tools: readonly PiTool[]): string {
-  return tools.map((tool) => `tool:${tool}`).join(",");
+  return snapshotPiTools(tools)
+    .map((tool) => `tool:${tool}`)
+    .join(",");
 }
 
 function hasCanonicalToolOrder(tools: readonly PiTool[]): boolean {
   let previousIndex = -1;
   for (const tool of tools) {
-    const index = CANONICAL_PI_TOOLS.indexOf(tool);
+    const index = CANONICAL_PI_TOOL_AUTHORITY.indexOf(tool);
     if (index <= previousIndex) return false;
     previousIndex = index;
   }
@@ -204,6 +262,8 @@ const HYPHENATED_SK_PROVIDER_TOKEN =
 
 /** Canonical credential-shaped string decision for governed local inputs. */
 export function containsCredentialShapedContent(value: string): boolean {
+  if (typeof value !== "string") return true;
+
   return (
     CREDENTIAL_ASSIGNMENT.test(value) ||
     UNDERSCORE_PROVIDER_TOKEN.test(value) ||
@@ -271,7 +331,7 @@ export function validateGovernedAgentExecutionManifest(
     errors.push({
       path: "/tools",
       code: "canonical-order",
-      message: `must follow canonical Pi tool order: ${CANONICAL_PI_TOOLS.join(",")}`,
+      message: `must follow canonical Pi tool order: ${CANONICAL_PI_TOOL_AUTHORITY.join(",")}`,
     });
   }
 

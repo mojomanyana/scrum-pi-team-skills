@@ -9,7 +9,11 @@ import flowManifestJson from "../../contracts/examples/agent-execution-manifest.
 import principalDeveloperManifestJson from "../../contracts/examples/agent-execution-manifest.principal-developer.json" with { type: "json" };
 import productManifestJson from "../../contracts/examples/agent-execution-manifest.product.json" with { type: "json" };
 import verifierManifestJson from "../../contracts/examples/agent-execution-manifest.verifier.json" with { type: "json" };
-import type { AgentExecutionManifest } from "../../contracts/src/index.js";
+import {
+  CANONICAL_PI_TOOLS,
+  derivePiDaddyGrant,
+  type AgentExecutionManifest,
+} from "../../contracts/src/index.js";
 import {
   createPiLaunchPlan,
   createTrustedLaunchPolicy,
@@ -40,6 +44,35 @@ const trustedPolicyDefinition: TrustedLaunchPolicyDefinition = {
 };
 
 const trustedPolicy = createTrustedLaunchPolicy(trustedPolicyDefinition);
+const canonicalGrant =
+  "tool:read,tool:bash,tool:edit,tool:write,tool:grep,tool:find,tool:ls";
+const canonicalToolMutationAttempts = [
+  ["splice", () => (CANONICAL_PI_TOOLS as unknown as string[]).splice(0, 2)],
+  ["reverse", () => (CANONICAL_PI_TOOLS as unknown as string[]).reverse()],
+  ["push", () => (CANONICAL_PI_TOOLS as unknown as string[]).push("read")],
+  [
+    "index assignment",
+    () => {
+      (CANONICAL_PI_TOOLS as unknown as { 0: string })[0] = "bash";
+    },
+  ],
+  [
+    "deletion",
+    () => {
+      delete (CANONICAL_PI_TOOLS as unknown as { 0?: string })[0];
+    },
+  ],
+  [
+    "prototype manipulation",
+    () => Object.setPrototypeOf(CANONICAL_PI_TOOLS, []),
+  ],
+  [
+    "mutation through a TypeScript cast",
+    () =>
+      Object.assign(CANONICAL_PI_TOOLS as unknown as string[], { 0: "bash" }),
+  ],
+] as const;
+
 const credentialLikePayload = "abcdefghijklmnopqrstuvwxyz0123456789";
 const providerTokenCases = [
   ["OpenAI project", `sk-proj-${credentialLikePayload}`],
@@ -536,6 +569,35 @@ describe("createPiLaunchPlan", () => {
       },
     });
   });
+
+  it.each(canonicalToolMutationAttempts)(
+    "keeps canonical planning unchanged after exported-state mutation attempt: %s",
+    (_label, attemptMutation) => {
+      const before = createPiLaunchPlan(
+        principalDeveloperManifest,
+        trustedPolicy,
+      );
+      let thrown: unknown;
+      try {
+        attemptMutation();
+      } catch (error) {
+        thrown = error;
+      }
+
+      const after = createPiLaunchPlan(
+        principalDeveloperManifest,
+        trustedPolicy,
+      );
+
+      expect(thrown).toBeInstanceOf(TypeError);
+      expect(after).toEqual(before);
+      expect(after.arguments.at(-1)).toBe("read,bash,edit,write");
+      expect(after.environment.PI_GRANTS_GRANT).toBe(
+        "tool:read,tool:bash,tool:edit,tool:write",
+      );
+      expect(derivePiDaddyGrant(CANONICAL_PI_TOOLS)).toBe(canonicalGrant);
+    },
+  );
 
   it("models Pi 0.84.2 precedence and suppresses every implicit prompt source", () => {
     const plan = createPiLaunchPlan(principalDeveloperManifest, trustedPolicy);
