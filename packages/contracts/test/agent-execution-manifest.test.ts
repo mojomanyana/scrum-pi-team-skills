@@ -35,6 +35,15 @@ function cloneManifest(): AgentExecutionManifest {
   return structuredClone(principalDeveloperManifest) as AgentExecutionManifest;
 }
 
+const credentialLikePayload = "abcdefghijklmnopqrstuvwxyz0123456789";
+const providerTokenCases = [
+  ["OpenAI project", `sk-proj-${credentialLikePayload}`],
+  ["Anthropic API03", `sk-ant-api03-${credentialLikePayload}`],
+  ["Anthropic", `sk-ant-${credentialLikePayload}`],
+  ["OpenAI service account", `sk-svcacct-${credentialLikePayload}`],
+  ["legacy OpenAI", `sk-${credentialLikePayload}`],
+] as const;
+
 const exceptionalInputError = {
   valid: false,
   errors: [
@@ -319,11 +328,76 @@ describe("spts.agent-execution-manifest", () => {
     "Inspect with curl example.test",
     "Count tokenizer output without logging values",
     "Review bearer-independent authentication prose",
+    "Keep ordinary sk fragments in risk-assessment prose",
+    "Use sk-not-a-credential while documenting placeholder syntax",
+    "Review the sk-notes.md filename",
   ])("accepts inert prose without credential assignments: %s", (objective) => {
     const manifest = cloneManifest();
     manifest.authorization.objective = objective;
 
     expect(validateAgentExecutionManifest(manifest).valid).toBe(true);
+  });
+
+  it.each([
+    "/home/paca/work/sk-notes.md",
+    "/home/paca/My sk-work/project files",
+    "/mnt/c/Users/Operator/risk-assessment/task-sketch",
+  ])("accepts harmless sk fragments in a WSL path: %s", (root) => {
+    const manifest = cloneManifest();
+    manifest.repository.root = root;
+
+    expect(validateGovernedAgentExecutionManifest(manifest).valid).toBe(true);
+  });
+
+  it.each(
+    providerTokenCases.flatMap(
+      ([provider, token]) =>
+        [
+          [`${provider} at start`, `${token} is configured elsewhere`, token],
+          [
+            `${provider} in middle`,
+            provider === "Anthropic API03"
+              ? `Token: ${token}`
+              : `Use ${token} for the probe`,
+            token,
+          ],
+          [`${provider} at end`, `Use ${token}`, token],
+        ] as const,
+    ),
+  )(
+    "rejects and redacts provider token prose: %s",
+    (_label, objective, token) => {
+      const manifest = cloneManifest();
+      manifest.authorization.objective = objective;
+
+      expect(validateManifestStructure(manifest)).toBe(true);
+      const result = validateGovernedAgentExecutionManifest(manifest);
+
+      expect(result).toEqual({
+        valid: false,
+        errors: [
+          {
+            path: "/authorization/objective",
+            code: "credential-shaped",
+            message: "must not contain credential-shaped content",
+          },
+        ],
+      });
+      expect(JSON.stringify(result)).not.toContain(token);
+      expect(result).not.toHaveProperty("value");
+    },
+  );
+
+  it("handles mixed-case provider prefixes without echoing the token", () => {
+    const token = `SK-AnT-ApI03-${credentialLikePayload}`;
+    const manifest = cloneManifest();
+    manifest.authorization.objective = `Use ${token}`;
+
+    expect(validateManifestStructure(manifest)).toBe(true);
+    const result = validateGovernedAgentExecutionManifest(manifest);
+
+    expect(result.valid).toBe(false);
+    expect(JSON.stringify(result)).not.toContain(token);
   });
 
   const credentialCases: ReadonlyArray<
@@ -464,6 +538,121 @@ describe("spts.agent-execution-manifest", () => {
         });
         expect(JSON.stringify(result.errors)).not.toContain(suspectedValue);
       }
+    },
+  );
+
+  it.each([
+    [
+      "execution ID",
+      (manifest: AgentExecutionManifest, token: string) => {
+        manifest.executionId = token;
+      },
+      "/executionId",
+    ],
+    [
+      "Paca project ID",
+      (manifest: AgentExecutionManifest, token: string) => {
+        manifest.paca.projectId = token;
+      },
+      "/paca/projectId",
+    ],
+    [
+      "Paca task ID",
+      (manifest: AgentExecutionManifest, token: string) => {
+        manifest.paca.taskId = token;
+      },
+      "/paca/taskId",
+    ],
+    [
+      "agent name",
+      (manifest: AgentExecutionManifest, token: string) => {
+        manifest.agent.name = token;
+      },
+      "/agent/name",
+    ],
+    [
+      "repository root",
+      (manifest: AgentExecutionManifest, token: string) => {
+        manifest.repository.root = `/home/paca/${token}/project`;
+      },
+      "/repository/root",
+    ],
+    [
+      "Git identity name",
+      (manifest: AgentExecutionManifest, token: string) => {
+        manifest.repository.expectedGitIdentity = {
+          name: token,
+          email: "operator@example.test",
+        };
+      },
+      "/repository/expectedGitIdentity/name",
+    ],
+    [
+      "Git identity email",
+      (manifest: AgentExecutionManifest, token: string) => {
+        manifest.repository.expectedGitIdentity = {
+          name: "Operator",
+          email: `${token}@example.test`,
+        };
+      },
+      "/repository/expectedGitIdentity/email",
+    ],
+    [
+      "skill reference",
+      (manifest: AgentExecutionManifest, token: string) => {
+        manifest.resources.skills = [`skill:${token}`];
+      },
+      "/resources/skills/0",
+    ],
+    [
+      "prompt reference",
+      (manifest: AgentExecutionManifest, token: string) => {
+        manifest.resources.promptTemplates = [`prompt:${token}`];
+      },
+      "/resources/promptTemplates/0",
+    ],
+    [
+      "objective",
+      (manifest: AgentExecutionManifest, token: string) => {
+        manifest.authorization.objective = `Use ${token}`;
+      },
+      "/authorization/objective",
+    ],
+    [
+      "out-of-scope prose",
+      (manifest: AgentExecutionManifest, token: string) => {
+        manifest.authorization.outOfScope[0] = `Never use ${token}`;
+      },
+      "/authorization/outOfScope/0",
+    ],
+  ] satisfies ReadonlyArray<
+    readonly [
+      string,
+      (manifest: AgentExecutionManifest, token: string) => void,
+      string,
+    ]
+  >)(
+    "rejects provider tokens in every credential-capable manifest string location: %s",
+    (_label, mutate, path) => {
+      const token = `sk-proj-${credentialLikePayload}`;
+      const manifest = cloneManifest();
+      mutate(manifest, token);
+
+      expect(validateManifestStructure(manifest)).toBe(true);
+      const result = validateGovernedAgentExecutionManifest(manifest);
+
+      expect(result).toEqual({
+        valid: false,
+        errors: [
+          {
+            path,
+            code: "credential-shaped",
+            message: "must not contain credential-shaped content",
+          },
+        ],
+      });
+      expect(JSON.stringify(result)).not.toContain(token);
+      expect(result).not.toHaveProperty("value");
     },
   );
 

@@ -1,4 +1,5 @@
 import {
+  containsCredentialShapedContent,
   validateGovernedAgentExecutionManifest,
   type PromptTemplateReference,
   type SkillReference,
@@ -73,10 +74,6 @@ const POLICY_PROPERTIES = new Set([
 const SKILL_REFERENCE = /^skill:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const PROMPT_REFERENCE = /^prompt:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const PROHIBITED_LOCAL_PATH_CHARACTER = /[`$;&|<>"'\\]/;
-const CREDENTIAL_ASSIGNMENT =
-  /(?:^|[^A-Za-z0-9_])(?:[A-Za-z0-9]+_)*(?:password|passwd|token|api[_-]?key|bearer|secret(?:[_-]access[_-]key)?)(?:[ \t]*[:=][ \t]*|[ \t]+)\S+/i;
-const CREDENTIAL_TOKEN_PREFIX =
-  /(?:^|[^A-Za-z0-9])(?:sk|ghp|github_pat)_[A-Za-z0-9]+/i;
 const issuedTrustedPolicies = new WeakSet<object>();
 
 type InputSnapshot = { ok: true; value: unknown } | { ok: false };
@@ -130,12 +127,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function hasCredentialShape(value: string): boolean {
-  return (
-    CREDENTIAL_ASSIGNMENT.test(value) || CREDENTIAL_TOKEN_PREFIX.test(value)
-  );
-}
-
 function hasTraversalSegment(value: string): boolean {
   return value
     .split("/")
@@ -166,7 +157,10 @@ function requireLocalPath(value: unknown, label: string): string {
   if (typeof value !== "string") {
     throw new LaunchPlanInputError(`${label} must be a string`);
   }
-  if (!isNormalizedAbsoluteWslPath(value) || hasCredentialShape(value)) {
+  if (
+    !isNormalizedAbsoluteWslPath(value) ||
+    containsCredentialShapedContent(value)
+  ) {
     throw new LaunchPlanInputError(
       `${label} must be an absolute local WSL path without traversal, credential, or injection characters`,
     );
@@ -185,7 +179,10 @@ function copyResourceRegistry(
 
   const entries: Array<readonly [string, string]> = [];
   for (const [reference, pathValue] of Object.entries(value)) {
-    if (!referencePattern.test(reference) || hasCredentialShape(reference)) {
+    if (
+      !referencePattern.test(reference) ||
+      containsCredentialShapedContent(reference)
+    ) {
       throw new LaunchPlanInputError(
         `${label} resources contain an invalid logical resource identity`,
       );

@@ -40,6 +40,14 @@ const trustedPolicyDefinition: TrustedLaunchPolicyDefinition = {
 };
 
 const trustedPolicy = createTrustedLaunchPolicy(trustedPolicyDefinition);
+const credentialLikePayload = "abcdefghijklmnopqrstuvwxyz0123456789";
+const providerTokenCases = [
+  ["OpenAI project", `sk-proj-${credentialLikePayload}`],
+  ["Anthropic API03", `sk-ant-api03-${credentialLikePayload}`],
+  ["Anthropic", `sk-ant-${credentialLikePayload}`],
+  ["OpenAI service account", `sk-svcacct-${credentialLikePayload}`],
+  ["legacy OpenAI", `sk-${credentialLikePayload}`],
+] as const;
 
 function cloneManifest(): AgentExecutionManifest {
   return structuredClone(principalDeveloperManifest);
@@ -351,6 +359,81 @@ describe("TrustedLaunchPolicy", () => {
     },
   );
 
+  it.each(
+    providerTokenCases.flatMap(([provider, token]) =>
+      physicalResourceSlots.map(
+        (slot) => [`${provider} in ${slot.label}`, token, slot] as const,
+      ),
+    ),
+  )("rejects and redacts a provider token path: %s", (_label, token, slot) => {
+    const definition = structuredClone(
+      trustedPolicyDefinition,
+    ) as MutablePolicyDefinition;
+    slot.set(definition, `/home/paca/resources/${token}/resource`);
+
+    try {
+      createTrustedLaunchPolicy(definition);
+      throw new Error("expected LaunchPlanInputError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(LaunchPlanInputError);
+      expect(String(error)).toContain(
+        "must be an absolute local WSL path without traversal, credential, or injection characters",
+      );
+      expect(String(error)).not.toContain(token);
+      expect(String(error)).not.toContain(credentialLikePayload);
+    }
+  });
+
+  it.each([
+    ["skill", "skillResources", `skill:sk-proj-${credentialLikePayload}`],
+    [
+      "prompt template",
+      "promptTemplateResources",
+      `prompt:sk-ant-${credentialLikePayload}`,
+    ],
+  ] as const)(
+    "rejects and redacts a provider token in a %s registry identity",
+    (label, registryName, reference) => {
+      const definition = structuredClone(
+        trustedPolicyDefinition,
+      ) as MutablePolicyDefinition;
+      definition[registryName] = {
+        [reference]: `/home/paca/resources/${label}/resource`,
+      };
+
+      try {
+        createTrustedLaunchPolicy(definition);
+        throw new Error("expected LaunchPlanInputError");
+      } catch (error) {
+        expect(error).toEqual(
+          new LaunchPlanInputError(
+            `${label} resources contain an invalid logical resource identity`,
+          ),
+        );
+        expect(String(error)).not.toContain(reference);
+        expect(String(error)).not.toContain(credentialLikePayload);
+      }
+    },
+  );
+
+  it("accepts harmless sk fragments in ordinary filenames and WSL paths", () => {
+    expect(() =>
+      createTrustedLaunchPolicy({
+        piExecutable: "/home/paca/sk-tools/pi",
+        piDaddyExtension: "/home/paca/mask-work/pi-daddy.ts",
+        governanceLedgerPath: "/home/paca/state/task-sketch-ledger.jsonl",
+        skillResources: {
+          "skill:risk-review": "/home/paca/My Skills/sk-review/SKILL.md",
+        },
+        promptTemplateResources: {
+          "prompt:risk-report": "/home/paca/My Prompts/sk-notes.md",
+        },
+        systemPrompt: "/home/paca/prompts/risk-system.md",
+        appendSystemPrompt: "/home/paca/prompts/task-append-sk.md",
+      }),
+    ).not.toThrow();
+  });
+
   it.each(exceptionalPolicyCases)(
     "converts a policy %s to one fixed redacted domain error",
     (_label, createInput) => {
@@ -655,6 +738,31 @@ describe("createPiLaunchPlan", () => {
       } catch (error) {
         expect(error).toBeInstanceOf(LaunchPlanInputError);
         expect(String(error)).not.toContain("SENSITIVE_CORRELATION");
+      }
+    },
+  );
+
+  it.each(providerTokenCases)(
+    "rejects and redacts %s input before producing a launch result",
+    (_provider, token) => {
+      const manifest = cloneManifest();
+      manifest.authorization.objective = `Use ${token}`;
+      let result: ReturnType<typeof createPiLaunchPlan> | undefined;
+
+      try {
+        result = createPiLaunchPlan(manifest, trustedPolicy);
+        throw new Error("expected LaunchPlanInputError");
+      } catch (error) {
+        expect(error).toEqual(
+          new LaunchPlanInputError(
+            "manifest is invalid: /authorization/objective must not contain credential-shaped content",
+          ),
+        );
+        expect(String(error)).not.toContain(token);
+        expect(String(error)).not.toContain(credentialLikePayload);
+        expect(String(error)).not.toContain("correlation");
+        expect(String(error)).not.toContain("redactedOperatorPreview");
+        expect(result).toBeUndefined();
       }
     },
   );
