@@ -33,4 +33,21 @@ describe("isExecutionContext", () => {
       }),
     ).toBe(false);
   });
+
+  it("returns false rather than propagating exceptional input introspection", () => {
+    const exceptional = new Proxy(
+      {
+        process: "local-pi",
+        governedBy: "pi-daddy",
+        systemOfRecord: "paca",
+      },
+      {
+        ownKeys() {
+          throw new Error(["OPENAI_API_KEY", "secret"].join("="));
+        },
+      },
+    );
+
+    expect(isExecutionContext(exceptional)).toBe(false);
+  });
 });

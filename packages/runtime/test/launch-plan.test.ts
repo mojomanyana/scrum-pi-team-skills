@@ -54,6 +54,205 @@ function createPolicy(
   });
 }
 
+interface MutablePolicyDefinition {
+  piExecutable: string;
+  piDaddyExtension: string;
+  governanceLedgerPath: string;
+  skillResources: Record<string, string>;
+  promptTemplateResources: Record<string, string>;
+  systemPrompt: string;
+  appendSystemPrompt: string;
+}
+
+interface PhysicalResourceSlot {
+  label: string;
+  get: (definition: MutablePolicyDefinition) => string;
+  set: (definition: MutablePolicyDefinition, path: string) => void;
+}
+
+const physicalResourceSlots: readonly PhysicalResourceSlot[] = [
+  {
+    label: "Pi executable",
+    get: (definition) => definition.piExecutable,
+    set: (definition, path) => {
+      definition.piExecutable = path;
+    },
+  },
+  {
+    label: "pi-daddy extension",
+    get: (definition) => definition.piDaddyExtension,
+    set: (definition, path) => {
+      definition.piDaddyExtension = path;
+    },
+  },
+  {
+    label: "governance ledger",
+    get: (definition) => definition.governanceLedgerPath,
+    set: (definition, path) => {
+      definition.governanceLedgerPath = path;
+    },
+  },
+  {
+    label: "skill:build",
+    get: (definition) => definition.skillResources["skill:build"] ?? "",
+    set: (definition, path) => {
+      definition.skillResources["skill:build"] = path;
+    },
+  },
+  {
+    label: "skill:review",
+    get: (definition) => definition.skillResources["skill:review"] ?? "",
+    set: (definition, path) => {
+      definition.skillResources["skill:review"] = path;
+    },
+  },
+  {
+    label: "prompt:principal-feature",
+    get: (definition) =>
+      definition.promptTemplateResources["prompt:principal-feature"] ?? "",
+    set: (definition, path) => {
+      definition.promptTemplateResources["prompt:principal-feature"] = path;
+    },
+  },
+  {
+    label: "prompt:unused",
+    get: (definition) =>
+      definition.promptTemplateResources["prompt:unused"] ?? "",
+    set: (definition, path) => {
+      definition.promptTemplateResources["prompt:unused"] = path;
+    },
+  },
+  {
+    label: "system prompt",
+    get: (definition) => definition.systemPrompt,
+    set: (definition, path) => {
+      definition.systemPrompt = path;
+    },
+  },
+  {
+    label: "append-system prompt",
+    get: (definition) => definition.appendSystemPrompt,
+    set: (definition, path) => {
+      definition.appendSystemPrompt = path;
+    },
+  },
+];
+
+const physicalResourcePairs = physicalResourceSlots.flatMap((first, index) =>
+  physicalResourceSlots
+    .slice(index + 1)
+    .map(
+      (second) => [`${first.label} / ${second.label}`, first, second] as const,
+    ),
+);
+
+function exceptionalMarker(): string {
+  return ["OPENAI_API_KEY", "secret"].join("=");
+}
+
+function throwExceptionalInput(): never {
+  const error = new Error(
+    `${exceptionalMarker()} piExecutable hostile property value`,
+  );
+  error.name = "HostileCredentialTrap";
+  throw error;
+}
+
+const exceptionalPolicyCases: ReadonlyArray<readonly [string, () => unknown]> =
+  [
+    [
+      "top-level getter",
+      () => {
+        const definition = structuredClone(trustedPolicyDefinition);
+        Object.defineProperty(definition, "piExecutable", {
+          enumerable: true,
+          get: throwExceptionalInput,
+        });
+        return definition;
+      },
+    ],
+    [
+      "nested resource-registry getter",
+      () => {
+        const definition = structuredClone(trustedPolicyDefinition);
+        Object.defineProperty(definition.skillResources, "skill:build", {
+          enumerable: true,
+          get: throwExceptionalInput,
+        });
+        return definition;
+      },
+    ],
+    [
+      "Proxy get trap",
+      () =>
+        new Proxy(structuredClone(trustedPolicyDefinition), {
+          get: throwExceptionalInput,
+        }),
+    ],
+    [
+      "Proxy ownKeys trap",
+      () =>
+        new Proxy(structuredClone(trustedPolicyDefinition), {
+          ownKeys: throwExceptionalInput,
+        }),
+    ],
+    [
+      "Proxy getOwnPropertyDescriptor trap",
+      () =>
+        new Proxy(structuredClone(trustedPolicyDefinition), {
+          getOwnPropertyDescriptor: throwExceptionalInput,
+        }),
+    ],
+  ];
+
+const exceptionalManifestCases: ReadonlyArray<
+  readonly [string, () => unknown]
+> = [
+  [
+    "top-level getter",
+    () => {
+      const manifest = cloneManifest();
+      Object.defineProperty(manifest, "schemaVersion", {
+        enumerable: true,
+        get: throwExceptionalInput,
+      });
+      return manifest;
+    },
+  ],
+  [
+    "nested getter",
+    () => {
+      const manifest = cloneManifest();
+      Object.defineProperty(manifest.resources, "skills", {
+        enumerable: true,
+        get: throwExceptionalInput,
+      });
+      return manifest;
+    },
+  ],
+  [
+    "Proxy get trap",
+    () =>
+      new Proxy(cloneManifest(), {
+        get: throwExceptionalInput,
+      }),
+  ],
+  [
+    "Proxy ownKeys trap",
+    () =>
+      new Proxy(cloneManifest(), {
+        ownKeys: throwExceptionalInput,
+      }),
+  ],
+  [
+    "Proxy getOwnPropertyDescriptor trap",
+    () =>
+      new Proxy(cloneManifest(), {
+        getOwnPropertyDescriptor: throwExceptionalInput,
+      }),
+  ],
+];
+
 interface DiscoveredPiPromptSources {
   globalSystemPrompt: string;
   projectSystemPrompt: string;
@@ -136,28 +335,38 @@ describe("TrustedLaunchPolicy", () => {
     );
   });
 
-  it.each([
-    ["skill", "skillResources", "skill:build", "skill:review"],
-    [
-      "prompt template",
-      "promptTemplateResources",
-      "prompt:principal-feature",
-      "prompt:unused",
-    ],
-  ] as const)(
-    "rejects duplicate physical %s resources before planning",
-    (_label, registryName, firstReference, secondReference) => {
-      const registry = {
-        ...trustedPolicyDefinition[registryName],
-        [secondReference]:
-          trustedPolicyDefinition[registryName][firstReference],
-      };
+  it.each(physicalResourcePairs)(
+    "rejects a policy-wide exact physical alias: %s",
+    (_label, first, second) => {
+      const definition = structuredClone(
+        trustedPolicyDefinition,
+      ) as MutablePolicyDefinition;
+      second.set(definition, first.get(definition));
 
-      expect(() => createPolicy({ [registryName]: registry })).toThrow(
+      expect(() => createTrustedLaunchPolicy(definition)).toThrow(
         new LaunchPlanInputError(
-          `${_label} resources must not bind multiple logical references to one physical path`,
+          "trusted launch policy must bind each logical resource to a unique physical path",
         ),
       );
+    },
+  );
+
+  it.each(exceptionalPolicyCases)(
+    "converts a policy %s to one fixed redacted domain error",
+    (_label, createInput) => {
+      try {
+        createTrustedLaunchPolicy(createInput());
+        throw new Error("expected LaunchPlanInputError");
+      } catch (error) {
+        expect(error).toEqual(
+          new LaunchPlanInputError(
+            "trusted launch policy input could not be safely inspected",
+          ),
+        );
+        expect(String(error)).not.toContain(exceptionalMarker());
+        expect(String(error)).not.toContain("HostileCredentialTrap");
+        expect(String(error)).not.toContain("piExecutable");
+      }
     },
   );
 
@@ -289,9 +498,13 @@ describe("createPiLaunchPlan", () => {
     expect(plan.correlation.executionId).toBe(manifest.executionId);
   });
 
-  it("is deterministic, preserves unique resource order, and does not mutate inputs", () => {
+  it("is deterministic, preserves unique skill and prompt order, and does not mutate inputs", () => {
     const manifest = cloneManifest();
     manifest.resources.skills = ["skill:review", "skill:build"];
+    manifest.resources.promptTemplates = [
+      "prompt:unused",
+      "prompt:principal-feature",
+    ];
     const manifestBefore = structuredClone(manifest);
 
     const first = createPiLaunchPlan(manifest, trustedPolicy);
@@ -304,6 +517,15 @@ describe("createPiLaunchPlan", () => {
       "--skill",
       trustedPolicyDefinition.skillResources["skill:build"],
       "--no-prompt-templates",
+    ]);
+    expect(first.arguments.slice(9, 14)).toEqual([
+      "--prompt-template",
+      trustedPolicyDefinition.promptTemplateResources["prompt:unused"],
+      "--prompt-template",
+      trustedPolicyDefinition.promptTemplateResources[
+        "prompt:principal-feature"
+      ],
+      "--no-context-files",
     ]);
     expect(first.arguments).not.toContain(
       trustedPolicyDefinition.skillResources["skill:unused"],
@@ -434,6 +656,34 @@ describe("createPiLaunchPlan", () => {
         expect(error).toBeInstanceOf(LaunchPlanInputError);
         expect(String(error)).not.toContain("SENSITIVE_CORRELATION");
       }
+    },
+  );
+
+  it.each(exceptionalManifestCases)(
+    "converts a manifest %s to one fixed redacted launch-plan error",
+    (_label, createInput) => {
+      try {
+        createPiLaunchPlan(createInput(), trustedPolicy);
+        throw new Error("expected LaunchPlanInputError");
+      } catch (error) {
+        expect(error).toEqual(
+          new LaunchPlanInputError(
+            "manifest input could not be safely inspected",
+          ),
+        );
+        expect(String(error)).not.toContain(exceptionalMarker());
+        expect(String(error)).not.toContain("HostileCredentialTrap");
+        expect(String(error)).not.toContain("piExecutable");
+      }
+    },
+  );
+
+  it.each([null, undefined, 42, "manifest", []])(
+    "returns a domain error for malformed launch-plan manifest input %j",
+    (manifest) => {
+      expect(() => createPiLaunchPlan(manifest, trustedPolicy)).toThrow(
+        LaunchPlanInputError,
+      );
     },
   );
 

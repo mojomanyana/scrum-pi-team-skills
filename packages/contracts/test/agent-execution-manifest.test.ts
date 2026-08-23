@@ -35,6 +35,77 @@ function cloneManifest(): AgentExecutionManifest {
   return structuredClone(principalDeveloperManifest) as AgentExecutionManifest;
 }
 
+const exceptionalInputError = {
+  valid: false,
+  errors: [
+    {
+      path: "/",
+      code: "input-introspection",
+      message: "input could not be safely inspected",
+    },
+  ],
+} as const;
+
+const exceptionalManifestCases: ReadonlyArray<
+  readonly [string, () => unknown]
+> = [
+  [
+    "top-level getter",
+    () => {
+      const manifest = cloneManifest();
+      Object.defineProperty(manifest, "schemaVersion", {
+        enumerable: true,
+        get: throwExceptionalInput,
+      });
+      return manifest;
+    },
+  ],
+  [
+    "nested getter",
+    () => {
+      const manifest = cloneManifest();
+      Object.defineProperty(manifest.authorization, "objective", {
+        enumerable: true,
+        get: throwExceptionalInput,
+      });
+      return manifest;
+    },
+  ],
+  [
+    "Proxy get trap",
+    () =>
+      new Proxy(cloneManifest(), {
+        get: throwExceptionalInput,
+      }),
+  ],
+  [
+    "Proxy ownKeys trap",
+    () =>
+      new Proxy(cloneManifest(), {
+        ownKeys: throwExceptionalInput,
+      }),
+  ],
+  [
+    "Proxy getOwnPropertyDescriptor trap",
+    () =>
+      new Proxy(cloneManifest(), {
+        getOwnPropertyDescriptor: throwExceptionalInput,
+      }),
+  ],
+];
+
+function exceptionalMarker(): string {
+  return ["OPENAI_API_KEY", "secret"].join("=");
+}
+
+function throwExceptionalInput(): never {
+  const error = new Error(
+    `${exceptionalMarker()} schemaVersion hostile property value`,
+  );
+  error.name = "HostileCredentialTrap";
+  throw error;
+}
+
 const structuralAjv = new Ajv({ allErrors: true });
 structuralAjv.addSchema(executionContextSchema);
 const validateManifestStructure = structuralAjv.compile(
@@ -416,6 +487,19 @@ describe("spts.agent-execution-manifest", () => {
       });
     }
   });
+
+  it.each(exceptionalManifestCases)(
+    "returns one fixed redacted domain result for a manifest %s",
+    (_label, createInput) => {
+      const result = validateGovernedAgentExecutionManifest(createInput());
+
+      expect(result).toEqual(exceptionalInputError);
+      expect(JSON.stringify(result)).not.toContain(exceptionalMarker());
+      expect(JSON.stringify(result)).not.toContain("HostileCredentialTrap");
+      expect(JSON.stringify(result)).not.toContain("schemaVersion");
+      expect(isGovernedAgentExecutionManifest(createInput())).toBe(false);
+    },
+  );
 
   it("scans logical resource strings without bare credential substrings", () => {
     const manifest = cloneManifest();

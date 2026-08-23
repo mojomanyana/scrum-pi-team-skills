@@ -1,6 +1,5 @@
 import {
   validateGovernedAgentExecutionManifest,
-  type AgentExecutionManifest,
   type PromptTemplateReference,
   type SkillReference,
 } from "@scrum-pi-team-skills/contracts";
@@ -80,6 +79,53 @@ const CREDENTIAL_TOKEN_PREFIX =
   /(?:^|[^A-Za-z0-9])(?:sk|ghp|github_pat)_[A-Za-z0-9]+/i;
 const issuedTrustedPolicies = new WeakSet<object>();
 
+type InputSnapshot = { ok: true; value: unknown } | { ok: false };
+
+function copyJsonShapedInput(
+  value: unknown,
+  ancestors = new Set<object>(),
+): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  if (ancestors.has(value)) throw new TypeError();
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const copy: unknown[] = [];
+      const length = value.length;
+      for (let index = 0; index < length; index += 1) {
+        if (Object.hasOwn(value, index)) {
+          copy[index] = copyJsonShapedInput(value[index], ancestors);
+        } else {
+          copy.length = index + 1;
+        }
+      }
+      return copy;
+    }
+
+    const copy: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      Object.defineProperty(copy, key, {
+        configurable: true,
+        enumerable: true,
+        value: copyJsonShapedInput(item, ancestors),
+        writable: true,
+      });
+    }
+    return copy;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function snapshotInput(value: unknown): InputSnapshot {
+  try {
+    return { ok: true, value: copyJsonShapedInput(value) };
+  } catch {
+    return { ok: false };
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -138,62 +184,97 @@ function copyResourceRegistry(
   }
 
   const entries: Array<readonly [string, string]> = [];
-  const physicalPaths = new Set<string>();
   for (const [reference, pathValue] of Object.entries(value)) {
     if (!referencePattern.test(reference) || hasCredentialShape(reference)) {
       throw new LaunchPlanInputError(
         `${label} resources contain an invalid logical resource identity`,
       );
     }
-    const path = requireLocalPath(pathValue, `${label} resource path`);
-    if (physicalPaths.has(path)) {
-      throw new LaunchPlanInputError(
-        `${label} resources must not bind multiple logical references to one physical path`,
-      );
-    }
-    physicalPaths.add(path);
-    entries.push([reference, path]);
+    entries.push([
+      reference,
+      requireLocalPath(pathValue, `${label} resource path`),
+    ]);
   }
 
   return Object.freeze(Object.fromEntries(entries));
 }
 
+function requireUniquePhysicalPaths(paths: readonly string[]): void {
+  if (new Set(paths).size !== paths.length) {
+    throw new LaunchPlanInputError(
+      "trusted launch policy must bind each logical resource to a unique physical path",
+    );
+  }
+}
+
 /** Validate, copy, brand, and deeply freeze local operator-owned launch authority. */
 export function createTrustedLaunchPolicy(value: unknown): TrustedLaunchPolicy {
-  if (!isRecord(value)) {
+  const snapshot = snapshotInput(value);
+  if (!snapshot.ok) {
+    throw new LaunchPlanInputError(
+      "trusted launch policy input could not be safely inspected",
+    );
+  }
+
+  const definition = snapshot.value;
+  if (!isRecord(definition)) {
     throw new LaunchPlanInputError("trusted launch policy must be an object");
   }
-  if (Object.keys(value).some((key) => !POLICY_PROPERTIES.has(key))) {
+  if (Object.keys(definition).some((key) => !POLICY_PROPERTIES.has(key))) {
     throw new LaunchPlanInputError(
       "trusted launch policy must not contain undeclared properties",
     );
   }
 
+  const piExecutable = requireLocalPath(
+    definition.piExecutable,
+    "Pi executable",
+  );
+  const piDaddyExtension = requireLocalPath(
+    definition.piDaddyExtension,
+    "pi-daddy grants extension",
+  );
+  const governanceLedgerPath = requireLocalPath(
+    definition.governanceLedgerPath,
+    "governance ledger",
+  );
+  const skillResources = copyResourceRegistry(
+    definition.skillResources,
+    "skill",
+    SKILL_REFERENCE,
+  );
+  const promptTemplateResources = copyResourceRegistry(
+    definition.promptTemplateResources,
+    "prompt template",
+    PROMPT_REFERENCE,
+  );
+  const systemPrompt = requireLocalPath(
+    definition.systemPrompt,
+    "system prompt",
+  );
+  const appendSystemPrompt = requireLocalPath(
+    definition.appendSystemPrompt,
+    "append system prompt",
+  );
+
+  requireUniquePhysicalPaths([
+    piExecutable,
+    piDaddyExtension,
+    governanceLedgerPath,
+    ...Object.values(skillResources),
+    ...Object.values(promptTemplateResources),
+    systemPrompt,
+    appendSystemPrompt,
+  ]);
+
   const policy: TrustedLaunchPolicy = Object.freeze({
-    piExecutable: requireLocalPath(value.piExecutable, "Pi executable"),
-    piDaddyExtension: requireLocalPath(
-      value.piDaddyExtension,
-      "pi-daddy grants extension",
-    ),
-    governanceLedgerPath: requireLocalPath(
-      value.governanceLedgerPath,
-      "governance ledger",
-    ),
-    skillResources: copyResourceRegistry(
-      value.skillResources,
-      "skill",
-      SKILL_REFERENCE,
-    ),
-    promptTemplateResources: copyResourceRegistry(
-      value.promptTemplateResources,
-      "prompt template",
-      PROMPT_REFERENCE,
-    ),
-    systemPrompt: requireLocalPath(value.systemPrompt, "system prompt"),
-    appendSystemPrompt: requireLocalPath(
-      value.appendSystemPrompt,
-      "append system prompt",
-    ),
+    piExecutable,
+    piDaddyExtension,
+    governanceLedgerPath,
+    skillResources,
+    promptTemplateResources,
+    systemPrompt,
+    appendSystemPrompt,
     [trustedLaunchPolicyBrand]: true as const,
   });
 
@@ -245,30 +326,45 @@ function redactedResourceArguments(
  * separately created local operator authority. This function never launches Pi.
  */
 export function createPiLaunchPlan(
-  manifest: AgentExecutionManifest,
-  trustedPolicy: TrustedLaunchPolicy,
+  manifest: unknown,
+  trustedPolicy: unknown,
 ): PiLaunchPlan {
-  requireTrustedLaunchPolicy(trustedPolicy);
+  try {
+    requireTrustedLaunchPolicy(trustedPolicy);
+  } catch (error) {
+    if (error instanceof LaunchPlanInputError) throw error;
+    throw new LaunchPlanInputError(
+      "trusted launch policy input could not be safely inspected",
+    );
+  }
 
   const validation = validateGovernedAgentExecutionManifest(manifest);
   if (!validation.valid) {
+    if (
+      validation.errors.some((error) => error.code === "input-introspection")
+    ) {
+      throw new LaunchPlanInputError(
+        "manifest input could not be safely inspected",
+      );
+    }
     const summary = validation.errors
       .map((error) => `${error.path} ${error.message}`)
       .join("; ");
     throw new LaunchPlanInputError(`manifest is invalid: ${summary}`);
   }
 
+  const validatedManifest = validation.value;
   const skills = resolveResources(
-    manifest.resources.skills,
+    validatedManifest.resources.skills,
     trustedPolicy.skillResources,
     "skill",
   );
   const promptTemplates = resolveResources(
-    manifest.resources.promptTemplates,
+    validatedManifest.resources.promptTemplates,
     trustedPolicy.promptTemplateResources,
     "prompt template",
   );
-  const toolAllowlist = manifest.tools.join(",");
+  const toolAllowlist = validatedManifest.tools.join(",");
 
   const arguments_: string[] = [
     "--no-extensions",
@@ -287,7 +383,7 @@ export function createPiLaunchPlan(
     toolAllowlist,
   ];
   const environment = {
-    PI_GRANTS_GRANT: manifest.piDaddyGrant,
+    PI_GRANTS_GRANT: validatedManifest.piDaddyGrant,
     PI_GRANTS_MAX_DEPTH: "0" as const,
     PI_GRANTS_LEDGER: trustedPolicy.governanceLedgerPath,
   };
@@ -295,7 +391,7 @@ export function createPiLaunchPlan(
   return {
     executable: trustedPolicy.piExecutable,
     arguments: arguments_,
-    workingDirectory: manifest.repository.root,
+    workingDirectory: validatedManifest.repository.root,
     environment,
     redactedOperatorPreview: {
       executable: "<pi-executable>",
@@ -304,11 +400,14 @@ export function createPiLaunchPlan(
         "--extension",
         "<pi-daddy-grants>",
         "--no-skills",
-        ...redactedResourceArguments("--skill", manifest.resources.skills),
+        ...redactedResourceArguments(
+          "--skill",
+          validatedManifest.resources.skills,
+        ),
         "--no-prompt-templates",
         ...redactedResourceArguments(
           "--prompt-template",
-          manifest.resources.promptTemplates,
+          validatedManifest.resources.promptTemplates,
         ),
         "--no-context-files",
         "--system-prompt",
@@ -320,15 +419,15 @@ export function createPiLaunchPlan(
       ],
       workingDirectory: "<repository-root>",
       environment: {
-        PI_GRANTS_GRANT: manifest.piDaddyGrant,
+        PI_GRANTS_GRANT: validatedManifest.piDaddyGrant,
         PI_GRANTS_MAX_DEPTH: "0",
         PI_GRANTS_LEDGER: "<governance-ledger>",
       },
     },
     correlation: {
-      executionId: manifest.executionId,
-      pacaProjectId: manifest.paca.projectId,
-      pacaTaskId: manifest.paca.taskId,
+      executionId: validatedManifest.executionId,
+      pacaProjectId: validatedManifest.paca.projectId,
+      pacaTaskId: validatedManifest.paca.taskId,
     },
   };
 }

@@ -94,6 +94,59 @@ const validateManifestSchema = ajv.compile<AgentExecutionManifest>(
   agentExecutionManifestSchema,
 );
 
+const exceptionalInputError: ContractValidationError = {
+  path: "/",
+  code: "input-introspection",
+  message: "input could not be safely inspected",
+};
+
+type InputSnapshot = { ok: true; value: unknown } | { ok: false };
+
+function copyJsonShapedInput(
+  value: unknown,
+  ancestors = new Set<object>(),
+): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  if (ancestors.has(value)) throw new TypeError();
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const copy: unknown[] = [];
+      const length = value.length;
+      for (let index = 0; index < length; index += 1) {
+        if (Object.hasOwn(value, index)) {
+          copy[index] = copyJsonShapedInput(value[index], ancestors);
+        } else {
+          copy.length = index + 1;
+        }
+      }
+      return copy;
+    }
+
+    const copy: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      Object.defineProperty(copy, key, {
+        configurable: true,
+        enumerable: true,
+        value: copyJsonShapedInput(item, ancestors),
+        writable: true,
+      });
+    }
+    return copy;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function snapshotInput(value: unknown): InputSnapshot {
+  try {
+    return { ok: true, value: copyJsonShapedInput(value) };
+  } catch {
+    return { ok: false };
+  }
+}
+
 function toActionableError(error: ErrorObject): ContractValidationError {
   const missingProperty =
     error.keyword === "required"
@@ -190,16 +243,22 @@ function findCredentialErrors(
 export function validateGovernedAgentExecutionManifest(
   value: unknown,
 ): ContractValidationResult<AgentExecutionManifest> {
-  if (!validateManifestSchema(value)) {
+  const snapshot = snapshotInput(value);
+  if (!snapshot.ok) {
+    return { valid: false, errors: [{ ...exceptionalInputError }] };
+  }
+
+  if (!validateManifestSchema(snapshot.value)) {
     return {
       valid: false,
       errors: (validateManifestSchema.errors ?? []).map(toActionableError),
     };
   }
 
-  const errors = findCredentialErrors(value);
+  const manifest = snapshot.value;
+  const errors = findCredentialErrors(manifest);
 
-  if (!hasCanonicalToolOrder(value.tools)) {
+  if (!hasCanonicalToolOrder(manifest.tools)) {
     errors.push({
       path: "/tools",
       code: "canonical-order",
@@ -207,8 +266,8 @@ export function validateGovernedAgentExecutionManifest(
     });
   }
 
-  const expectedGrant = derivePiDaddyGrant(value.tools);
-  if (value.piDaddyGrant !== expectedGrant) {
+  const expectedGrant = derivePiDaddyGrant(manifest.tools);
+  if (manifest.piDaddyGrant !== expectedGrant) {
     errors.push({
       path: "/piDaddyGrant",
       code: "matching-grant",
@@ -217,7 +276,7 @@ export function validateGovernedAgentExecutionManifest(
   }
 
   return errors.length === 0
-    ? { valid: true, value }
+    ? { valid: true, value: manifest }
     : { valid: false, errors };
 }
 
@@ -235,5 +294,6 @@ export function isGovernedAgentExecutionManifest(
 export const isAgentExecutionManifest = isGovernedAgentExecutionManifest;
 
 export function isExecutionContext(value: unknown): value is ExecutionContext {
-  return validateExecutionContext(value);
+  const snapshot = snapshotInput(value);
+  return snapshot.ok && validateExecutionContext(snapshot.value);
 }
