@@ -370,6 +370,8 @@ export async function startGovernedLocalProcess(
   let abortListener: (() => void) | null = null;
   let stdoutPending = Promise.resolve();
   let stderrPending = Promise.resolve();
+  let stdoutCallbackFailed = false;
+  let stderrCallbackFailed = false;
 
   const cleanup = (): void => {
     if (runtimeTimer !== undefined) {
@@ -575,14 +577,30 @@ export async function startGovernedLocalProcess(
       stderrBytes += chunk.byteLength;
       stderrHash.update(chunk);
     }
-    if (!callback) return;
+    if (
+      !callback ||
+      (name === "stdout" ? stdoutCallbackFailed : stderrCallbackFailed)
+    )
+      return;
     stream.pause();
+    let resumed = false;
+    const resume = () => {
+      if (!closed && !resumed) {
+        resumed = true;
+        stream.resume();
+      }
+    };
     const pending = Promise.resolve()
       .then(() => callback(chunk))
-      .catch(() => supervisorFailure(name))
-      .finally(() => {
-        if (!closed) stream.resume();
-      });
+      .catch(() => {
+        if (name === "stdout") stdoutCallbackFailed = true;
+        else stderrCallbackFailed = true;
+        // A paused full pipe can prevent child close. Drain remaining metadata-only
+        // bytes before governed termination waits for raw close and finalization.
+        resume();
+        return supervisorFailure(name);
+      })
+      .finally(resume);
     if (name === "stdout") stdoutPending = pending;
     else stderrPending = pending;
   };

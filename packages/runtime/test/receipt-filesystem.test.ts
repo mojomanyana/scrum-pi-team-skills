@@ -1,6 +1,7 @@
 import {
   chmodSync,
   closeSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -58,6 +59,40 @@ function operations(
   onClose: (descriptor: number) => void = closeSync,
 ): ReceiptFileOperations {
   return { write, sync: fsyncSync, close: onClose };
+}
+
+function impossibleTimeoutReceipts(): LifecycleReceipt[] {
+  const receipts = [
+    structuredClone(receiptsExample[0]),
+    structuredClone(receiptsExample[1]),
+    {
+      ...structuredClone(receiptsExample[1]),
+      eventType: "process_timed_out",
+      payload: { maximumRuntimeMs: 10 },
+    },
+    {
+      ...structuredClone(receiptsExample.at(-1)!),
+      payload: {
+        ...structuredClone(receiptsExample.at(-1)!.payload),
+        exitCode: null,
+        signal: "SIGTERM",
+        outcome: "timed_out",
+      },
+    },
+  ] as LifecycleReceipt[];
+  let previous: string | null = null;
+  receipts.forEach((receipt, index) => {
+    (receipt as { sequence: number }).sequence = index + 1;
+    (receipt as { timestamp: string }).timestamp =
+      `2026-08-23T00:00:${String(index).padStart(2, "0")}.000Z`;
+    (
+      receipt as { previousReceiptDigest: string | null }
+    ).previousReceiptDigest = previous;
+    (receipt as { receiptDigest: string }).receiptDigest =
+      computeLifecycleReceiptDigest(receipt);
+    previous = receipt.receiptDigest;
+  });
+  return receipts;
 }
 
 async function writeExample(
@@ -126,6 +161,49 @@ describe("local filesystem receipt sink", () => {
         authenticator: authenticator(),
       }).valid,
     ).toBe(true);
+  });
+
+  it("uses authoritative lifecycle semantics for close, anchor creation, and inspection", async () => {
+    const closeParent = trustedParent();
+    const sink = createLocalFilesystemReceiptSink({
+      trustedParent: closeParent,
+      authenticator: authenticator(),
+    });
+    const writer = await sink.open({
+      executionId: "runtime-example-001",
+      contractId: "spts.lifecycle-receipt",
+      contractVersion: "1.0.0",
+    });
+    for (const receipt of impossibleTimeoutReceipts())
+      await writer.append(canonicalSerializeLifecycleValue(receipt));
+    expect(() => writer.close()).toThrow(
+      new ReceiptStorageError("receipt storage operation failed"),
+    );
+    expect(
+      existsSync(join(closeParent, "runtime-example-001", "anchor.json")),
+    ).toBe(false);
+
+    const inspectParent = trustedParent();
+    await writeExample(inspectParent);
+    const receiptPath = join(
+      inspectParent,
+      "runtime-example-001",
+      "receipts.jsonl",
+    );
+    writeFileSync(
+      receiptPath,
+      `${impossibleTimeoutReceipts()
+        .map(canonicalSerializeLifecycleValue)
+        .join("\n")}\n`,
+      { mode: 0o600 },
+    );
+    expect(
+      inspectLifecycleReceipts({
+        trustedParent: inspectParent,
+        executionId: "runtime-example-001",
+        authenticator: authenticator(),
+      }),
+    ).toEqual({ valid: false, code: "receipt-lifecycle-invalid" });
   });
 
   it.each([

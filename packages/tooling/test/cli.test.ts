@@ -1,7 +1,16 @@
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -30,6 +39,26 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+class ScriptedWritable extends EventEmitter {
+  readonly chunks: Buffer[] = [];
+  writes = 0;
+
+  constructor(
+    private readonly script: (
+      stream: ScriptedWritable,
+      callback: (error?: Error | null) => void,
+    ) => boolean,
+  ) {
+    super();
+  }
+
+  write(chunk: Uint8Array, callback: (error?: Error | null) => void): boolean {
+    this.writes += 1;
+    this.chunks.push(Buffer.from(chunk));
+    return this.script(this, callback);
+  }
+}
+
 function successfulResult(executionId: string): ExecutionResult {
   return {
     executionId,
@@ -39,6 +68,59 @@ function successfulResult(executionId: string): ExecutionResult {
     stdout: { bytes: 0, sha256: "0".repeat(64) },
     stderr: { bytes: 0, sha256: "0".repeat(64) },
   };
+}
+
+function cliEnvironment(name: string): string | undefined {
+  if (name === "PATH") return dirname(process.execPath);
+  if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+  if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+  return undefined;
+}
+
+async function runWithWritable(
+  streamName: "stdout" | "stderr",
+  stream: ScriptedWritable,
+  errors: string[],
+  terminate = vi.fn(async () => {}),
+): Promise<number> {
+  const files = setup();
+  const executionId = `cli-writable-${streamName}`;
+  return runCli(
+    [
+      "run",
+      "--manifest",
+      files.manifestPath,
+      "--operator-config",
+      files.configPath,
+    ],
+    {
+      [streamName]: stream as unknown as Writable,
+      writeOutput: () => {},
+      writeError: (value) => errors.push(value),
+      readEnvironment: cliEnvironment,
+      startGovernedLocalProcess: async (options) => {
+        const exit = (async (): Promise<ExecutionResult> => {
+          try {
+            await options[streamName === "stdout" ? "onStdout" : "onStderr"]?.(
+              Buffer.from("governed-output"),
+            );
+            return successfulResult(executionId);
+          } catch {
+            return {
+              ...successfulResult(executionId),
+              outcome: "supervisor_failed",
+            };
+          }
+        })();
+        return {
+          executionId,
+          started: Promise.resolve(),
+          exit,
+          terminate,
+        };
+      },
+    },
+  );
 }
 
 function isProcessAlive(processId: number): boolean {
@@ -225,6 +307,380 @@ describe("private governed runtime CLI", () => {
       expect(errors).toEqual(["governed runtime operation failed"]);
       expect(errors.join("\n")).not.toContain(authenticationValue ?? "never");
     },
+  );
+
+  it.each(["stdout", "stderr"] as const)(
+    "contains synchronous %s write throws with a fixed failure",
+    async (streamName) => {
+      const attackerMessage = "ATTACKER_SYNC_WRITE_DETAIL_DO_NOT_ESCAPE";
+      const errors: string[] = [];
+      const terminate = vi.fn(async () => {});
+      const stream = new ScriptedWritable(() => {
+        throw new Error(attackerMessage);
+      });
+
+      expect(await runWithWritable(streamName, stream, errors, terminate)).toBe(
+        3,
+      );
+      expect(terminate).toHaveBeenCalledTimes(1);
+      expect(errors).toEqual(["governed runtime operation failed"]);
+      expect(errors.join("\n")).not.toContain(attackerMessage);
+      expect(stream.listenerCount("error")).toBe(0);
+      expect(stream.listenerCount("close")).toBe(0);
+      expect(stream.listenerCount("drain")).toBe(0);
+    },
+  );
+
+  it.each(["stdout", "stderr"] as const)(
+    "contains %s write-callback errors",
+    async (streamName) => {
+      const attackerMessage = "ATTACKER_CALLBACK_DETAIL_DO_NOT_ESCAPE";
+      const errors: string[] = [];
+      const stream = new ScriptedWritable((_target, callback) => {
+        callback(new Error(attackerMessage));
+        return true;
+      });
+
+      expect(await runWithWritable(streamName, stream, errors)).toBe(3);
+      expect(errors).toEqual(["governed runtime operation failed"]);
+      expect(errors.join("\n")).not.toContain(attackerMessage);
+      expect(stream.eventNames()).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["stdout", true],
+    ["stderr", true],
+    ["stdout", false],
+    ["stderr", false],
+  ] as const)(
+    "contains asynchronous %s errors after write returns %s",
+    async (streamName, writeResult) => {
+      const attackerMessage = "ATTACKER_ASYNC_EPIPE_DETAIL_DO_NOT_ESCAPE";
+      const errors: string[] = [];
+      const applicationErrors: unknown[] = [];
+      const stream = new ScriptedWritable((target) => {
+        setImmediate(() =>
+          target.emit(
+            "error",
+            Object.assign(new Error(attackerMessage), { code: "EPIPE" }),
+          ),
+        );
+        return writeResult;
+      });
+      const applicationListener = (error: unknown) =>
+        applicationErrors.push(error);
+      stream.on("error", applicationListener);
+      const baseline = {
+        error: stream.listenerCount("error"),
+        close: stream.listenerCount("close"),
+        drain: stream.listenerCount("drain"),
+      };
+
+      expect(await runWithWritable(streamName, stream, errors)).toBe(3);
+      expect(applicationErrors).toHaveLength(1);
+      expect(stream.listeners("error")).toEqual([applicationListener]);
+      expect(stream.listenerCount("error")).toBe(baseline.error);
+      expect(stream.listenerCount("close")).toBe(baseline.close);
+      expect(stream.listenerCount("drain")).toBe(baseline.drain);
+      expect(errors).toEqual(["governed runtime operation failed"]);
+      expect(errors.join("\n")).not.toContain(attackerMessage);
+    },
+  );
+
+  it.each(["stdout", "stderr"] as const)(
+    "rejects %s close before write completion or drain",
+    async (streamName) => {
+      const errors: string[] = [];
+      const stream = new ScriptedWritable((target) => {
+        setImmediate(() => target.emit("close"));
+        return false;
+      });
+
+      expect(await runWithWritable(streamName, stream, errors)).toBe(3);
+      expect(errors).toEqual(["governed runtime operation failed"]);
+      expect(stream.eventNames()).toEqual([]);
+    },
+  );
+
+  it.each(["stdout", "stderr"] as const)(
+    "settles %s write races once and removes only temporary listeners",
+    async (streamName) => {
+      const attackerMessage = "ATTACKER_WRITE_RACE_DETAIL_DO_NOT_ESCAPE";
+      const errors: string[] = [];
+      const applicationErrors: unknown[] = [];
+      const terminate = vi.fn(async () => {});
+      const stream = new ScriptedWritable((target, callback) => {
+        setImmediate(() => {
+          target.emit("error", new Error(attackerMessage));
+          callback(new Error(attackerMessage));
+          target.emit("drain");
+          target.emit("close");
+          target.emit("error", new Error(attackerMessage));
+          callback();
+        });
+        return false;
+      });
+      const applicationListener = (error: unknown) =>
+        applicationErrors.push(error);
+      const unrelatedClose = () => {};
+      const unrelatedDrain = () => {};
+      stream.on("error", applicationListener);
+      stream.on("close", unrelatedClose);
+      stream.on("drain", unrelatedDrain);
+      const baseline = {
+        error: stream.listenerCount("error"),
+        close: stream.listenerCount("close"),
+        drain: stream.listenerCount("drain"),
+        beforeExit: process.listenerCount("beforeExit"),
+      };
+      const processErrors: unknown[] = [];
+      const onUnhandled = (error: unknown) => processErrors.push(error);
+      const onUncaught = (error: unknown) => processErrors.push(error);
+      process.on("unhandledRejection", onUnhandled);
+      process.on("uncaughtException", onUncaught);
+
+      try {
+        expect(
+          await runWithWritable(streamName, stream, errors, terminate),
+        ).toBe(3);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(terminate).toHaveBeenCalledTimes(1);
+        expect(applicationErrors).toHaveLength(2);
+        expect(stream.listenerCount("error")).toBe(baseline.error);
+        expect(stream.listenerCount("close")).toBe(baseline.close);
+        expect(stream.listenerCount("drain")).toBe(baseline.drain);
+        expect(process.listenerCount("beforeExit")).toBe(baseline.beforeExit);
+        expect(stream.listeners("error")).toContain(applicationListener);
+        expect(stream.listeners("close")).toContain(unrelatedClose);
+        expect(stream.listeners("drain")).toContain(unrelatedDrain);
+        expect(errors).toEqual(["governed runtime operation failed"]);
+        expect(errors.join("\n")).not.toContain(attackerMessage);
+        expect(processErrors).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+        process.off("uncaughtException", onUncaught);
+      }
+    },
+  );
+
+  it("waits for drain after a completed backpressured write", async () => {
+    const errors: string[] = [];
+    let writeCallback!: (error?: Error | null) => void;
+    let writable!: ScriptedWritable;
+    const stream = new ScriptedWritable((target, callback) => {
+      writable = target;
+      writeCallback = callback;
+      return false;
+    });
+    let settled = false;
+    const run = runWithWritable("stdout", stream, errors).finally(() => {
+      settled = true;
+    });
+    while (stream.writes === 0)
+      await new Promise((resolve) => setImmediate(resolve));
+
+    writeCallback();
+    expect(settled).toBe(false);
+    writable.emit("drain");
+    expect(await run).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
+  it.each(["stdout", "stderr"] as const)(
+    "preserves normal ordered %s output through backpressure",
+    async (streamName) => {
+      const errors: string[] = [];
+      const stream = new ScriptedWritable((target, callback) => {
+        setImmediate(() => {
+          callback();
+          target.emit("drain");
+        });
+        return false;
+      });
+
+      expect(await runWithWritable(streamName, stream, errors)).toBe(0);
+      expect(stream.writes).toBe(1);
+      expect(Buffer.concat(stream.chunks).toString()).toBe("governed-output");
+      expect(stream.eventNames()).toEqual([]);
+      expect(errors).toEqual([]);
+    },
+  );
+
+  it("terminates and finalizes a real process after an asynchronous output error", async () => {
+    const files = setup("ignore-term-ready", "0");
+    const adapter = createNodeProcessAdapter();
+    const spawnedProcessIds: number[] = [];
+    const applicationErrors: unknown[] = [];
+    const errors: string[] = [];
+    const stream = new ScriptedWritable((target) => {
+      setImmediate(() =>
+        target.emit(
+          "error",
+          Object.assign(new Error("ATTACKER_REAL_EPIPE_DO_NOT_ESCAPE"), {
+            code: "EPIPE",
+          }),
+        ),
+      );
+      return true;
+    });
+    const applicationListener = (error: unknown) =>
+      applicationErrors.push(error);
+    stream.on("error", applicationListener);
+    let terminate: ReturnType<typeof vi.fn> | undefined;
+
+    expect(
+      await runCli(
+        [
+          "run",
+          "--manifest",
+          files.manifestPath,
+          "--operator-config",
+          files.configPath,
+        ],
+        {
+          stdout: stream as unknown as Writable,
+          writeError: (value) => errors.push(value),
+          writeStderr: () => {},
+          readEnvironment: cliEnvironment,
+          startGovernedLocalProcess: async (options) => {
+            const handle = await startGovernedLocalProcess({
+              ...options,
+              processAdapter: {
+                platform: adapter.platform,
+                spawn(executable, arguments_, spawnOptions) {
+                  const child = adapter.spawn(
+                    executable,
+                    arguments_,
+                    spawnOptions,
+                  );
+                  if (child.pid !== undefined)
+                    spawnedProcessIds.push(child.pid);
+                  return child;
+                },
+                isProcessGroupAlive: adapter.isProcessGroupAlive,
+                killProcessGroup: adapter.killProcessGroup,
+              },
+            });
+            terminate = vi.fn((reason) => handle.terminate(reason));
+            return { ...handle, terminate };
+          },
+        },
+      ),
+    ).toBe(3);
+
+    expect(spawnedProcessIds).toHaveLength(1);
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminate).toHaveBeenCalledWith("supervisor_failure");
+    expect(spawnedProcessIds.every((pid) => !isProcessAlive(pid))).toBe(true);
+    expect(stream.listeners("error")).toEqual([applicationListener]);
+    expect(applicationErrors).toHaveLength(1);
+    expect(errors).toEqual(["governed runtime operation failed"]);
+    expect(errors.join("\n")).not.toContain(
+      "ATTACKER_REAL_EPIPE_DO_NOT_ESCAPE",
+    );
+
+    const { readdir } = await import("node:fs/promises");
+    const [executionId] = await readdir(join(files.root, "receipts"));
+    const receiptText = readFileSync(
+      join(files.root, "receipts", executionId!, "receipts.jsonl"),
+      "utf8",
+    );
+    const events = receiptText
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line).eventType as string);
+    expect(
+      events.filter((event) => event === "termination_requested"),
+    ).toHaveLength(1);
+    expect(events).toContain("supervisor_failed");
+    expect(events.at(-1)).toBe("process_exited");
+  });
+
+  it.each([
+    ["stdout", "large"],
+    ["stderr", "large-stderr"],
+  ] as const)(
+    "contains an end-to-end early-closing %s pipe",
+    async (streamName, mode) => {
+      const files = setup(mode, "4000000");
+      const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+      const command =
+        streamName === "stdout"
+          ? '"$@" | head -c 1 >/dev/null; status=${PIPESTATUS[0]}; exit "$status"'
+          : '"$@" 3>&1 1>/dev/null 2>&3 | head -c 1 >/dev/null; status=${PIPESTATUS[0]}; exit "$status"';
+      const stdoutPath = join(files.root, "cli-stdout.log");
+      const stderrPath = join(files.root, "cli-stderr.log");
+      const stdoutDescriptor = openSync(stdoutPath, "w", 0o600);
+      const stderrDescriptor = openSync(stderrPath, "w", 0o600);
+      const child = spawn(
+        "bash",
+        [
+          "-o",
+          "pipefail",
+          "-c",
+          command,
+          "spts-early-close",
+          "env",
+          "MODEL_PROVIDER_VALUE=opaque",
+          `SPTS_RECEIPT_AUTH_KEY=${authenticationKey}`,
+          process.execPath,
+          cli,
+          "run",
+          "--manifest",
+          files.manifestPath,
+          "--operator-config",
+          files.configPath,
+        ],
+        {
+          detached: true,
+          env: process.env,
+          stdio: ["ignore", stdoutDescriptor, stderrDescriptor],
+        },
+      );
+      const processErrors: unknown[] = [];
+      child.on("error", (error) => processErrors.push(error));
+      const result = await new Promise<{
+        readonly code: number | null;
+        readonly signal: NodeJS.Signals | null;
+      }>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          try {
+            if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+          } catch {
+            // The close handler may have won the timeout race.
+          }
+          reject(new Error("early-closing pipe fixture timed out"));
+        }, 10_000);
+        child.once("close", (code, signal) => {
+          clearTimeout(timer);
+          resolve({ code, signal });
+        });
+      });
+      closeSync(stdoutDescriptor);
+      closeSync(stderrDescriptor);
+      const stdoutText = readFileSync(stdoutPath, "utf8");
+      const stderrText = readFileSync(stderrPath, "utf8");
+      const visibleText = `${stdoutText}${stderrText}`;
+
+      expect(result, visibleText).toEqual({ code: 3, signal: null });
+      expect(processErrors).toEqual([]);
+      expect(visibleText).not.toContain("EPIPE");
+      expect(visibleText).not.toContain("Error:");
+      if (streamName === "stdout")
+        expect(stderrText).toBe("governed runtime operation failed\n");
+
+      const { readdir } = await import("node:fs/promises");
+      const executionIds = await readdir(join(files.root, "receipts"));
+      expect(executionIds).toHaveLength(1);
+      const receiptText = readFileSync(
+        join(files.root, "receipts", executionIds[0]!, "receipts.jsonl"),
+        "utf8",
+      );
+      expect(receiptText).toContain('"code":"output_callback_failed"');
+      expect(receiptText).not.toContain("EPIPE");
+    },
+    15_000,
   );
 
   it.each([

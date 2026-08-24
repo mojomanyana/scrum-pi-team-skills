@@ -22,6 +22,41 @@ function rehash(receipts: LifecycleReceipt[]): void {
   }
 }
 
+function lifecycleChain(
+  events: ReadonlyArray<{
+    readonly eventType: LifecycleReceipt["eventType"];
+    readonly payload: LifecycleReceipt["payload"];
+  }>,
+  outcome: "timed_out" | "supervisor_failed" = "timed_out",
+  signal: "SIGTERM" | "SIGKILL" = "SIGTERM",
+): LifecycleReceipt[] {
+  const receipts = [
+    structuredClone(example[0]),
+    structuredClone(example[1]),
+    ...events.map(({ eventType, payload }) => ({
+      ...structuredClone(example[1]),
+      eventType,
+      payload,
+    })),
+    {
+      ...structuredClone(example.at(-1)!),
+      payload: {
+        ...structuredClone(example.at(-1)!.payload),
+        exitCode: null,
+        signal,
+        outcome,
+      },
+    },
+  ] as LifecycleReceipt[];
+  receipts.forEach((receipt, index) => {
+    (receipt as { sequence: number }).sequence = index + 1;
+    (receipt as { timestamp: string }).timestamp =
+      `2026-08-23T00:00:${String(index).padStart(2, "0")}.000Z`;
+  });
+  rehash(receipts);
+  return receipts;
+}
+
 describe("spts.lifecycle-receipt", () => {
   it("validates the versioned example and its canonical hash chain", () => {
     const receipts = example as LifecycleReceipt[];
@@ -174,6 +209,203 @@ describe("spts.lifecycle-receipt", () => {
     });
     rehash(missing);
     expect(verifyLifecycleReceiptChain(missing).valid).toBe(false);
+  });
+
+  it.each([
+    [
+      "missing timeout termination request",
+      [
+        {
+          eventType: "process_timed_out" as const,
+          payload: { maximumRuntimeMs: 10 },
+        },
+      ],
+    ],
+    [
+      "non-timeout termination reason",
+      [
+        {
+          eventType: "process_timed_out" as const,
+          payload: { maximumRuntimeMs: 10 },
+        },
+        {
+          eventType: "termination_requested" as const,
+          payload: { reason: "caller" as const },
+        },
+      ],
+    ],
+    [
+      "supervisor failure",
+      [
+        {
+          eventType: "process_timed_out" as const,
+          payload: { maximumRuntimeMs: 10 },
+        },
+        {
+          eventType: "termination_requested" as const,
+          payload: { reason: "timeout" as const },
+        },
+        {
+          eventType: "supervisor_failed" as const,
+          payload: {
+            code: "output_callback_failed" as const,
+            stream: "stdout" as const,
+          },
+        },
+      ],
+    ],
+  ])("rejects a fully rehashed timed_out chain with %s", (_label, events) => {
+    expect(verifyLifecycleReceiptChain(lifecycleChain(events))).toEqual({
+      valid: false,
+      code: "receipt-lifecycle-invalid",
+    });
+  });
+
+  it("rejects duplicate, conflicting, and late timeout termination reasons", () => {
+    const timedOut = {
+      eventType: "process_timed_out" as const,
+      payload: { maximumRuntimeMs: 10 },
+    };
+    const timeoutTermination = {
+      eventType: "termination_requested" as const,
+      payload: { reason: "timeout" as const },
+    };
+    const callerTermination = {
+      eventType: "termination_requested" as const,
+      payload: { reason: "caller" as const },
+    };
+    for (const events of [
+      [timedOut, timeoutTermination, timeoutTermination],
+      [timedOut, callerTermination],
+      [timeoutTermination, timedOut],
+      [
+        timedOut,
+        {
+          eventType: "process_killed" as const,
+          payload: { signal: "SIGKILL" as const },
+        },
+        timeoutTermination,
+      ],
+    ]) {
+      expect(verifyLifecycleReceiptChain(lifecycleChain(events))).toEqual({
+        valid: false,
+        code: "receipt-lifecycle-invalid",
+      });
+    }
+  });
+
+  it.each([
+    [
+      "after timeout termination",
+      [
+        {
+          eventType: "process_timed_out" as const,
+          payload: { maximumRuntimeMs: 10 },
+        },
+        {
+          eventType: "termination_requested" as const,
+          payload: { reason: "timeout" as const },
+        },
+        {
+          eventType: "supervisor_failed" as const,
+          payload: { code: "signal_failed" as const },
+        },
+      ],
+    ],
+    [
+      "before timeout evidence",
+      [
+        {
+          eventType: "supervisor_failed" as const,
+          payload: { code: "signal_failed" as const },
+        },
+        {
+          eventType: "process_timed_out" as const,
+          payload: { maximumRuntimeMs: 10 },
+        },
+        {
+          eventType: "termination_requested" as const,
+          payload: { reason: "timeout" as const },
+        },
+      ],
+    ],
+    [
+      "between timeout evidence and termination",
+      [
+        {
+          eventType: "process_timed_out" as const,
+          payload: { maximumRuntimeMs: 10 },
+        },
+        {
+          eventType: "supervisor_failed" as const,
+          payload: { code: "signal_failed" as const },
+        },
+        {
+          eventType: "termination_requested" as const,
+          payload: { reason: "timeout" as const },
+        },
+      ],
+    ],
+  ])("gives supervisor failure precedence %s", (_label, events) => {
+    expect(verifyLifecycleReceiptChain(lifecycleChain(events))).toEqual({
+      valid: false,
+      code: "receipt-lifecycle-invalid",
+    });
+  });
+
+  it("accepts canonical timeout termination with optional required kill evidence", () => {
+    const timeoutEvents = [
+      {
+        eventType: "process_timed_out" as const,
+        payload: { maximumRuntimeMs: 10 },
+      },
+      {
+        eventType: "termination_requested" as const,
+        payload: { reason: "timeout" as const },
+      },
+    ];
+    expect(
+      verifyLifecycleReceiptChain(lifecycleChain(timeoutEvents)).valid,
+    ).toBe(true);
+    expect(
+      verifyLifecycleReceiptChain(
+        lifecycleChain(
+          [
+            ...timeoutEvents,
+            {
+              eventType: "process_killed",
+              payload: { signal: "SIGKILL" },
+            },
+          ],
+          "timed_out",
+          "SIGKILL",
+        ),
+      ).valid,
+    ).toBe(true);
+  });
+
+  it("accepts supervisor_failed after complete timeout authority evidence", () => {
+    expect(
+      verifyLifecycleReceiptChain(
+        lifecycleChain(
+          [
+            {
+              eventType: "process_timed_out",
+              payload: { maximumRuntimeMs: 10 },
+            },
+            {
+              eventType: "termination_requested",
+              payload: { reason: "timeout" },
+            },
+            {
+              eventType: "supervisor_failed",
+              payload: { code: "signal_failed" },
+            },
+          ],
+          "supervisor_failed",
+        ),
+      ).valid,
+    ).toBe(true);
   });
 
   it("keeps direct-child signal state separate from process-group kill evidence", () => {

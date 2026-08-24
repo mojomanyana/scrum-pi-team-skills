@@ -9,6 +9,7 @@ const knownModes = new Set([
   "delay",
   "stream",
   "large",
+  "large-stderr",
   "ignore-term",
   "ignore-term-ready",
   "tree",
@@ -45,16 +46,23 @@ switch (mode) {
     process.stdout.write("fixture-stdout");
     process.stderr.write("fixture-stderr");
     break;
-  case "large": {
+  case "large":
+  case "large-stderr": {
     const bytes = Number(args[0] ?? 2_000_000);
     const chunk = Buffer.alloc(16_384, "x");
+    const stream = mode === "large" ? process.stdout : process.stderr;
     let remaining = bytes;
+    let first = true;
     while (remaining > 0) {
       const size = Math.min(remaining, chunk.length);
-      if (!process.stdout.write(chunk.subarray(0, size))) {
-        await new Promise((resolve) => process.stdout.once("drain", resolve));
+      if (!stream.write(chunk.subarray(0, size))) {
+        await new Promise((resolve) => stream.once("drain", resolve));
       }
       remaining -= size;
+      if (first && remaining > 0) {
+        first = false;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
     }
     break;
   }

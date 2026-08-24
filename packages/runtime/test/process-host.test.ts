@@ -1187,15 +1187,16 @@ describe("governed local process host", () => {
     expect(await eventuallyNotRunning(pid)).toBe(true);
   });
 
-  it("contains callback failure and still cleans up the process", async () => {
+  it("contains a large-output callback failure and still cleans up the process", async () => {
     const sink = memorySink();
     const handle = await startGovernedLocalProcess({
-      plan: plan("stream"),
+      plan: plan("large", "1000000"),
       environmentPolicy: environment(),
       runtimePolicy: runtime(),
       receiptSink: sink,
       executionIdSource: () => "runtime-execution-callback",
-      onStdout() {
+      async onStdout() {
+        await new Promise((resolve) => setTimeout(resolve, 100));
         throw new Error(marker);
       },
     });

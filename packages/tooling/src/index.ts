@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import type { Writable } from "node:stream";
 
 import {
   createLocalFilesystemReceiptSink,
@@ -27,6 +28,8 @@ export interface CliDependencies {
   readonly writeError?: (value: string) => void;
   readonly writeStdout?: (chunk: Uint8Array) => void | Promise<void>;
   readonly writeStderr?: (chunk: Uint8Array) => void | Promise<void>;
+  readonly stdout?: Writable;
+  readonly stderr?: Writable;
   readonly readEnvironment?: (name: string) => string | undefined;
   readonly addSignalListener?: (
     signal: "SIGINT" | "SIGTERM",
@@ -202,6 +205,72 @@ function exitCodeFor(outcome: string): number {
   return 13;
 }
 
+function writeGovernedStream(
+  stream: Writable,
+  chunk: Uint8Array,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let writeReturned = false;
+    let callbackCompleted = false;
+    let drainRequired = false;
+    let drainCompleted = false;
+
+    const settle = (succeeded: boolean) => {
+      if (settled) return;
+      settled = true;
+      let cleanupFailed = false;
+      for (const [event, listener] of [
+        ["error", onError],
+        ["close", onClose],
+        ["drain", onDrain],
+      ] as const) {
+        try {
+          stream.off(event, listener);
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      if (succeeded && !cleanupFailed) resolve();
+      else reject(new TypeError("governed stream write failed"));
+    };
+    const completeIfReady = () => {
+      if (
+        writeReturned &&
+        callbackCompleted &&
+        (!drainRequired || drainCompleted)
+      )
+        settle(true);
+    };
+    const onError = () => settle(false);
+    const onClose = () => settle(false);
+    const onDrain = () => {
+      drainCompleted = true;
+      completeIfReady();
+    };
+
+    try {
+      stream.on("error", onError);
+      stream.on("close", onClose);
+      stream.on("drain", onDrain);
+      drainRequired = !stream.write(chunk, (error) => {
+        if (error) {
+          // Node Writable reports a write callback error before emitting its paired
+          // error event. Keep observation installed through that event-loop turn.
+          setImmediate(() => settle(false));
+          return;
+        }
+        callbackCompleted = true;
+        completeIfReady();
+      });
+      writeReturned = true;
+      completeIfReady();
+    } catch {
+      settle(false);
+    }
+  });
+}
+
 export async function runCli(
   argv: readonly string[],
   dependencies: CliDependencies = {},
@@ -214,20 +283,12 @@ export async function runCli(
     dependencies.readEnvironment ?? ((name: string) => process.env[name]);
   const writeStdout =
     dependencies.writeStdout ??
-    ((chunk: Uint8Array) => {
-      if (process.stdout.write(chunk)) return;
-      return new Promise<void>((resolve) =>
-        process.stdout.once("drain", resolve),
-      );
-    });
+    ((chunk: Uint8Array) =>
+      writeGovernedStream(dependencies.stdout ?? process.stdout, chunk));
   const writeStderr =
     dependencies.writeStderr ??
-    ((chunk: Uint8Array) => {
-      if (process.stderr.write(chunk)) return;
-      return new Promise<void>((resolve) =>
-        process.stderr.once("drain", resolve),
-      );
-    });
+    ((chunk: Uint8Array) =>
+      writeGovernedStream(dependencies.stderr ?? process.stderr, chunk));
   const addSignalListener =
     dependencies.addSignalListener ??
     ((signal: "SIGINT" | "SIGTERM", listener: () => void) =>
@@ -323,14 +384,26 @@ export async function runCli(
       trustedParent: config.trustedReceiptParent,
       authenticator,
     });
+    let outputFailed = false;
+    const controlledWrite = async (
+      write: (chunk: Uint8Array) => void | Promise<void>,
+      chunk: Uint8Array,
+    ): Promise<void> => {
+      try {
+        await write(chunk);
+      } catch {
+        outputFailed = true;
+        throw new TypeError("governed output callback failed");
+      }
+    };
     const handle = await startProcess({
       plan,
       environmentPolicy,
       runtimePolicy,
       receiptSink: sink,
       executionIdSource: () => `runtime-${randomUUID()}`,
-      onStdout: writeStdout,
-      onStderr: writeStderr,
+      onStdout: (chunk) => controlledWrite(writeStdout, chunk),
+      onStderr: (chunk) => controlledWrite(writeStderr, chunk),
     });
     type ControlledSettlement<T> =
       | { readonly succeeded: true; readonly value: T }
@@ -426,6 +499,7 @@ export async function runCli(
       }
     }
 
+    if (outputFailed) operationFailed = true;
     if (operationFailed) {
       const termination = requestTermination("supervisor_failure");
       await Promise.all([termination, exitSettlement]);
@@ -444,7 +518,15 @@ export async function runCli(
       throw new TypeError();
     return operationResult;
   } catch {
-    writeError("governed runtime operation failed");
+    try {
+      if (dependencies.writeError) {
+        writeError("governed runtime operation failed");
+      } else {
+        writeFileSync(2, "governed runtime operation failed\n");
+      }
+    } catch {
+      // A failed diagnostic stream cannot replace the fixed controlled result.
+    }
     return 3;
   }
 }

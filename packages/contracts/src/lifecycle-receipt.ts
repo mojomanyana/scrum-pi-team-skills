@@ -282,14 +282,18 @@ function validExitOutcome(
   payload: ProcessExitPayload,
   evidence: {
     timedOut: boolean;
-    terminationRequested: boolean;
+    terminationReason: TerminationReason | null;
     killed: boolean;
     supervisorFailed: boolean;
   },
 ): boolean {
   const hasExitCode = payload.exitCode !== null;
   const hasSignal = payload.signal !== null;
-  if (hasExitCode === hasSignal) return false;
+  if (
+    hasExitCode === hasSignal ||
+    (evidence.timedOut && evidence.terminationReason !== "timeout")
+  )
+    return false;
   if (payload.outcome === "succeeded") {
     return (
       payload.exitCode === 0 &&
@@ -323,6 +327,8 @@ function validExitOutcome(
       !hasExitCode &&
       hasSignal &&
       evidence.timedOut &&
+      evidence.terminationReason === "timeout" &&
+      !evidence.supervisorFailed &&
       (payload.signal !== "SIGKILL" || evidence.killed)
     );
   }
@@ -347,7 +353,7 @@ export function verifyLifecycleReceiptChain(
   let state: "initial" | "launch-requested" | "started" | "terminal" =
     "initial";
   let timedOut = false;
-  let terminationRequested = false;
+  let terminationReason: TerminationReason | null = null;
   let killed = false;
   let supervisorFailed = false;
 
@@ -395,17 +401,24 @@ export function verifyLifecycleReceiptChain(
         state = "terminal";
         break;
       case "process_timed_out":
-        if (state !== "started" || timedOut)
+        if (state !== "started" || timedOut || terminationReason !== null)
           return { valid: false, code: "receipt-lifecycle-invalid" };
         timedOut = true;
         break;
-      case "termination_requested":
-        if (state !== "started" || terminationRequested)
+      case "termination_requested": {
+        const reason = (receipt.payload as { reason: TerminationReason })
+          .reason;
+        if (
+          state !== "started" ||
+          terminationReason !== null ||
+          (reason === "timeout") !== timedOut
+        )
           return { valid: false, code: "receipt-lifecycle-invalid" };
-        terminationRequested = true;
+        terminationReason = reason;
         break;
+      }
       case "process_killed":
-        if (state !== "started" || !terminationRequested || killed)
+        if (state !== "started" || terminationReason === null || killed)
           return { valid: false, code: "receipt-lifecycle-invalid" };
         killed = true;
         break;
@@ -419,7 +432,7 @@ export function verifyLifecycleReceiptChain(
           state !== "started" ||
           !validExitOutcome(receipt.payload as ProcessExitPayload, {
             timedOut,
-            terminationRequested,
+            terminationReason,
             killed,
             supervisorFailed,
           })
