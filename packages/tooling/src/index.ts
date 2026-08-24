@@ -377,15 +377,15 @@ export async function runCli(
       );
       announceSignal({ completion });
     };
-    const installedSignals: Array<"SIGINT" | "SIGTERM"> = [];
+    const potentiallyInstalledSignals: Array<"SIGINT" | "SIGTERM"> = [];
     let operationResult: number | undefined;
     let operationFailed = false;
 
     try {
+      potentiallyInstalledSignals.push("SIGINT");
       addSignalListener("SIGINT", forwardSignal);
-      installedSignals.push("SIGINT");
+      potentiallyInstalledSignals.push("SIGTERM");
       addSignalListener("SIGTERM", forwardSignal);
-      installedSignals.push("SIGTERM");
       registrationComplete = true;
     } catch {
       operationFailed = true;
@@ -433,7 +433,7 @@ export async function runCli(
 
     acceptSignals = false;
     let cleanupFailed = false;
-    for (const signal of installedSignals.splice(0)) {
+    for (const signal of potentiallyInstalledSignals.splice(0)) {
       try {
         removeSignalListener(signal, forwardSignal);
       } catch {

@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -226,6 +227,165 @@ describe("private governed runtime CLI", () => {
     },
   );
 
+  it.each([
+    ["both registrations succeed", "both-succeed"],
+    ["the first registration throws before its side effect", "first-before"],
+    ["the first registration installs and then throws", "first-after"],
+    ["the second registration throws before its side effect", "second-before"],
+    ["the second registration installs and then throws", "second-after"],
+  ] as const)(
+    "conservatively finalizes signal ownership when %s",
+    async (_label, scenario) => {
+      const files = setup();
+      const attackerMessage = "ATTACKER_REGISTRATION_DETAIL_DO_NOT_ESCAPE";
+      const emitter = new EventEmitter();
+      const baseline = {
+        SIGINT: emitter.listenerCount("SIGINT"),
+        SIGTERM: emitter.listenerCount("SIGTERM"),
+      };
+      const registrationAttempts: string[] = [];
+      const removalAttempts: string[] = [];
+      const errors: string[] = [];
+      const terminate = vi.fn(async () => {});
+      const fails = scenario !== "both-succeed";
+      const expectedSignals = scenario.startsWith("first-")
+        ? ["SIGINT"]
+        : ["SIGINT", "SIGTERM"];
+
+      try {
+        expect(
+          await runCli(
+            [
+              "run",
+              "--manifest",
+              files.manifestPath,
+              "--operator-config",
+              files.configPath,
+            ],
+            {
+              writeOutput: () => {},
+              writeError: (value) => errors.push(value),
+              readEnvironment(name) {
+                if (name === "PATH") return dirname(process.execPath);
+                if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+                if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+                return undefined;
+              },
+              startGovernedLocalProcess: async () => ({
+                executionId: `cli-registration-${scenario}`,
+                started: Promise.resolve(),
+                exit: Promise.resolve(
+                  successfulResult(`cli-registration-${scenario}`),
+                ),
+                terminate,
+              }),
+              addSignalListener(signal, listener) {
+                registrationAttempts.push(signal);
+                if (
+                  (signal === "SIGINT" && scenario === "first-before") ||
+                  (signal === "SIGTERM" && scenario === "second-before")
+                ) {
+                  throw new Error(attackerMessage);
+                }
+                emitter.on(signal, listener);
+                if (
+                  (signal === "SIGINT" && scenario === "first-after") ||
+                  (signal === "SIGTERM" && scenario === "second-after")
+                ) {
+                  throw new Error(attackerMessage);
+                }
+              },
+              removeSignalListener(signal, listener) {
+                removalAttempts.push(signal);
+                emitter.off(signal, listener);
+              },
+            },
+          ),
+        ).toBe(fails ? 3 : 0);
+        expect(registrationAttempts).toEqual(expectedSignals);
+        expect(removalAttempts).toEqual(expectedSignals);
+        expect(emitter.listenerCount("SIGINT")).toBe(baseline.SIGINT);
+        expect(emitter.listenerCount("SIGTERM")).toBe(baseline.SIGTERM);
+        expect(errors).toEqual(
+          fails ? ["governed runtime operation failed"] : [],
+        );
+        expect(errors.join("\n")).not.toContain(attackerMessage);
+        expect(terminate).toHaveBeenCalledTimes(fails ? 1 : 0);
+        if (fails) expect(terminate).toHaveBeenCalledWith("supervisor_failure");
+      } finally {
+        emitter.removeAllListeners("SIGINT");
+        emitter.removeAllListeners("SIGTERM");
+      }
+
+      expect(emitter.listenerCount("SIGINT")).toBe(baseline.SIGINT);
+      expect(emitter.listenerCount("SIGTERM")).toBe(baseline.SIGTERM);
+    },
+  );
+
+  it("continues conservative cleanup after an earlier removal throws", async () => {
+    const files = setup();
+    const attackerMessage = "ATTACKER_CONSERVATIVE_CLEANUP_DO_NOT_ESCAPE";
+    const emitter = new EventEmitter();
+    const baseline = {
+      SIGINT: emitter.listenerCount("SIGINT"),
+      SIGTERM: emitter.listenerCount("SIGTERM"),
+    };
+    const removalAttempts: string[] = [];
+    const errors: string[] = [];
+
+    try {
+      expect(
+        await runCli(
+          [
+            "run",
+            "--manifest",
+            files.manifestPath,
+            "--operator-config",
+            files.configPath,
+          ],
+          {
+            writeOutput: () => {},
+            writeError: (value) => errors.push(value),
+            readEnvironment(name) {
+              if (name === "PATH") return dirname(process.execPath);
+              if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+              if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+              return undefined;
+            },
+            startGovernedLocalProcess: async () => ({
+              executionId: "cli-conservative-cleanup-failure",
+              started: Promise.resolve(),
+              exit: Promise.resolve(
+                successfulResult("cli-conservative-cleanup-failure"),
+              ),
+              terminate: vi.fn(async () => {}),
+            }),
+            addSignalListener(signal, listener) {
+              emitter.on(signal, listener);
+              if (signal === "SIGTERM") throw new Error(attackerMessage);
+            },
+            removeSignalListener(signal, listener) {
+              removalAttempts.push(signal);
+              emitter.off(signal, listener);
+              if (signal === "SIGINT") throw new Error(attackerMessage);
+            },
+          },
+        ),
+      ).toBe(3);
+      expect(removalAttempts).toEqual(["SIGINT", "SIGTERM"]);
+      expect(emitter.listenerCount("SIGINT")).toBe(baseline.SIGINT);
+      expect(emitter.listenerCount("SIGTERM")).toBe(baseline.SIGTERM);
+      expect(errors).toEqual(["governed runtime operation failed"]);
+      expect(errors.join("\n")).not.toContain(attackerMessage);
+    } finally {
+      emitter.removeAllListeners("SIGINT");
+      emitter.removeAllListeners("SIGTERM");
+    }
+
+    expect(emitter.listenerCount("SIGINT")).toBe(baseline.SIGINT);
+    expect(emitter.listenerCount("SIGTERM")).toBe(baseline.SIGTERM);
+  });
+
   it("retains a partially registered live execution until termination and rejecting exit settle", async () => {
     const files = setup();
     const attackerMessage = "ATTACKER_DELAYED_EXIT_MESSAGE_DO_NOT_ESCAPE";
@@ -288,7 +448,7 @@ describe("private governed runtime CLI", () => {
       exit.reject(new Error(attackerMessage));
       expect(await run).toBe(3);
       await new Promise((resolve) => setImmediate(resolve));
-      expect(removed).toEqual(["SIGINT"]);
+      expect(removed).toEqual(["SIGINT", "SIGTERM"]);
       expect(errors).toEqual(["governed runtime operation failed"]);
       expect(errors.join("\n")).not.toContain(attackerMessage);
       expect(processErrors).toEqual([]);
@@ -387,7 +547,7 @@ describe("private governed runtime CLI", () => {
         else settleTermination();
         expect(await run).toBe(3);
         await new Promise((resolve) => setImmediate(resolve));
-        expect(removed).toEqual(["SIGINT"]);
+        expect(removed).toEqual(["SIGINT", "SIGTERM"]);
         expect(errors).toEqual(["governed runtime operation failed"]);
         expect(errors.join("\n")).not.toContain(attackerMessage);
         expect(processErrors).toEqual([]);
@@ -509,68 +669,85 @@ describe("private governed runtime CLI", () => {
   it("finalizes a controlled real process after partial registration", async () => {
     const files = setup("delay", "10000");
     const adapter = createNodeProcessAdapter();
+    const emitter = new EventEmitter();
+    const baseline = {
+      SIGINT: emitter.listenerCount("SIGINT"),
+      SIGTERM: emitter.listenerCount("SIGTERM"),
+    };
     const spawnedProcessIds: number[] = [];
     const removed: string[] = [];
     let terminate: ReturnType<typeof vi.fn> | undefined;
 
-    expect(
-      await runCli(
-        [
-          "run",
-          "--manifest",
-          files.manifestPath,
-          "--operator-config",
-          files.configPath,
-        ],
-        {
-          writeOutput: () => {},
-          writeError: () => {},
-          readEnvironment(name) {
-            if (name === "PATH") return dirname(process.execPath);
-            if (name === "MODEL_PROVIDER_VALUE") return "opaque";
-            if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
-            return undefined;
-          },
-          startGovernedLocalProcess: async (options) => {
-            const handle = await startGovernedLocalProcess({
-              ...options,
-              processAdapter: {
-                platform: adapter.platform,
-                spawn(executable, arguments_, spawnOptions) {
-                  const child = adapter.spawn(
-                    executable,
-                    arguments_,
-                    spawnOptions,
-                  );
-                  if (child.pid !== undefined)
-                    spawnedProcessIds.push(child.pid);
-                  return child;
+    try {
+      expect(
+        await runCli(
+          [
+            "run",
+            "--manifest",
+            files.manifestPath,
+            "--operator-config",
+            files.configPath,
+          ],
+          {
+            writeOutput: () => {},
+            writeError: () => {},
+            readEnvironment(name) {
+              if (name === "PATH") return dirname(process.execPath);
+              if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+              if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+              return undefined;
+            },
+            startGovernedLocalProcess: async (options) => {
+              const handle = await startGovernedLocalProcess({
+                ...options,
+                processAdapter: {
+                  platform: adapter.platform,
+                  spawn(executable, arguments_, spawnOptions) {
+                    const child = adapter.spawn(
+                      executable,
+                      arguments_,
+                      spawnOptions,
+                    );
+                    if (child.pid !== undefined)
+                      spawnedProcessIds.push(child.pid);
+                    return child;
+                  },
+                  isProcessGroupAlive: (processGroupId) =>
+                    adapter.isProcessGroupAlive(processGroupId),
+                  killProcessGroup: (processGroupId, signal) =>
+                    adapter.killProcessGroup(processGroupId, signal),
                 },
-                isProcessGroupAlive: (processGroupId) =>
-                  adapter.isProcessGroupAlive(processGroupId),
-                killProcessGroup: (processGroupId, signal) =>
-                  adapter.killProcessGroup(processGroupId, signal),
-              },
-            });
-            terminate = vi.fn((reason) => handle.terminate(reason));
-            return { ...handle, terminate };
+              });
+              terminate = vi.fn((reason) => handle.terminate(reason));
+              return { ...handle, terminate };
+            },
+            addSignalListener(signal, listener) {
+              emitter.on(signal, listener);
+              if (signal === "SIGTERM") throw new Error("fixture registration");
+            },
+            removeSignalListener(signal, listener) {
+              removed.push(signal);
+              emitter.off(signal, listener);
+            },
           },
-          addSignalListener(signal) {
-            if (signal === "SIGTERM") throw new Error("fixture registration");
-          },
-          removeSignalListener(signal) {
-            removed.push(signal);
-          },
-        },
-      ),
-    ).toBe(3);
-    expect(spawnedProcessIds).toHaveLength(1);
-    expect(terminate).toHaveBeenCalledTimes(1);
-    expect(terminate).toHaveBeenCalledWith("supervisor_failure");
-    expect(removed).toEqual(["SIGINT"]);
-    expect(
-      spawnedProcessIds.every((processId) => !isProcessAlive(processId)),
-    ).toBe(true);
+        ),
+      ).toBe(3);
+      expect(spawnedProcessIds).toHaveLength(1);
+      expect(terminate).toHaveBeenCalledTimes(1);
+      expect(terminate).toHaveBeenCalledWith("supervisor_failure");
+      expect(removed).toEqual(["SIGINT", "SIGTERM"]);
+      expect(emitter.listenerCount("SIGINT")).toBe(baseline.SIGINT);
+      expect(emitter.listenerCount("SIGTERM")).toBe(baseline.SIGTERM);
+      expect(
+        spawnedProcessIds.every((processId) => !isProcessAlive(processId)),
+      ).toBe(true);
+    } finally {
+      emitter.removeAllListeners("SIGINT");
+      emitter.removeAllListeners("SIGTERM");
+    }
+
+    expect(emitter.listenerCount("SIGINT")).toBe(baseline.SIGINT);
+    expect(emitter.listenerCount("SIGTERM")).toBe(baseline.SIGTERM);
   });
 
   it("cleans an earlier listener when later signal registration fails", async () => {
@@ -621,7 +798,7 @@ describe("private governed runtime CLI", () => {
         },
       ),
     ).toBe(3);
-    expect(removed).toEqual(["SIGINT"]);
+    expect(removed).toEqual(["SIGINT", "SIGTERM"]);
     expect(errors).toEqual(["governed runtime operation failed"]);
     expect(errors.join("\n")).not.toContain(attackerMessage);
   });
@@ -673,7 +850,7 @@ describe("private governed runtime CLI", () => {
         },
       ),
     ).toBe(3);
-    expect(removed).toEqual(["SIGINT"]);
+    expect(removed).toEqual(["SIGINT", "SIGTERM"]);
     expect(errors).toEqual(["governed runtime operation failed"]);
     expect(errors.join("\n")).not.toContain(attackerMessage);
   });
