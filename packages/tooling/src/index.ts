@@ -36,6 +36,7 @@ export interface CliDependencies {
     signal: "SIGINT" | "SIGTERM",
     listener: () => void,
   ) => void;
+  readonly startGovernedLocalProcess?: typeof startGovernedLocalProcess;
 }
 
 interface ParsedOptions {
@@ -235,6 +236,8 @@ export async function runCli(
     dependencies.removeSignalListener ??
     ((signal: "SIGINT" | "SIGTERM", listener: () => void) =>
       process.off(signal, listener));
+  const startProcess =
+    dependencies.startGovernedLocalProcess ?? startGovernedLocalProcess;
 
   if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "help")) {
     writeOutput(GOVERNED_RUNTIME_USAGE);
@@ -320,7 +323,7 @@ export async function runCli(
       trustedParent: config.trustedReceiptParent,
       authenticator,
     });
-    const handle = await startGovernedLocalProcess({
+    const handle = await startProcess({
       plan,
       environmentPolicy,
       runtimePolicy,
@@ -329,15 +332,46 @@ export async function runCli(
       onStdout: writeStdout,
       onStderr: writeStderr,
     });
+    type SignalTerminationOutcome = { readonly succeeded: boolean };
+    const signalState: {
+      termination: Promise<SignalTerminationOutcome> | null;
+    } = { termination: null };
+    let announceSignal!: (value: {
+      readonly completion: Promise<SignalTerminationOutcome>;
+    }) => void;
+    const signalStarted = new Promise<{
+      readonly completion: Promise<SignalTerminationOutcome>;
+    }>((resolve) => {
+      announceSignal = resolve;
+    });
     const forwardSignal = () => {
-      void handle.terminate("supervisor_signal");
+      if (signalState.termination) return;
+      signalState.termination = Promise.resolve()
+        .then(() => handle.terminate("supervisor_signal"))
+        .then(
+          () => ({ succeeded: true }),
+          () => ({ succeeded: false }),
+        );
+      announceSignal({ completion: signalState.termination });
     };
     addSignalListener("SIGINT", forwardSignal);
     addSignalListener("SIGTERM", forwardSignal);
     try {
       await handle.started.catch(() => {});
-      const result = await handle.exit;
-      return exitCodeFor(result.outcome);
+      const first = await Promise.race([
+        handle.exit.then((result) => ({ kind: "exit" as const, result })),
+        signalStarted.then(async ({ completion }) => ({
+          kind: "signal" as const,
+          outcome: await completion,
+        })),
+      ]);
+      if (first.kind === "signal") {
+        if (!first.outcome.succeeded) throw new TypeError();
+        return exitCodeFor((await handle.exit).outcome);
+      }
+      if (signalState.termination && !(await signalState.termination).succeeded)
+        throw new TypeError();
+      return exitCodeFor(first.result.outcome);
     } finally {
       removeSignalListener("SIGINT", forwardSignal);
       removeSignalListener("SIGTERM", forwardSignal);

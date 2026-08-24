@@ -418,13 +418,15 @@ export async function startGovernedLocalProcess(
     return processGroupId;
   };
 
-  const isProcessGroupPresent = async (): Promise<boolean> => {
-    if (processGroupAbsent) return false;
+  type ProcessGroupLiveness = "absent" | "present" | "unknown";
+
+  const observeProcessGroup = async (): Promise<ProcessGroupLiveness> => {
+    if (processGroupAbsent) return "absent";
     const groupId = requireProcessGroupId();
     try {
-      if (adapter.isProcessGroupAlive(groupId)) return true;
+      if (adapter.isProcessGroupAlive(groupId)) return "present";
       processGroupAbsent = true;
-      return false;
+      return "absent";
     } catch (error) {
       const code =
         typeof error === "object" && error !== null && "code" in error
@@ -432,14 +434,10 @@ export async function startGovernedLocalProcess(
           : undefined;
       if (code === "ESRCH") {
         processGroupAbsent = true;
-        return false;
+        return "absent";
       }
       await markSupervisorFailure("group_liveness_failed");
-      throw new RuntimeHostError(
-        code === "EPERM"
-          ? "process-group liveness probe was denied"
-          : "process-group liveness probe failed",
-      );
+      return "unknown";
     }
   };
 
@@ -447,7 +445,7 @@ export async function startGovernedLocalProcess(
     maximumWaitMs: number,
   ): Promise<boolean> => {
     let elapsed = 0;
-    while (await isProcessGroupPresent()) {
+    while ((await observeProcessGroup()) !== "absent") {
       if (elapsed >= maximumWaitMs) return false;
       const delay = Math.min(
         options.runtimePolicy.processGroupPollIntervalMs,
@@ -499,7 +497,7 @@ export async function startGovernedLocalProcess(
         ]);
       }
       if (!spawned) return;
-      if (!(await isProcessGroupPresent())) {
+      if ((await observeProcessGroup()) === "absent") {
         await rawClosed.promise;
         return;
       }
@@ -741,15 +739,16 @@ export async function startGovernedLocalProcess(
         if (groupKillDelivered && exitCode !== null) {
           await markSupervisorFailure("descendant_cleanup_required");
         }
-        if (await isProcessGroupPresent()) {
-          if (!groupKillDelivered) {
+        const livenessBeforeCleanup = await observeProcessGroup();
+        if (livenessBeforeCleanup !== "absent") {
+          if (livenessBeforeCleanup === "present" && !groupKillDelivered) {
             await markSupervisorFailure("descendant_cleanup_required");
           }
           await terminate("supervisor_failure");
         } else if (terminationPromise) {
           await terminationPromise;
         }
-        if (await isProcessGroupPresent()) {
+        if ((await observeProcessGroup()) !== "absent") {
           throw new RuntimeHostError("process-group cleanup was not confirmed");
         }
         await receiptQueue;

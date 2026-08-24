@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import manifestExample from "../../contracts/examples/agent-execution-manifest.principal-developer.json" with { type: "json" };
 import { runCli } from "../src/index.js";
@@ -219,6 +219,177 @@ describe("private governed runtime CLI", () => {
 
     expect(await run).toBe(11);
     expect(removed.sort()).toEqual(["SIGINT", "SIGTERM"]);
+  });
+
+  it("observes signal termination rejection without leaking it or emitting process errors", async () => {
+    const files = setup("delay", "10000");
+    const attackerMessage = "ATTACKER_TERMINATION_MESSAGE_DO_NOT_ESCAPE";
+    const listeners = new Map<string, () => void>();
+    const removed: Array<{ signal: string; listener: () => void }> = [];
+    const errors: string[] = [];
+    const processErrors: unknown[] = [];
+    let rejectTermination!: (reason: unknown) => void;
+    let resolveExit!: (result: {
+      executionId: string;
+      outcome: "succeeded";
+      exitCode: number;
+      signal: null;
+      stdout: { bytes: number; sha256: string };
+      stderr: { bytes: number; sha256: string };
+    }) => void;
+    const termination = new Promise<void>((_resolve, reject) => {
+      rejectTermination = reject;
+    });
+    const exit = new Promise<{
+      executionId: string;
+      outcome: "succeeded";
+      exitCode: number;
+      signal: null;
+      stdout: { bytes: number; sha256: string };
+      stderr: { bytes: number; sha256: string };
+    }>((resolve) => {
+      resolveExit = resolve;
+    });
+    const terminate = vi.fn(() => termination);
+    const onUnhandled = (error: unknown) => processErrors.push(error);
+    const onUncaught = (error: unknown) => processErrors.push(error);
+    process.on("unhandledRejection", onUnhandled);
+    process.on("uncaughtException", onUncaught);
+
+    try {
+      const run = runCli(
+        [
+          "run",
+          "--manifest",
+          files.manifestPath,
+          "--operator-config",
+          files.configPath,
+        ],
+        {
+          writeOutput: () => {},
+          writeError: (value) => errors.push(value),
+          readEnvironment(name) {
+            if (name === "PATH") return dirname(process.execPath);
+            if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+            if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+            return undefined;
+          },
+          startGovernedLocalProcess: async () => ({
+            executionId: "cli-signal-rejection",
+            started: Promise.resolve(),
+            exit,
+            terminate,
+          }),
+          addSignalListener(signal, listener) {
+            listeners.set(signal, listener);
+          },
+          removeSignalListener(signal, listener) {
+            removed.push({ signal, listener });
+          },
+        },
+      );
+      while (!listeners.has("SIGTERM"))
+        await new Promise((resolve) => setTimeout(resolve, 1));
+
+      listeners.get("SIGTERM")!();
+      listeners.get("SIGTERM")!();
+      resolveExit({
+        executionId: "cli-signal-rejection",
+        outcome: "succeeded",
+        exitCode: 0,
+        signal: null,
+        stdout: { bytes: 0, sha256: "0".repeat(64) },
+        stderr: { bytes: 0, sha256: "0".repeat(64) },
+      });
+      rejectTermination(new Error(attackerMessage));
+
+      expect(await run).toBe(3);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(terminate).toHaveBeenCalledTimes(1);
+      expect(errors).toEqual(["governed runtime operation failed"]);
+      expect(errors.join("\n")).not.toContain(attackerMessage);
+      expect(processErrors).toEqual([]);
+      expect(removed).toEqual([
+        { signal: "SIGINT", listener: listeners.get("SIGINT")! },
+        { signal: "SIGTERM", listener: listeners.get("SIGTERM")! },
+      ]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      process.off("uncaughtException", onUncaught);
+    }
+  });
+
+  it("deduplicates successful repeated signals and still awaits normal finalization", async () => {
+    const files = setup("delay", "10000");
+    const listeners = new Map<string, () => void>();
+    const removed: string[] = [];
+    let resolveExit!: (result: {
+      executionId: string;
+      outcome: "signaled";
+      exitCode: null;
+      signal: "SIGTERM";
+      stdout: { bytes: number; sha256: string };
+      stderr: { bytes: number; sha256: string };
+    }) => void;
+    const exit = new Promise<{
+      executionId: string;
+      outcome: "signaled";
+      exitCode: null;
+      signal: "SIGTERM";
+      stdout: { bytes: number; sha256: string };
+      stderr: { bytes: number; sha256: string };
+    }>((resolve) => {
+      resolveExit = resolve;
+    });
+    const terminate = vi.fn(async () => {});
+    const run = runCli(
+      [
+        "run",
+        "--manifest",
+        files.manifestPath,
+        "--operator-config",
+        files.configPath,
+      ],
+      {
+        writeOutput: () => {},
+        writeError: () => {},
+        readEnvironment(name) {
+          if (name === "PATH") return dirname(process.execPath);
+          if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+          if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+          return undefined;
+        },
+        startGovernedLocalProcess: async () => ({
+          executionId: "cli-signal-success",
+          started: Promise.resolve(),
+          exit,
+          terminate,
+        }),
+        addSignalListener(signal, listener) {
+          listeners.set(signal, listener);
+        },
+        removeSignalListener(signal) {
+          removed.push(signal);
+        },
+      },
+    );
+    while (!listeners.has("SIGINT"))
+      await new Promise((resolve) => setTimeout(resolve, 1));
+
+    listeners.get("SIGINT")!();
+    listeners.get("SIGTERM")!();
+    resolveExit({
+      executionId: "cli-signal-success",
+      outcome: "signaled",
+      exitCode: null,
+      signal: "SIGTERM",
+      stdout: { bytes: 0, sha256: "0".repeat(64) },
+      stderr: { bytes: 0, sha256: "0".repeat(64) },
+    });
+
+    expect(await run).toBe(11);
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(removed).toEqual(["SIGINT", "SIGTERM"]);
   });
 
   it("requires authenticated trusted-parent inspection and has stable usage codes", async () => {
