@@ -332,60 +332,106 @@ export async function runCli(
       onStdout: writeStdout,
       onStderr: writeStderr,
     });
-    type SignalTerminationOutcome = { readonly succeeded: boolean };
+    type ControlledSettlement<T> =
+      | { readonly succeeded: true; readonly value: T }
+      | { readonly succeeded: false };
+    const observe = <T>(
+      promise: Promise<T>,
+    ): Promise<ControlledSettlement<T>> =>
+      promise.then(
+        (value) => ({ succeeded: true, value }),
+        () => ({ succeeded: false }),
+      );
+
+    // An acquired handle is live authority. Observe both lifecycle promises before
+    // any injected setup operation can throw or synchronously trigger a signal.
+    const exitSettlement = observe(handle.exit);
+    const startedSettlement = observe(handle.started);
     const signalState: {
-      termination: Promise<SignalTerminationOutcome> | null;
+      termination: Promise<ControlledSettlement<void>> | null;
     } = { termination: null };
+    const requestTermination = (
+      reason: "supervisor_failure" | "supervisor_signal",
+    ): Promise<ControlledSettlement<void>> => {
+      if (!signalState.termination) {
+        signalState.termination = observe(
+          Promise.resolve().then(() => handle.terminate(reason)),
+        );
+      }
+      return signalState.termination;
+    };
     let announceSignal!: (value: {
-      readonly completion: Promise<SignalTerminationOutcome>;
+      readonly completion: Promise<ControlledSettlement<void>>;
     }) => void;
     const signalStarted = new Promise<{
-      readonly completion: Promise<SignalTerminationOutcome>;
+      readonly completion: Promise<ControlledSettlement<void>>;
     }>((resolve) => {
       announceSignal = resolve;
     });
+    let registrationComplete = false;
+    let acceptSignals = true;
     const forwardSignal = () => {
-      if (signalState.termination) return;
-      signalState.termination = Promise.resolve()
-        .then(() => handle.terminate("supervisor_signal"))
-        .then(
-          () => ({ succeeded: true }),
-          () => ({ succeeded: false }),
-        );
-      announceSignal({ completion: signalState.termination });
+      if (!acceptSignals || signalState.termination) return;
+      const completion = requestTermination(
+        registrationComplete ? "supervisor_signal" : "supervisor_failure",
+      );
+      announceSignal({ completion });
     };
     const installedSignals: Array<"SIGINT" | "SIGTERM"> = [];
     let operationResult: number | undefined;
     let operationFailed = false;
+
     try {
       addSignalListener("SIGINT", forwardSignal);
       installedSignals.push("SIGINT");
       addSignalListener("SIGTERM", forwardSignal);
       installedSignals.push("SIGTERM");
-
-      await handle.started.catch(() => {});
-      const first = await Promise.race([
-        handle.exit.then((result) => ({ kind: "exit" as const, result })),
-        signalStarted.then(async ({ completion }) => ({
-          kind: "signal" as const,
-          outcome: await completion,
-        })),
-      ]);
-      if (first.kind === "signal") {
-        if (!first.outcome.succeeded) throw new TypeError();
-        operationResult = exitCodeFor((await handle.exit).outcome);
-      } else {
-        if (
-          signalState.termination &&
-          !(await signalState.termination).succeeded
-        )
-          throw new TypeError();
-        operationResult = exitCodeFor(first.result.outcome);
-      }
+      registrationComplete = true;
     } catch {
       operationFailed = true;
+      requestTermination("supervisor_failure");
     }
 
+    if (!operationFailed) {
+      const started = await startedSettlement;
+      if (!started.succeeded) {
+        operationFailed = true;
+      } else {
+        const first = await Promise.race([
+          exitSettlement.then((settlement) => ({
+            kind: "exit" as const,
+            settlement,
+          })),
+          signalStarted.then(({ completion }) => ({
+            kind: "signal" as const,
+            completion,
+          })),
+        ]);
+        if (first.kind === "signal") {
+          if (!(await first.completion).succeeded) operationFailed = true;
+          const exit = await exitSettlement;
+          if (exit.succeeded) operationResult = exitCodeFor(exit.value.outcome);
+          else operationFailed = true;
+        } else if (first.settlement.succeeded) {
+          operationResult = exitCodeFor(first.settlement.value.outcome);
+          if (
+            signalState.termination &&
+            !(await signalState.termination).succeeded
+          ) {
+            operationFailed = true;
+          }
+        } else {
+          operationFailed = true;
+        }
+      }
+    }
+
+    if (operationFailed) {
+      const termination = requestTermination("supervisor_failure");
+      await Promise.all([termination, exitSettlement]);
+    }
+
+    acceptSignals = false;
     let cleanupFailed = false;
     for (const signal of installedSignals.splice(0)) {
       try {

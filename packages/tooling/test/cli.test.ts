@@ -6,6 +6,11 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import manifestExample from "../../contracts/examples/agent-execution-manifest.principal-developer.json" with { type: "json" };
+import {
+  createNodeProcessAdapter,
+  startGovernedLocalProcess,
+  type ExecutionResult,
+} from "@scrum-pi-team-skills/runtime";
 import { runCli } from "../src/index.js";
 
 const fixture = fileURLToPath(
@@ -13,6 +18,44 @@ const fixture = fileURLToPath(
 );
 const roots: string[] = [];
 const authenticationKey = Buffer.alloc(32, 0x5a).toString("base64");
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function successfulResult(executionId: string): ExecutionResult {
+  return {
+    executionId,
+    outcome: "succeeded",
+    exitCode: 0,
+    signal: null,
+    stdout: { bytes: 0, sha256: "0".repeat(64) },
+    stderr: { bytes: 0, sha256: "0".repeat(64) },
+  };
+}
+
+function isProcessAlive(processId: number): boolean {
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ESRCH"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
 
 function setup(mode = "success", value = "0") {
   const root = join(tmpdir(), `spts-cli-${process.pid}-${roots.length}`);
@@ -182,6 +225,353 @@ describe("private governed runtime CLI", () => {
       expect(errors.join("\n")).not.toContain(authenticationValue ?? "never");
     },
   );
+
+  it("retains a partially registered live execution until termination and rejecting exit settle", async () => {
+    const files = setup();
+    const attackerMessage = "ATTACKER_DELAYED_EXIT_MESSAGE_DO_NOT_ESCAPE";
+    const termination = deferred<void>();
+    const exit = deferred<ExecutionResult>();
+    const terminate = vi.fn(() => termination.promise);
+    const removed: string[] = [];
+    const errors: string[] = [];
+    const processErrors: unknown[] = [];
+    let runSettled = false;
+    const onUnhandled = (error: unknown) => processErrors.push(error);
+    const onUncaught = (error: unknown) => processErrors.push(error);
+    process.on("unhandledRejection", onUnhandled);
+    process.on("uncaughtException", onUncaught);
+
+    try {
+      const run = runCli(
+        [
+          "run",
+          "--manifest",
+          files.manifestPath,
+          "--operator-config",
+          files.configPath,
+        ],
+        {
+          writeOutput: () => {},
+          writeError: (value) => errors.push(value),
+          readEnvironment(name) {
+            if (name === "PATH") return dirname(process.execPath);
+            if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+            if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+            return undefined;
+          },
+          startGovernedLocalProcess: async () => ({
+            executionId: "cli-pending-registration-failure",
+            started: Promise.resolve(),
+            exit: exit.promise,
+            terminate,
+          }),
+          addSignalListener(signal) {
+            if (signal === "SIGTERM") throw new Error(attackerMessage);
+          },
+          removeSignalListener(signal) {
+            removed.push(signal);
+          },
+        },
+      ).finally(() => {
+        runSettled = true;
+      });
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(terminate).toHaveBeenCalledTimes(1);
+      expect(terminate).toHaveBeenCalledWith("supervisor_failure");
+      expect(runSettled).toBe(false);
+
+      termination.resolve();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(runSettled).toBe(false);
+
+      exit.reject(new Error(attackerMessage));
+      expect(await run).toBe(3);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(removed).toEqual(["SIGINT"]);
+      expect(errors).toEqual(["governed runtime operation failed"]);
+      expect(errors.join("\n")).not.toContain(attackerMessage);
+      expect(processErrors).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      process.off("uncaughtException", onUncaught);
+    }
+  });
+
+  it.each([
+    [
+      "termination rejects before exit resolves",
+      "reject",
+      "resolve",
+      "termination",
+    ],
+    [
+      "termination resolves before exit rejects",
+      "resolve",
+      "reject",
+      "termination",
+    ],
+    ["termination and exit both reject", "reject", "reject", "termination"],
+  ] as const)(
+    "contains %s after partial registration",
+    async (_label, terminationMode, exitMode, firstSettlement) => {
+      const files = setup();
+      const attackerMessage = "ATTACKER_FINALIZATION_MESSAGE_DO_NOT_ESCAPE";
+      const termination = deferred<void>();
+      const exit = deferred<ExecutionResult>();
+      const terminate = vi.fn(() => termination.promise);
+      const errors: string[] = [];
+      const removed: string[] = [];
+      const processErrors: unknown[] = [];
+      let runSettled = false;
+      const onUnhandled = (error: unknown) => processErrors.push(error);
+      const onUncaught = (error: unknown) => processErrors.push(error);
+      process.on("unhandledRejection", onUnhandled);
+      process.on("uncaughtException", onUncaught);
+
+      const settleTermination = () => {
+        if (terminationMode === "resolve") termination.resolve();
+        else termination.reject(new Error(attackerMessage));
+      };
+      const settleExit = () => {
+        if (exitMode === "resolve")
+          exit.resolve(successfulResult("cli-finalization-matrix"));
+        else exit.reject(new Error(attackerMessage));
+      };
+
+      try {
+        const run = runCli(
+          [
+            "run",
+            "--manifest",
+            files.manifestPath,
+            "--operator-config",
+            files.configPath,
+          ],
+          {
+            writeOutput: () => {},
+            writeError: (value) => errors.push(value),
+            readEnvironment(name) {
+              if (name === "PATH") return dirname(process.execPath);
+              if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+              if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+              return undefined;
+            },
+            startGovernedLocalProcess: async () => ({
+              executionId: "cli-finalization-matrix",
+              started: Promise.resolve(),
+              exit: exit.promise,
+              terminate,
+            }),
+            addSignalListener(signal) {
+              if (signal === "SIGTERM") throw new Error(attackerMessage);
+            },
+            removeSignalListener(signal) {
+              removed.push(signal);
+            },
+          },
+        ).finally(() => {
+          runSettled = true;
+        });
+
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(terminate).toHaveBeenCalledTimes(1);
+        expect(runSettled).toBe(false);
+
+        if (firstSettlement === "termination") settleTermination();
+        else settleExit();
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(runSettled).toBe(false);
+
+        if (firstSettlement === "termination") settleExit();
+        else settleTermination();
+        expect(await run).toBe(3);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(removed).toEqual(["SIGINT"]);
+        expect(errors).toEqual(["governed runtime operation failed"]);
+        expect(errors.join("\n")).not.toContain(attackerMessage);
+        expect(processErrors).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+        process.off("uncaughtException", onUncaught);
+      }
+    },
+  );
+
+  it("contains an exit rejection that occurs during partial registration", async () => {
+    const files = setup();
+    const attackerMessage = "ATTACKER_EARLY_EXIT_MESSAGE_DO_NOT_ESCAPE";
+    const exit = deferred<ExecutionResult>();
+    const terminate = vi.fn(async () => {});
+    const listeners = new Map<string, () => void>();
+    const errors: string[] = [];
+    const processErrors: unknown[] = [];
+    const onUnhandled = (error: unknown) => processErrors.push(error);
+    const onUncaught = (error: unknown) => processErrors.push(error);
+    process.on("unhandledRejection", onUnhandled);
+    process.on("uncaughtException", onUncaught);
+
+    try {
+      expect(
+        await runCli(
+          [
+            "run",
+            "--manifest",
+            files.manifestPath,
+            "--operator-config",
+            files.configPath,
+          ],
+          {
+            writeOutput: () => {},
+            writeError: (value) => errors.push(value),
+            readEnvironment(name) {
+              if (name === "PATH") return dirname(process.execPath);
+              if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+              if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+              return undefined;
+            },
+            startGovernedLocalProcess: async () => ({
+              executionId: "cli-early-exit-rejection",
+              started: Promise.resolve(),
+              exit: exit.promise,
+              terminate,
+            }),
+            addSignalListener(signal, listener) {
+              listeners.set(signal, listener);
+              if (signal === "SIGINT") exit.reject(new Error(attackerMessage));
+              if (signal === "SIGTERM") throw new Error(attackerMessage);
+            },
+            removeSignalListener: () => {},
+          },
+        ),
+      ).toBe(3);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(terminate).toHaveBeenCalledTimes(1);
+      expect(terminate).toHaveBeenCalledWith("supervisor_failure");
+      expect(errors).toEqual(["governed runtime operation failed"]);
+      expect(errors.join("\n")).not.toContain(attackerMessage);
+      expect(processErrors).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      process.off("uncaughtException", onUncaught);
+    }
+  });
+
+  it("deduplicates a repeated-signal and registration-failure race", async () => {
+    const files = setup();
+    const attackerMessage = "ATTACKER_REGISTRATION_RACE_DO_NOT_ESCAPE";
+    const exit = deferred<ExecutionResult>();
+    const listeners = new Map<string, () => void>();
+    const terminate = vi.fn(async () => {
+      exit.resolve(successfulResult("cli-registration-race"));
+    });
+
+    expect(
+      await runCli(
+        [
+          "run",
+          "--manifest",
+          files.manifestPath,
+          "--operator-config",
+          files.configPath,
+        ],
+        {
+          writeOutput: () => {},
+          writeError: () => {},
+          readEnvironment(name) {
+            if (name === "PATH") return dirname(process.execPath);
+            if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+            if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+            return undefined;
+          },
+          startGovernedLocalProcess: async () => ({
+            executionId: "cli-registration-race",
+            started: Promise.resolve(),
+            exit: exit.promise,
+            terminate,
+          }),
+          addSignalListener(signal, listener) {
+            listeners.set(signal, listener);
+            if (signal === "SIGTERM") {
+              listeners.get("SIGINT")!();
+              listeners.get("SIGINT")!();
+              throw new Error(attackerMessage);
+            }
+          },
+          removeSignalListener: () => {},
+        },
+      ),
+    ).toBe(3);
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminate).toHaveBeenCalledWith("supervisor_failure");
+  });
+
+  it("finalizes a controlled real process after partial registration", async () => {
+    const files = setup("delay", "10000");
+    const adapter = createNodeProcessAdapter();
+    const spawnedProcessIds: number[] = [];
+    const removed: string[] = [];
+    let terminate: ReturnType<typeof vi.fn> | undefined;
+
+    expect(
+      await runCli(
+        [
+          "run",
+          "--manifest",
+          files.manifestPath,
+          "--operator-config",
+          files.configPath,
+        ],
+        {
+          writeOutput: () => {},
+          writeError: () => {},
+          readEnvironment(name) {
+            if (name === "PATH") return dirname(process.execPath);
+            if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+            if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+            return undefined;
+          },
+          startGovernedLocalProcess: async (options) => {
+            const handle = await startGovernedLocalProcess({
+              ...options,
+              processAdapter: {
+                platform: adapter.platform,
+                spawn(executable, arguments_, spawnOptions) {
+                  const child = adapter.spawn(
+                    executable,
+                    arguments_,
+                    spawnOptions,
+                  );
+                  if (child.pid !== undefined)
+                    spawnedProcessIds.push(child.pid);
+                  return child;
+                },
+                isProcessGroupAlive: (processGroupId) =>
+                  adapter.isProcessGroupAlive(processGroupId),
+                killProcessGroup: (processGroupId, signal) =>
+                  adapter.killProcessGroup(processGroupId, signal),
+              },
+            });
+            terminate = vi.fn((reason) => handle.terminate(reason));
+            return { ...handle, terminate };
+          },
+          addSignalListener(signal) {
+            if (signal === "SIGTERM") throw new Error("fixture registration");
+          },
+          removeSignalListener(signal) {
+            removed.push(signal);
+          },
+        },
+      ),
+    ).toBe(3);
+    expect(spawnedProcessIds).toHaveLength(1);
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminate).toHaveBeenCalledWith("supervisor_failure");
+    expect(removed).toEqual(["SIGINT"]);
+    expect(
+      spawnedProcessIds.every((processId) => !isProcessAlive(processId)),
+    ).toBe(true);
+  });
 
   it("cleans an earlier listener when later signal registration fails", async () => {
     const files = setup();
