@@ -183,6 +183,219 @@ describe("private governed runtime CLI", () => {
     },
   );
 
+  it("cleans an earlier listener when later signal registration fails", async () => {
+    const files = setup();
+    const attackerMessage = "ATTACKER_REGISTRATION_MESSAGE_DO_NOT_ESCAPE";
+    const listeners = new Map<string, () => void>();
+    const removed: string[] = [];
+    const errors: string[] = [];
+
+    expect(
+      await runCli(
+        [
+          "run",
+          "--manifest",
+          files.manifestPath,
+          "--operator-config",
+          files.configPath,
+        ],
+        {
+          writeOutput: () => {},
+          writeError: (value) => errors.push(value),
+          readEnvironment(name) {
+            if (name === "PATH") return dirname(process.execPath);
+            if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+            if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+            return undefined;
+          },
+          startGovernedLocalProcess: async () => ({
+            executionId: "cli-registration-failure",
+            started: Promise.resolve(),
+            exit: Promise.resolve({
+              executionId: "cli-registration-failure",
+              outcome: "succeeded" as const,
+              exitCode: 0,
+              signal: null,
+              stdout: { bytes: 0, sha256: "0".repeat(64) },
+              stderr: { bytes: 0, sha256: "0".repeat(64) },
+            }),
+            terminate: vi.fn(async () => {}),
+          }),
+          addSignalListener(signal, listener) {
+            if (signal === "SIGTERM") throw new Error(attackerMessage);
+            listeners.set(signal, listener);
+          },
+          removeSignalListener(signal) {
+            removed.push(signal);
+          },
+        },
+      ),
+    ).toBe(3);
+    expect(removed).toEqual(["SIGINT"]);
+    expect(errors).toEqual(["governed runtime operation failed"]);
+    expect(errors.join("\n")).not.toContain(attackerMessage);
+  });
+
+  it("still reports a controlled failure when partial-registration cleanup fails", async () => {
+    const files = setup();
+    const attackerMessage = "ATTACKER_PARTIAL_CLEANUP_MESSAGE_DO_NOT_ESCAPE";
+    const removed: string[] = [];
+    const errors: string[] = [];
+
+    expect(
+      await runCli(
+        [
+          "run",
+          "--manifest",
+          files.manifestPath,
+          "--operator-config",
+          files.configPath,
+        ],
+        {
+          writeOutput: () => {},
+          writeError: (value) => errors.push(value),
+          readEnvironment(name) {
+            if (name === "PATH") return dirname(process.execPath);
+            if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+            if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+            return undefined;
+          },
+          startGovernedLocalProcess: async () => ({
+            executionId: "cli-registration-cleanup-failure",
+            started: Promise.resolve(),
+            exit: Promise.resolve({
+              executionId: "cli-registration-cleanup-failure",
+              outcome: "succeeded" as const,
+              exitCode: 0,
+              signal: null,
+              stdout: { bytes: 0, sha256: "0".repeat(64) },
+              stderr: { bytes: 0, sha256: "0".repeat(64) },
+            }),
+            terminate: vi.fn(async () => {}),
+          }),
+          addSignalListener(signal) {
+            if (signal === "SIGTERM") throw new Error(attackerMessage);
+          },
+          removeSignalListener(signal) {
+            removed.push(signal);
+            throw new Error(attackerMessage);
+          },
+        },
+      ),
+    ).toBe(3);
+    expect(removed).toEqual(["SIGINT"]);
+    expect(errors).toEqual(["governed runtime operation failed"]);
+    expect(errors.join("\n")).not.toContain(attackerMessage);
+  });
+
+  it.each([
+    ["the first removal", new Set(["SIGINT"])],
+    ["both removals", new Set(["SIGINT", "SIGTERM"])],
+  ])(
+    "attempts every installed listener once when %s throws",
+    async (_label, failingSignals) => {
+      const files = setup();
+      const attackerMessage = "ATTACKER_REMOVAL_MESSAGE_DO_NOT_ESCAPE";
+      const removed: string[] = [];
+      const errors: string[] = [];
+
+      expect(
+        await runCli(
+          [
+            "run",
+            "--manifest",
+            files.manifestPath,
+            "--operator-config",
+            files.configPath,
+          ],
+          {
+            writeOutput: () => {},
+            writeError: (value) => errors.push(value),
+            readEnvironment(name) {
+              if (name === "PATH") return dirname(process.execPath);
+              if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+              if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+              return undefined;
+            },
+            startGovernedLocalProcess: async () => ({
+              executionId: "cli-removal-failure",
+              started: Promise.resolve(),
+              exit: Promise.resolve({
+                executionId: "cli-removal-failure",
+                outcome: "succeeded" as const,
+                exitCode: 0,
+                signal: null,
+                stdout: { bytes: 0, sha256: "0".repeat(64) },
+                stderr: { bytes: 0, sha256: "0".repeat(64) },
+              }),
+              terminate: vi.fn(async () => {}),
+            }),
+            addSignalListener: () => {},
+            removeSignalListener(signal) {
+              removed.push(signal);
+              if (failingSignals.has(signal)) throw new Error(attackerMessage);
+            },
+          },
+        ),
+      ).toBe(3);
+      expect(removed).toEqual(["SIGINT", "SIGTERM"]);
+      expect(errors).toEqual(["governed runtime operation failed"]);
+      expect(errors.join("\n")).not.toContain(attackerMessage);
+    },
+  );
+
+  it("attempts every listener after runtime and cleanup failures", async () => {
+    const files = setup();
+    const attackerMessage = "ATTACKER_RUNTIME_CLEANUP_MESSAGE_DO_NOT_ESCAPE";
+    const listeners = new Map<string, () => void>();
+    const removed: string[] = [];
+    const errors: string[] = [];
+    let rejectExit!: (reason: unknown) => void;
+    const exit = new Promise<never>((_resolve, reject) => {
+      rejectExit = reject;
+    });
+    const run = runCli(
+      [
+        "run",
+        "--manifest",
+        files.manifestPath,
+        "--operator-config",
+        files.configPath,
+      ],
+      {
+        writeOutput: () => {},
+        writeError: (value) => errors.push(value),
+        readEnvironment(name) {
+          if (name === "PATH") return dirname(process.execPath);
+          if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+          if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+          return undefined;
+        },
+        startGovernedLocalProcess: async () => ({
+          executionId: "cli-runtime-cleanup-failure",
+          started: Promise.resolve(),
+          exit,
+          terminate: vi.fn(async () => {}),
+        }),
+        addSignalListener(signal, listener) {
+          listeners.set(signal, listener);
+        },
+        removeSignalListener(signal) {
+          removed.push(signal);
+          if (signal === "SIGINT") throw new Error(attackerMessage);
+        },
+      },
+    );
+    while (!listeners.has("SIGTERM"))
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    rejectExit(new Error(attackerMessage));
+
+    expect(await run).toBe(3);
+    expect(removed).toEqual(["SIGINT", "SIGTERM"]);
+    expect(errors).toEqual(["governed runtime operation failed"]);
+    expect(errors.join("\n")).not.toContain(attackerMessage);
+  });
+
   it("forwards supervisor signals through the live handle and cleans listeners", async () => {
     const files = setup("delay", "10000");
     const listeners = new Map<string, () => void>();
@@ -388,6 +601,78 @@ describe("private governed runtime CLI", () => {
     });
 
     expect(await run).toBe(11);
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(removed).toEqual(["SIGINT", "SIGTERM"]);
+  });
+
+  it("preserves a normal exit that wins a simultaneous signal race", async () => {
+    const files = setup();
+    const listeners = new Map<string, () => void>();
+    const removed: string[] = [];
+    let resolveExit!: (result: {
+      executionId: string;
+      outcome: "succeeded";
+      exitCode: number;
+      signal: null;
+      stdout: { bytes: number; sha256: string };
+      stderr: { bytes: number; sha256: string };
+    }) => void;
+    const exit = new Promise<{
+      executionId: string;
+      outcome: "succeeded";
+      exitCode: number;
+      signal: null;
+      stdout: { bytes: number; sha256: string };
+      stderr: { bytes: number; sha256: string };
+    }>((resolve) => {
+      resolveExit = resolve;
+    });
+    const terminate = vi.fn(async () => {});
+    const run = runCli(
+      [
+        "run",
+        "--manifest",
+        files.manifestPath,
+        "--operator-config",
+        files.configPath,
+      ],
+      {
+        writeOutput: () => {},
+        writeError: () => {},
+        readEnvironment(name) {
+          if (name === "PATH") return dirname(process.execPath);
+          if (name === "MODEL_PROVIDER_VALUE") return "opaque";
+          if (name === "SPTS_RECEIPT_AUTH_KEY") return authenticationKey;
+          return undefined;
+        },
+        startGovernedLocalProcess: async () => ({
+          executionId: "cli-exit-signal-race",
+          started: Promise.resolve(),
+          exit,
+          terminate,
+        }),
+        addSignalListener(signal, listener) {
+          listeners.set(signal, listener);
+        },
+        removeSignalListener(signal) {
+          removed.push(signal);
+        },
+      },
+    );
+    while (!listeners.has("SIGTERM"))
+      await new Promise((resolve) => setTimeout(resolve, 1));
+
+    resolveExit({
+      executionId: "cli-exit-signal-race",
+      outcome: "succeeded",
+      exitCode: 0,
+      signal: null,
+      stdout: { bytes: 0, sha256: "0".repeat(64) },
+      stderr: { bytes: 0, sha256: "0".repeat(64) },
+    });
+    listeners.get("SIGTERM")!();
+
+    expect(await run).toBe(0);
     expect(terminate).toHaveBeenCalledTimes(1);
     expect(removed).toEqual(["SIGINT", "SIGTERM"]);
   });

@@ -354,9 +354,15 @@ export async function runCli(
         );
       announceSignal({ completion: signalState.termination });
     };
-    addSignalListener("SIGINT", forwardSignal);
-    addSignalListener("SIGTERM", forwardSignal);
+    const installedSignals: Array<"SIGINT" | "SIGTERM"> = [];
+    let operationResult: number | undefined;
+    let operationFailed = false;
     try {
+      addSignalListener("SIGINT", forwardSignal);
+      installedSignals.push("SIGINT");
+      addSignalListener("SIGTERM", forwardSignal);
+      installedSignals.push("SIGTERM");
+
       await handle.started.catch(() => {});
       const first = await Promise.race([
         handle.exit.then((result) => ({ kind: "exit" as const, result })),
@@ -367,15 +373,30 @@ export async function runCli(
       ]);
       if (first.kind === "signal") {
         if (!first.outcome.succeeded) throw new TypeError();
-        return exitCodeFor((await handle.exit).outcome);
+        operationResult = exitCodeFor((await handle.exit).outcome);
+      } else {
+        if (
+          signalState.termination &&
+          !(await signalState.termination).succeeded
+        )
+          throw new TypeError();
+        operationResult = exitCodeFor(first.result.outcome);
       }
-      if (signalState.termination && !(await signalState.termination).succeeded)
-        throw new TypeError();
-      return exitCodeFor(first.result.outcome);
-    } finally {
-      removeSignalListener("SIGINT", forwardSignal);
-      removeSignalListener("SIGTERM", forwardSignal);
+    } catch {
+      operationFailed = true;
     }
+
+    let cleanupFailed = false;
+    for (const signal of installedSignals.splice(0)) {
+      try {
+        removeSignalListener(signal, forwardSignal);
+      } catch {
+        cleanupFailed = true;
+      }
+    }
+    if (operationFailed || cleanupFailed || operationResult === undefined)
+      throw new TypeError();
+    return operationResult;
   } catch {
     writeError("governed runtime operation failed");
     return 3;
