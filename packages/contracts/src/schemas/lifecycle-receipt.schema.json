@@ -1,0 +1,237 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mojomanyana/scrum-pi-team-skills/schemas/spts.lifecycle-receipt/1.0.0",
+  "title": "spts.lifecycle-receipt",
+  "description": "Metadata-only tamper-evident lifecycle receipt for one governed local execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractId",
+    "contractVersion",
+    "executionId",
+    "correlation",
+    "planDigest",
+    "trustedPolicyIds",
+    "sequence",
+    "timestamp",
+    "eventType",
+    "payload",
+    "previousReceiptDigest",
+    "receiptDigest"
+  ],
+  "properties": {
+    "contractId": { "const": "spts.lifecycle-receipt" },
+    "contractVersion": { "const": "1.0.0" },
+    "executionId": { "$ref": "#/definitions/safeId" },
+    "correlation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifestExecutionId", "pacaProjectId", "pacaTaskId"],
+      "properties": {
+        "manifestExecutionId": { "$ref": "#/definitions/safeId" },
+        "pacaProjectId": { "$ref": "#/definitions/safeId" },
+        "pacaTaskId": { "$ref": "#/definitions/safeId" }
+      }
+    },
+    "planDigest": { "$ref": "#/definitions/digest" },
+    "trustedPolicyIds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["launch", "environment", "runtime"],
+      "properties": {
+        "launch": { "$ref": "#/definitions/safeId" },
+        "environment": { "$ref": "#/definitions/safeId" },
+        "runtime": { "$ref": "#/definitions/safeId" }
+      }
+    },
+    "sequence": { "type": "integer", "minimum": 1, "maximum": 100000 },
+    "timestamp": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "eventType": {
+      "enum": [
+        "launch_requested",
+        "process_started",
+        "termination_requested",
+        "process_exited",
+        "process_failed",
+        "process_timed_out",
+        "process_killed",
+        "supervisor_failed"
+      ]
+    },
+    "payload": { "type": "object", "maxProperties": 8 },
+    "previousReceiptDigest": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/digest" }]
+    },
+    "receiptDigest": { "$ref": "#/definitions/digest" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "eventType": { "const": "launch_requested" } } },
+      "then": {
+        "properties": { "payload": { "$ref": "#/definitions/emptyPayload" } }
+      }
+    },
+    {
+      "if": { "properties": { "eventType": { "const": "process_started" } } },
+      "then": {
+        "properties": { "payload": { "$ref": "#/definitions/emptyPayload" } }
+      }
+    },
+    {
+      "if": {
+        "properties": { "eventType": { "const": "termination_requested" } }
+      },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/definitions/terminationPayload" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "eventType": { "const": "process_exited" } } },
+      "then": {
+        "properties": { "payload": { "$ref": "#/definitions/exitPayload" } }
+      }
+    },
+    {
+      "if": { "properties": { "eventType": { "const": "process_failed" } } },
+      "then": {
+        "properties": { "payload": { "$ref": "#/definitions/failurePayload" } }
+      }
+    },
+    {
+      "if": { "properties": { "eventType": { "const": "process_timed_out" } } },
+      "then": {
+        "properties": { "payload": { "$ref": "#/definitions/timeoutPayload" } }
+      }
+    },
+    {
+      "if": { "properties": { "eventType": { "const": "process_killed" } } },
+      "then": {
+        "properties": { "payload": { "$ref": "#/definitions/killedPayload" } }
+      }
+    },
+    {
+      "if": { "properties": { "eventType": { "const": "supervisor_failed" } } },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/definitions/supervisorPayload" }
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "emptyPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "terminationPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": {
+          "enum": [
+            "caller",
+            "timeout",
+            "abort",
+            "supervisor_signal",
+            "supervisor_failure"
+          ]
+        }
+      }
+    },
+    "streamEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sha256": { "$ref": "#/definitions/digest" }
+      }
+    },
+    "exitPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exitCode", "signal", "outcome", "stdout", "stderr"],
+      "properties": {
+        "exitCode": { "oneOf": [{ "type": "integer" }, { "type": "null" }] },
+        "signal": {
+          "oneOf": [
+            { "enum": ["SIGINT", "SIGTERM", "SIGKILL"] },
+            { "type": "null" }
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "succeeded",
+            "nonzero",
+            "signaled",
+            "timed_out",
+            "supervisor_failed"
+          ]
+        },
+        "stdout": { "$ref": "#/definitions/streamEvidence" },
+        "stderr": { "$ref": "#/definitions/streamEvidence" }
+      }
+    },
+    "failurePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": { "code": { "const": "spawn_failed" } }
+    },
+    "timeoutPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximumRuntimeMs"],
+      "properties": {
+        "maximumRuntimeMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        }
+      }
+    },
+    "killedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal"],
+      "properties": { "signal": { "const": "SIGKILL" } }
+    },
+    "supervisorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": {
+        "code": {
+          "enum": [
+            "output_callback_failed",
+            "receipt_sink_failed",
+            "signal_failed",
+            "group_liveness_failed",
+            "group_cleanup_unconfirmed",
+            "descendant_cleanup_required"
+          ]
+        },
+        "stream": { "enum": ["stdout", "stderr"] }
+      }
+    }
+  }
+}

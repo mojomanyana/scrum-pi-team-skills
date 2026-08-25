@@ -1,4 +1,41 @@
+import { createHash } from "node:crypto";
+
+export {
+  createOperatorEnvironmentPolicy,
+  createRuntimePolicy,
+  RuntimeHostError,
+  type OperatorEnvironmentPolicy,
+  type OperatorEnvironmentPolicyDefinition,
+  type RuntimePolicy,
+  type RuntimePolicyDefinition,
+} from "./policies.js";
+export {
+  createLocalFilesystemReceiptSink,
+  inspectLifecycleReceipts,
+  writeAllReceiptBytes,
+  ReceiptStorageError,
+  type ReceiptFileOperations,
+} from "./receipt-filesystem.js";
+export {
+  createReceiptAuthenticator,
+  ReceiptAuthenticationError,
+  type ReceiptAuthenticator,
+} from "./receipt-authenticator.js";
+export {
+  createNodeProcessAdapter,
+  startGovernedLocalProcess,
+  type ExecutionOutcome,
+  type ExecutionResult,
+  type ProcessAdapter,
+  type ReceiptSink,
+  type ReceiptWriter,
+  type RuntimeClock,
+  type StartGovernedLocalProcessOptions,
+  type SupervisedExecution,
+} from "./process-host.js";
+
 import {
+  canonicalSerializeLifecycleValue,
   containsCredentialShapedContent,
   validateGovernedAgentExecutionManifest,
   type PromptTemplateReference,
@@ -6,6 +43,7 @@ import {
 } from "@scrum-pi-team-skills/contracts";
 
 export interface TrustedLaunchPolicyDefinition {
+  readonly policyId: string;
   readonly piExecutable: string;
   readonly piDaddyExtension: string;
   readonly governanceLedgerPath: string;
@@ -19,6 +57,7 @@ const trustedLaunchPolicyBrand: unique symbol = Symbol("TrustedLaunchPolicy");
 
 /** Immutable local operator authority; never construct this from manifest data. */
 export interface TrustedLaunchPolicy {
+  readonly policyId: string;
   readonly piExecutable: string;
   readonly piDaddyExtension: string;
   readonly governanceLedgerPath: string;
@@ -63,6 +102,7 @@ export class LaunchPlanInputError extends Error {
 }
 
 const POLICY_PROPERTIES = new Set([
+  "policyId",
   "piExecutable",
   "piDaddyExtension",
   "governanceLedgerPath",
@@ -75,6 +115,24 @@ const SKILL_REFERENCE = /^skill:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const PROMPT_REFERENCE = /^prompt:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const PROHIBITED_LOCAL_PATH_CHARACTER = /[`$;&|<>"'\\]/;
 const issuedTrustedPolicies = new WeakSet<object>();
+const issuedLaunchPlans = new WeakMap<object, IssuedLaunchAuthority>();
+const SAFE_POLICY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+export interface IssuedLaunchAuthority {
+  readonly launchPolicyId: string;
+  readonly planDigest: string;
+}
+
+function requirePolicyId(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    !SAFE_POLICY_ID.test(value) ||
+    containsCredentialShapedContent(value)
+  ) {
+    throw new LaunchPlanInputError("launch policy identifier is invalid");
+  }
+  return value;
+}
 
 type InputSnapshot = { ok: true; value: unknown } | { ok: false };
 
@@ -223,6 +281,7 @@ export function createTrustedLaunchPolicy(value: unknown): TrustedLaunchPolicy {
     );
   }
 
+  const policyId = requirePolicyId(definition.policyId);
   const piExecutable = requireLocalPath(
     definition.piExecutable,
     "Pi executable",
@@ -265,6 +324,7 @@ export function createTrustedLaunchPolicy(value: unknown): TrustedLaunchPolicy {
   ]);
 
   const policy: TrustedLaunchPolicy = Object.freeze({
+    policyId,
     piExecutable,
     piDaddyExtension,
     governanceLedgerPath,
@@ -385,7 +445,7 @@ export function createPiLaunchPlan(
     PI_GRANTS_LEDGER: trustedPolicy.governanceLedgerPath,
   };
 
-  return {
+  const plan: PiLaunchPlan = {
     executable: trustedPolicy.piExecutable,
     arguments: arguments_,
     workingDirectory: validatedManifest.repository.root,
@@ -427,4 +487,45 @@ export function createPiLaunchPlan(
       pacaTaskId: validatedManifest.paca.taskId,
     },
   };
+
+  Object.freeze(plan.arguments);
+  Object.freeze(plan.environment);
+  Object.freeze(plan.redactedOperatorPreview.arguments);
+  Object.freeze(plan.redactedOperatorPreview.environment);
+  Object.freeze(plan.redactedOperatorPreview);
+  Object.freeze(plan.correlation);
+  Object.freeze(plan);
+
+  const digestProjection = {
+    executable: plan.executable,
+    arguments: plan.arguments,
+    workingDirectory: plan.workingDirectory,
+    environmentNames: Object.keys(plan.environment).sort(),
+    correlation: plan.correlation,
+    launchPolicyId: trustedPolicy.policyId,
+  };
+  const planDigest = createHash("sha256")
+    .update(canonicalSerializeLifecycleValue(digestProjection))
+    .digest("hex");
+  issuedLaunchPlans.set(
+    plan,
+    Object.freeze({ launchPolicyId: trustedPolicy.policyId, planDigest }),
+  );
+  return plan;
+}
+
+/** Fail closed unless this exact immutable object was issued by the trusted planner. */
+export function requireIssuedPiLaunchPlan(
+  value: unknown,
+): IssuedLaunchAuthority {
+  try {
+    if (typeof value !== "object" || value === null) throw new TypeError();
+    const authority = issuedLaunchPlans.get(value);
+    if (!authority || !Object.isFrozen(value)) throw new TypeError();
+    return authority;
+  } catch {
+    throw new LaunchPlanInputError(
+      "launch plan must be issued by createPiLaunchPlan in this process",
+    );
+  }
 }

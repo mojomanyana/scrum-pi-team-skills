@@ -18,6 +18,7 @@ import {
   createPiLaunchPlan,
   createTrustedLaunchPolicy,
   LaunchPlanInputError,
+  requireIssuedPiLaunchPlan,
   type TrustedLaunchPolicy,
   type TrustedLaunchPolicyDefinition,
 } from "../src/index.js";
@@ -26,6 +27,7 @@ const principalDeveloperManifest =
   principalDeveloperManifestJson as AgentExecutionManifest;
 
 const trustedPolicyDefinition: TrustedLaunchPolicyDefinition = {
+  policyId: "launch-policy-spts7-test",
   piExecutable: "/home/paca/.local/bin/pi",
   piDaddyExtension: "/home/paca/.pi/agent/extensions/pi-daddy-grants.ts",
   governanceLedgerPath: "/home/paca/.local/state/pi-daddy/exec-spts7-001.jsonl",
@@ -96,6 +98,7 @@ function createPolicy(
 }
 
 interface MutablePolicyDefinition {
+  policyId: string;
   piExecutable: string;
   piDaddyExtension: string;
   governanceLedgerPath: string;
@@ -452,6 +455,7 @@ describe("TrustedLaunchPolicy", () => {
   it("accepts harmless sk fragments in ordinary filenames and WSL paths", () => {
     expect(() =>
       createTrustedLaunchPolicy({
+        policyId: "harmless-sk-policy",
         piExecutable: "/home/paca/sk-tools/pi",
         piDaddyExtension: "/home/paca/mask-work/pi-daddy.ts",
         governanceLedgerPath: "/home/paca/state/task-sketch-ledger.jsonl",
@@ -599,6 +603,27 @@ describe("createPiLaunchPlan", () => {
     },
   );
 
+  it("issues immutable in-process executable authority that copies cannot forge", () => {
+    const plan = createPiLaunchPlan(principalDeveloperManifest, trustedPolicy);
+
+    expect(() => requireIssuedPiLaunchPlan(plan)).not.toThrow();
+    expect(Object.isFrozen(plan)).toBe(true);
+    expect(Object.isFrozen(plan.arguments)).toBe(true);
+    expect(() => plan.arguments.push("--forged")).toThrow(TypeError);
+    expect(() => Object.setPrototypeOf(plan, {})).toThrow(TypeError);
+    expect(() => requireIssuedPiLaunchPlan({ ...plan })).toThrow(
+      new LaunchPlanInputError(
+        "launch plan must be issued by createPiLaunchPlan in this process",
+      ),
+    );
+    expect(() => requireIssuedPiLaunchPlan(structuredClone(plan))).toThrow(
+      LaunchPlanInputError,
+    );
+    expect(() => requireIssuedPiLaunchPlan(new Proxy(plan, {}))).toThrow(
+      LaunchPlanInputError,
+    );
+  });
+
   it("models Pi 0.84.2 precedence and suppresses every implicit prompt source", () => {
     const plan = createPiLaunchPlan(principalDeveloperManifest, trustedPolicy);
     const resolved = modelPi0842PromptDiscovery(plan.arguments, {
@@ -720,6 +745,7 @@ describe("createPiLaunchPlan", () => {
     const manifest = cloneManifest();
     manifest.repository.root = "/home/paca/My Workspace/project";
     const spacedPolicy = createTrustedLaunchPolicy({
+      policyId: "spaced-policy",
       piExecutable: "/home/paca/My Tools/pi",
       piDaddyExtension: "/home/paca/My Extensions/pi daddy.ts",
       governanceLedgerPath: "/home/paca/Local State/pi daddy/ledger.jsonl",

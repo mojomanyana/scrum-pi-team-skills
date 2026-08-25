@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mojomanyana/scrum-pi-team-skills/schemas/spts.lifecycle-receipt-anchor/1.0.0",
+  "title": "spts.lifecycle-receipt-anchor",
+  "description": "Versioned authenticated terminal anchor for one complete lifecycle receipt chain.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractId",
+    "contractVersion",
+    "executionId",
+    "receiptCount",
+    "terminalReceiptDigest",
+    "planDigest",
+    "environmentPolicyId",
+    "runtimePolicyId",
+    "authenticatorId",
+    "authenticationTag"
+  ],
+  "properties": {
+    "contractId": { "const": "spts.lifecycle-receipt-anchor" },
+    "contractVersion": { "const": "1.0.0" },
+    "executionId": { "$ref": "#/definitions/safeId" },
+    "receiptCount": { "type": "integer", "minimum": 2, "maximum": 100000 },
+    "terminalReceiptDigest": { "$ref": "#/definitions/digest" },
+    "planDigest": { "$ref": "#/definitions/digest" },
+    "environmentPolicyId": { "$ref": "#/definitions/safeId" },
+    "runtimePolicyId": { "$ref": "#/definitions/safeId" },
+    "authenticatorId": { "$ref": "#/definitions/safeId" },
+    "authenticationTag": { "$ref": "#/definitions/digest" }
+  },
+  "definitions": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}
