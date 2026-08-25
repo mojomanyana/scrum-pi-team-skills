@@ -12,6 +12,7 @@ const knownModes = new Set([
   "large-stderr",
   "ignore-term",
   "ignore-term-ready",
+  "graceful-term",
   "tree",
   "leader-exit-tree",
 ]);
@@ -74,6 +75,10 @@ switch (mode) {
   case "ignore-term-ready":
     process.on("SIGTERM", () => {});
     process.stdout.write("ready\n");
+    setInterval(() => {}, 1_000);
+    break;
+  case "graceful-term":
+    process.on("SIGTERM", () => process.exit(0));
     setInterval(() => {}, 1_000);
     break;
   case "tree": {

@@ -353,7 +353,7 @@ describe("spts.lifecycle-receipt", () => {
     });
   });
 
-  it("accepts canonical timeout termination with optional required kill evidence", () => {
+  it("accepts graceful and governed-signal timeout exits", () => {
     const timeoutEvents = [
       {
         eventType: "process_timed_out" as const,
@@ -364,6 +364,16 @@ describe("spts.lifecycle-receipt", () => {
         payload: { reason: "timeout" as const },
       },
     ];
+    const graceful = lifecycleChain(timeoutEvents);
+    const gracefulExit = graceful.at(-1)!.payload as {
+      exitCode: number | null;
+      signal: string | null;
+    };
+    gracefulExit.exitCode = 0;
+    gracefulExit.signal = null;
+    rehash(graceful);
+
+    expect(verifyLifecycleReceiptChain(graceful).valid).toBe(true);
     expect(
       verifyLifecycleReceiptChain(lifecycleChain(timeoutEvents)).valid,
     ).toBe(true);
@@ -383,6 +393,38 @@ describe("spts.lifecycle-receipt", () => {
       ).valid,
     ).toBe(true);
   });
+
+  it.each([
+    [1, null],
+    [0, "SIGTERM"],
+    [null, null],
+  ])(
+    "rejects invalid graceful timeout exitCode %s and signal %s",
+    (exitCode, signal) => {
+      const receipts = lifecycleChain([
+        {
+          eventType: "process_timed_out",
+          payload: { maximumRuntimeMs: 10 },
+        },
+        {
+          eventType: "termination_requested",
+          payload: { reason: "timeout" },
+        },
+      ]);
+      const exit = receipts.at(-1)!.payload as {
+        exitCode: number | null;
+        signal: string | null;
+      };
+      exit.exitCode = exitCode;
+      exit.signal = signal;
+      rehash(receipts);
+
+      expect(verifyLifecycleReceiptChain(receipts)).toEqual({
+        valid: false,
+        code: "receipt-lifecycle-invalid",
+      });
+    },
+  );
 
   it("accepts supervisor_failed after complete timeout authority evidence", () => {
     expect(

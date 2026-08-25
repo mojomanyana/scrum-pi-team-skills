@@ -21,6 +21,7 @@ import receiptsExample from "../../contracts/examples/lifecycle-receipts.success
 import {
   canonicalSerializeLifecycleValue,
   computeLifecycleReceiptDigest,
+  verifyLifecycleReceiptChain,
   type LifecycleReceipt,
 } from "../../contracts/src/index.js";
 import {
@@ -61,7 +62,7 @@ function operations(
   return { write, sync: fsyncSync, close: onClose };
 }
 
-function impossibleTimeoutReceipts(): LifecycleReceipt[] {
+function timeoutReceipts(graceful: boolean): LifecycleReceipt[] {
   const receipts = [
     structuredClone(receiptsExample[0]),
     structuredClone(receiptsExample[1]),
@@ -70,12 +71,21 @@ function impossibleTimeoutReceipts(): LifecycleReceipt[] {
       eventType: "process_timed_out",
       payload: { maximumRuntimeMs: 10 },
     },
+    ...(graceful
+      ? [
+          {
+            ...structuredClone(receiptsExample[1]),
+            eventType: "termination_requested" as const,
+            payload: { reason: "timeout" as const },
+          },
+        ]
+      : []),
     {
       ...structuredClone(receiptsExample.at(-1)!),
       payload: {
         ...structuredClone(receiptsExample.at(-1)!.payload),
-        exitCode: null,
-        signal: "SIGTERM",
+        exitCode: graceful ? 0 : null,
+        signal: graceful ? null : "SIGTERM",
         outcome: "timed_out",
       },
     },
@@ -174,7 +184,7 @@ describe("local filesystem receipt sink", () => {
       contractId: "spts.lifecycle-receipt",
       contractVersion: "1.0.0",
     });
-    for (const receipt of impossibleTimeoutReceipts())
+    for (const receipt of timeoutReceipts(false))
       await writer.append(canonicalSerializeLifecycleValue(receipt));
     expect(() => writer.close()).toThrow(
       new ReceiptStorageError("receipt storage operation failed"),
@@ -192,7 +202,7 @@ describe("local filesystem receipt sink", () => {
     );
     writeFileSync(
       receiptPath,
-      `${impossibleTimeoutReceipts()
+      `${timeoutReceipts(false)
         .map(canonicalSerializeLifecycleValue)
         .join("\n")}\n`,
       { mode: 0o600 },
@@ -204,6 +214,42 @@ describe("local filesystem receipt sink", () => {
         authenticator: authenticator(),
       }),
     ).toEqual({ valid: false, code: "receipt-lifecycle-invalid" });
+  });
+
+  it("closes a graceful timeout chain and authenticates its anchor for inspection", async () => {
+    const parent = trustedParent();
+    const sink = createLocalFilesystemReceiptSink({
+      trustedParent: parent,
+      authenticator: authenticator(),
+    });
+    const writer = await sink.open({
+      executionId: "runtime-example-001",
+      contractId: "spts.lifecycle-receipt",
+      contractVersion: "1.0.0",
+    });
+    const receipts = timeoutReceipts(true);
+    expect(verifyLifecycleReceiptChain(receipts).valid).toBe(true);
+    for (const receipt of receipts)
+      await writer.append(canonicalSerializeLifecycleValue(receipt));
+
+    await writer.close();
+
+    expect(existsSync(join(parent, "runtime-example-001", "anchor.json"))).toBe(
+      true,
+    );
+    const inspection = inspectLifecycleReceipts({
+      trustedParent: parent,
+      executionId: "runtime-example-001",
+      authenticator: authenticator(),
+    });
+    expect(inspection.valid).toBe(true);
+    if (inspection.valid) {
+      expect(inspection.receipts.at(-1)!.payload).toMatchObject({
+        exitCode: 0,
+        signal: null,
+        outcome: "timed_out",
+      });
+    }
   });
 
   it.each([

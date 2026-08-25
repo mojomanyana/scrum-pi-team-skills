@@ -289,6 +289,17 @@ function validExitOutcome(
 ): boolean {
   const hasExitCode = payload.exitCode !== null;
   const hasSignal = payload.signal !== null;
+  if (payload.outcome === "timed_out") {
+    const gracefulExit = payload.exitCode === 0 && payload.signal === null;
+    const governedSignalExit = !hasExitCode && hasSignal;
+    return (
+      (gracefulExit || governedSignalExit) &&
+      evidence.timedOut &&
+      evidence.terminationReason === "timeout" &&
+      !evidence.supervisorFailed &&
+      (payload.signal !== "SIGKILL" || evidence.killed)
+    );
+  }
   if (
     hasExitCode === hasSignal ||
     (evidence.timedOut && evidence.terminationReason !== "timeout")
@@ -318,16 +329,6 @@ function validExitOutcome(
       !hasExitCode &&
       hasSignal &&
       !evidence.timedOut &&
-      !evidence.supervisorFailed &&
-      (payload.signal !== "SIGKILL" || evidence.killed)
-    );
-  }
-  if (payload.outcome === "timed_out") {
-    return (
-      !hasExitCode &&
-      hasSignal &&
-      evidence.timedOut &&
-      evidence.terminationReason === "timeout" &&
       !evidence.supervisorFailed &&
       (payload.signal !== "SIGKILL" || evidence.killed)
     );

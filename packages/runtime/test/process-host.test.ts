@@ -379,6 +379,51 @@ describe("governed local process host", () => {
     );
   });
 
+  it("verifies a real process that exits gracefully after timeout SIGTERM", async () => {
+    const sink = memorySink();
+    const nodeAdapter = createNodeProcessAdapter();
+    let pid = 0;
+    const handle = await startGovernedLocalProcess({
+      plan: plan("graceful-term"),
+      environmentPolicy: environment(),
+      runtimePolicy: runtime({
+        maximumRuntimeMs: 100,
+        terminationGraceMs: 100,
+      }),
+      receiptSink: sink,
+      executionIdSource: () => "runtime-execution-graceful-timeout",
+      processAdapter: {
+        platform: "linux",
+        spawn(executable, arguments_, options) {
+          const child = nodeAdapter.spawn(executable, arguments_, options);
+          pid = child.pid ?? 0;
+          return child;
+        },
+        isProcessGroupAlive: nodeAdapter.isProcessGroupAlive,
+        killProcessGroup: nodeAdapter.killProcessGroup,
+      },
+    });
+
+    const result = await handle.exit;
+    const receipts = sink.lines.map((line) =>
+      JSON.parse(line),
+    ) as LifecycleReceipt[];
+    expect(result).toMatchObject({
+      outcome: "timed_out",
+      exitCode: 0,
+      signal: null,
+    });
+    expect(receipts.map(({ eventType }) => eventType)).toEqual([
+      "launch_requested",
+      "process_started",
+      "process_timed_out",
+      "termination_requested",
+      "process_exited",
+    ]);
+    expect(verifyLifecycleReceiptChain(receipts).valid).toBe(true);
+    expect(await eventuallyNotRunning(pid)).toBe(true);
+  });
+
   it("times out and escalates an ignored SIGTERM to the complete process group", async () => {
     const sink = memorySink();
     const handle = await startGovernedLocalProcess({
@@ -390,9 +435,16 @@ describe("governed local process host", () => {
     });
 
     const result = await handle.exit;
-    expect(result.outcome).toBe("timed_out");
+    const receipts = sink.lines.map((line) =>
+      JSON.parse(line),
+    ) as LifecycleReceipt[];
+    expect(result).toMatchObject({
+      outcome: "timed_out",
+      exitCode: null,
+      signal: "SIGKILL",
+    });
     expect(sink.closeCount).toBe(1);
-    expect(sink.lines.map((line) => JSON.parse(line).eventType)).toEqual([
+    expect(receipts.map(({ eventType }) => eventType)).toEqual([
       "launch_requested",
       "process_started",
       "process_timed_out",
@@ -400,6 +452,7 @@ describe("governed local process host", () => {
       "process_killed",
       "process_exited",
     ]);
+    expect(verifyLifecycleReceiptChain(receipts).valid).toBe(true);
   });
 
   it("waits for a SIGTERM-surviving descendant after its group leader exits", async () => {
