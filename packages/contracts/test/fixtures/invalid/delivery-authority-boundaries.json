@@ -1,0 +1,51 @@
+[
+  { "operation": "identity-drift", "escalationReason": "identity-drift" },
+  {
+    "operation": "dirty-worktree",
+    "escalationReason": "dirty-unexpected-worktree"
+  },
+  {
+    "operation": "verifier-modified-candidate",
+    "escalationReason": "verifier-modified-candidate"
+  },
+  {
+    "operation": "candidate-changed-after-approval",
+    "escalationReason": "candidate-changed-after-approval"
+  },
+  {
+    "operation": "unknown-security-assurance-elevation",
+    "escalationReason": "unknown-security-assurance-elevation"
+  },
+  {
+    "operation": "credential-scope-expansion",
+    "escalationReason": "credential-scope-expansion"
+  },
+  {
+    "operation": "destructive-or-production-effect",
+    "escalationReason": "destructive-git-or-production-effect"
+  },
+  {
+    "operation": "autonomy-limit-exhausted",
+    "escalationReason": "autonomy-limits-exhausted"
+  },
+  {
+    "operation": "unsafe-authority-path",
+    "escalationReason": "identity-drift"
+  },
+  {
+    "operation": "remote-main-drift",
+    "escalationReason": "candidate-changed-after-approval"
+  },
+  {
+    "operation": "pr-head-drift",
+    "escalationReason": "candidate-changed-after-approval"
+  },
+  {
+    "operation": "missing-stakeholder-merge-grant",
+    "escalationReason": "destructive-git-or-production-effect"
+  },
+  {
+    "operation": "recovery-security-bypass",
+    "escalationReason": "unknown-security-assurance-elevation"
+  }
+]
