@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 
 import { Ajv, type ErrorObject } from "ajv";
@@ -169,16 +170,21 @@ export type DeliveryTransitionDecisionCode =
   | "contract-invalid"
   | "idempotency-conflict"
   | "request-denied"
+  | "stale-observation"
   | "identity-drift"
   | "transition-denied"
   | "publication-denied"
-  | "merge-grant-required";
+  | "autonomy-exhausted"
+  | "ci-evidence-required"
+  | "merge-grant-required"
+  | "merge-observation-required";
 
 export type DeliveryEffectDecisionCode =
   | "accepted"
   | "contract-invalid"
   | "idempotency-conflict"
   | "identity-drift"
+  | "stale-observation"
   | "escalation-required"
   | "publication-denied"
   | "role-authority-denied"
@@ -189,6 +195,7 @@ export type AdministrativeRecoveryDecisionCode =
   | "contract-invalid"
   | "idempotency-conflict"
   | "identity-not-revalidated"
+  | "stale-observation"
   | "recovery-gate-denied";
 
 export interface DeliveryTransitionAuditRecord {
@@ -197,6 +204,8 @@ export interface DeliveryTransitionAuditRecord {
   requestDigest: string;
   actorRole: DeliveryRole;
   actorId: string;
+  executionId: string;
+  workspaceId: string;
   candidateTree: string;
   accepted: boolean;
   code: DeliveryTransitionDecisionCode;
@@ -235,6 +244,7 @@ export interface DeliveryEvidence {
   verification: {
     verdict: "APPROVE" | "REJECT" | "UNVERIFIED" | null;
     reviewedTree: string | null;
+    approvalId: string | null;
   };
   pullRequest: {
     number: number | null;
@@ -242,7 +252,11 @@ export interface DeliveryEvidence {
     headBranch: string | null;
     headCommit: string | null;
   };
-  ci: { runId: string | null; checkId: string | null };
+  ci: {
+    runId: string | null;
+    checkId: string | null;
+    verdict: "PASS" | "FAIL" | null;
+  };
   pacaUpdateId: string | null;
   observedAt: string;
   freshThroughEventId: string;
@@ -264,6 +278,13 @@ export interface AdministrativeRecoveryRecord {
   recoveryId: string;
   kind: AdministrativeRecoveryKind;
   idempotencyKey: string;
+  requestDigest: string;
+  actorRole: DeliveryRole;
+  actorId: string;
+  executionId: string;
+  workspaceId: string;
+  workflowState: DeliveryWorkflowState;
+  ciStatus: DeliveryAuthorityContract["workflow"]["observations"]["ci"];
   identityRevalidated: boolean;
   targetGate:
     | "administrative"
@@ -283,7 +304,10 @@ export interface DeliveryEffectAuditRecord {
   effect: string;
   actorRole: DeliveryRole;
   actorId: string;
+  executionId: string;
+  workspaceId: string;
   targetTree: string;
+  workflowState: DeliveryWorkflowState;
   allowed: boolean;
   code: DeliveryEffectDecisionCode;
   observedAt: string;
@@ -293,6 +317,8 @@ export interface DeliveryAuthorityContract {
   contractId: typeof DELIVERY_AUTHORITY_CONTRACT_ID;
   contractVersion: typeof DELIVERY_AUTHORITY_CONTRACT_VERSION;
   authorityDigest: string;
+  meteringDigest: string;
+  meteringObservedAt: string;
   activeRole: DeliveryRole;
   governance: {
     systemOfRecord: "paca";
@@ -325,6 +351,35 @@ export interface DeliveryAuthorityContract {
   humanGatedActions: HumanGatedDeliveryAction[];
   workflow: {
     state: DeliveryWorkflowState;
+    checkpoint: {
+      checkpointId: string;
+      state: DeliveryWorkflowState;
+      candidateTree: string;
+      activeRepairBudget: "implementation" | "verification" | "ci";
+      attemptUsage: {
+        implementationAttempts: number;
+        verificationRepairAttempts: number;
+        ciRepairAttempts: number;
+      };
+      observedAt: string;
+    };
+    observations: {
+      worktree: "clean" | "dirty-unexpected";
+      verifierCandidate: "unchanged" | "modified";
+      assurance: "known" | "unknown";
+      security: "known" | "unknown";
+      credentialScope: "unchanged" | "expanded";
+      ci: "not-started" | "pending" | "passed" | "failed";
+      merge: {
+        status: "not-merged" | "merged";
+        targetTree: string | null;
+        pullRequestNumber: number | null;
+        mergeCommit: string | null;
+        observedAt: string | null;
+        receiptId: string | null;
+        freshThroughEventId: string | null;
+      };
+    };
     candidate: DeliveryCandidate;
     audit: DeliveryTransitionAuditRecord[];
   };
@@ -415,7 +470,58 @@ function structuralError(error: ErrorObject): DeliveryContractError {
   return fixedError(path, error.keyword, message);
 }
 
+const MAX_INPUT_NODES = 50_000;
+const MAX_INPUT_DEPTH = 64;
+const MAX_INPUT_ARRAY_ITEMS = 1_024;
+const MAX_INPUT_OBJECT_KEYS = 128;
+const MAX_INPUT_STRING_BYTES = 10 * 1024 * 1024;
+
+function isWithinInputBounds(root: unknown): boolean {
+  try {
+    const pending: Array<{ value: unknown; depth: number }> = [
+      { value: root, depth: 0 },
+    ];
+    const seen = new WeakSet<object>();
+    let nodes = 0;
+    let stringBytes = 0;
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      nodes += 1;
+      if (nodes > MAX_INPUT_NODES || current.depth > MAX_INPUT_DEPTH)
+        return false;
+      if (typeof current.value === "string") {
+        stringBytes += Buffer.byteLength(current.value, "utf8");
+        if (stringBytes > MAX_INPUT_STRING_BYTES) return false;
+        continue;
+      }
+      if (typeof current.value !== "object" || current.value === null) continue;
+      if (seen.has(current.value)) continue;
+      seen.add(current.value);
+      if (
+        Array.isArray(current.value) &&
+        current.value.length > MAX_INPUT_ARRAY_ITEMS
+      )
+        return false;
+      const keys = Reflect.ownKeys(current.value);
+      if (!Array.isArray(current.value) && keys.length > MAX_INPUT_OBJECT_KEYS)
+        return false;
+      for (const key of keys) {
+        if (typeof key !== "string") return false;
+        stringBytes += Buffer.byteLength(key, "utf8");
+        if (stringBytes > MAX_INPUT_STRING_BYTES) return false;
+        const descriptor = Object.getOwnPropertyDescriptor(current.value, key);
+        if (descriptor === undefined || !("value" in descriptor)) return false;
+        pending.push({ value: descriptor.value, depth: current.depth + 1 });
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function canonicalSnapshot<T>(value: unknown): T | null {
+  if (!isWithinInputBounds(value)) return null;
   try {
     return JSON.parse(canonicalSerializeLifecycleValue(value)) as T;
   } catch {
@@ -440,6 +546,9 @@ function authorityIdentity(contract: DeliveryAuthorityContract): unknown {
     automaticActions: contract.automaticActions,
     humanGatedActions: contract.humanGatedActions,
     autonomyLimits: contract.autonomy.limits,
+    workflowCheckpoint: contract.workflow.checkpoint,
+    effectGrants: contract.effectGrants,
+    requestedEffects: contract.requestedEffects,
   };
 }
 
@@ -447,6 +556,23 @@ export function computeDeliveryAuthorityDigest(
   contract: DeliveryAuthorityContract,
 ): string {
   return sha256(authorityIdentity(contract));
+}
+
+export function computeDeliveryMeteringDigest(
+  contract: DeliveryAuthorityContract,
+): string {
+  return sha256({
+    contractId: contract.contractId,
+    contractVersion: contract.contractVersion,
+    projectId: contract.task.paca.projectId,
+    taskId: contract.task.paca.taskId,
+    checkpointId: contract.workflow.checkpoint.checkpointId,
+    meteringObservedAt: contract.meteringObservedAt,
+    elapsedMinutes: contract.autonomy.usage.elapsedMinutes,
+    concurrentAgents: contract.autonomy.usage.concurrentAgents,
+    worktrees: contract.autonomy.usage.worktrees,
+    cancelled: contract.autonomy.usage.cancelled,
+  });
 }
 
 export function computeDeliveryEvidenceDigest(
@@ -554,6 +680,179 @@ const publicationStates = new Set<DeliveryWorkflowState>([
   "completed",
 ]);
 
+const publicationEffectStates = new Set<DeliveryWorkflowState>([
+  "publication-authorized",
+  "pr-ci-monitoring",
+  "merge-gate",
+]);
+
+function roleMayTransition(
+  role: DeliveryRole,
+  from: DeliveryWorkflowState,
+  to: DeliveryWorkflowState,
+): boolean {
+  if (role === "flow") return true;
+  if (role === "principal-developer")
+    return (
+      (from === "implementation" && to === "internal-review") ||
+      (from === "repair-required" && to === "implementation") ||
+      to === "blocked" ||
+      to === "escalated"
+    );
+  if (role === "product")
+    return (
+      (from === "intake" && to === "ready") ||
+      to === "blocked" ||
+      to === "escalated"
+    );
+  if (role === "stakeholder")
+    return from === "merge-gate" && to === "completed";
+  return false;
+}
+
+function effectAllowedInState(
+  effect: AutomaticDeliveryAction,
+  state: DeliveryWorkflowState,
+): boolean {
+  if (effect === "diagnose-repair")
+    return state === "implementation" || state === "repair-required";
+  if (
+    new Set<AutomaticDeliveryAction>([
+      "edit",
+      "format",
+      "feature-branch-commit",
+      "ci-repair",
+    ]).has(effect)
+  )
+    return state === "implementation";
+  if (effect === "test" || effect === "build")
+    return new Set<DeliveryWorkflowState>([
+      "implementation",
+      "internal-review",
+      "independent-verification",
+      "repair-required",
+      "pr-ci-monitoring",
+    ]).has(state);
+  if (effect === "worktree-create")
+    return new Set<DeliveryWorkflowState>([
+      "ready",
+      "implementation",
+      "internal-review",
+      "independent-verification",
+      "repair-required",
+    ]).has(state);
+  if (effect === "worktree-inspect") return state !== "completed";
+  if (effect === "worktree-cleanup") return state !== "intake";
+  if (effect === "independent-verification")
+    return state === "independent-verification";
+  if (effect === "feature-push" || effect === "pr-create-update")
+    return publicationEffectStates.has(state);
+  if (effect === "ci-monitor")
+    return state === "pr-ci-monitoring" || state === "merge-gate";
+  if (effect === "administrative-recovery")
+    return state === "blocked" || state === "escalated";
+  if (effect === "paca-evidence-update" || effect === "paca-status-update")
+    return state !== "intake";
+  return false;
+}
+
+function activeRepairBudget(
+  contract: DeliveryAuthorityContract,
+): "implementation" | "verification" | "ci" {
+  for (let index = contract.workflow.audit.length - 1; index >= 0; index -= 1) {
+    const audit = contract.workflow.audit[index]!;
+    if (audit.accepted && audit.to === "repair-required")
+      return audit.from === "pr-ci-monitoring" ? "ci" : "verification";
+  }
+  return contract.workflow.checkpoint.activeRepairBudget;
+}
+
+function latestAcceptedBoundary(
+  contract: DeliveryAuthorityContract,
+  state: DeliveryWorkflowState,
+): { eventId: string; candidateTree: string; observedAt: string } | null {
+  for (let index = contract.workflow.audit.length - 1; index >= 0; index -= 1) {
+    const audit = contract.workflow.audit[index]!;
+    if (audit.accepted && audit.to === state) return audit;
+  }
+  const checkpoint = contract.workflow.checkpoint;
+  return checkpoint.state === state
+    ? {
+        eventId: checkpoint.checkpointId,
+        candidateTree: checkpoint.candidateTree,
+        observedAt: checkpoint.observedAt,
+      }
+    : null;
+}
+
+function transitionBudgetExhausted(
+  contract: DeliveryAuthorityContract,
+  from: DeliveryWorkflowState,
+  to: DeliveryWorkflowState,
+): boolean {
+  if (to !== "implementation") return false;
+  if (from === "ready")
+    return (
+      contract.autonomy.usage.implementationAttempts >=
+      contract.autonomy.limits.implementationAttempts
+    );
+  if (from !== "repair-required") return false;
+  const budget = activeRepairBudget(contract);
+  if (budget === "ci")
+    return (
+      contract.autonomy.usage.ciRepairAttempts >=
+      contract.autonomy.limits.ciRepairAttempts
+    );
+  if (budget === "verification")
+    return (
+      contract.autonomy.usage.verificationRepairAttempts >=
+      contract.autonomy.limits.verificationRepairAttempts
+    );
+  return (
+    contract.autonomy.usage.implementationAttempts >=
+    contract.autonomy.limits.implementationAttempts
+  );
+}
+
+function mergeObservationIsFresh(contract: DeliveryAuthorityContract): boolean {
+  const merge = contract.workflow.observations.merge;
+  if (
+    merge.status !== "merged" ||
+    merge.targetTree === null ||
+    merge.pullRequestNumber === null ||
+    merge.mergeCommit === null ||
+    merge.observedAt === null ||
+    merge.receiptId === null ||
+    merge.freshThroughEventId === null ||
+    !isCanonicalLifecycleTimestamp(merge.observedAt) ||
+    merge.targetTree !== contract.workflow.candidate.tree ||
+    merge.pullRequestNumber !== contract.workflow.candidate.pullRequest.number
+  )
+    return false;
+  const gateBoundary = latestAcceptedBoundary(contract, "merge-gate");
+  return (
+    gateBoundary !== null &&
+    gateBoundary.eventId === merge.freshThroughEventId &&
+    gateBoundary.candidateTree === merge.targetTree &&
+    gateBoundary.observedAt <= merge.observedAt
+  );
+}
+
+function effectBudgetExhausted(
+  contract: DeliveryAuthorityContract,
+  effect: AutomaticDeliveryAction,
+): boolean {
+  const { limits, usage } = contract.autonomy;
+  if (effect === "worktree-create" && usage.worktrees >= limits.worktrees)
+    return true;
+  if (
+    (effect === "paca-evidence-update" || effect === "paca-status-update") &&
+    usage.evidenceBytes >= limits.evidenceBytes
+  )
+    return true;
+  return false;
+}
+
 function publicationIsFresh(contract: DeliveryAuthorityContract): boolean {
   const candidate = contract.workflow.candidate;
   const verifier = contract.roles["independent-verifier"];
@@ -562,6 +861,9 @@ function publicationIsFresh(contract: DeliveryAuthorityContract): boolean {
     candidate.verification.reviewedTree === candidate.tree &&
     candidate.verification.executionId === verifier.executionId &&
     candidate.verification.workspaceId === verifier.workspaceId &&
+    candidate.remoteBase.expectedCommit ===
+      contract.task.repository.baseCommit &&
+    candidate.remoteBase.expectedTree === contract.task.repository.baseTree &&
     candidate.remoteBase.expectedCommit ===
       candidate.remoteBase.observedCommit &&
     candidate.remoteBase.expectedTree === candidate.remoteBase.observedTree &&
@@ -590,10 +892,156 @@ function hasGrant(
   );
 }
 
+function hasApprovalEvidenceForTree(
+  contract: DeliveryAuthorityContract,
+  tree: string,
+): boolean {
+  const verifier = contract.roles["independent-verifier"];
+  return contract.evidence.some(
+    (evidence) =>
+      evidence.verification.verdict === "APPROVE" &&
+      evidence.verification.approvalId !== null &&
+      evidence.verification.reviewedTree === tree &&
+      evidence.repository.tree === tree &&
+      evidence.actor.role === "independent-verifier" &&
+      evidence.actor.actorId === verifier.actorId &&
+      evidence.actor.executionId === verifier.executionId &&
+      evidence.actor.workspaceId === verifier.workspaceId,
+  );
+}
+
+function hasFreshPassingCiEvidence(
+  contract: DeliveryAuthorityContract,
+): boolean {
+  const candidate = contract.workflow.candidate;
+  const boundary = latestAcceptedBoundary(contract, "pr-ci-monitoring");
+  if (boundary === null || boundary.candidateTree !== candidate.tree)
+    return false;
+  const currentEvidence = contract.evidence.filter(
+    (evidence) =>
+      evidence.assurance.phase === "ci" &&
+      evidence.freshThroughEventId === boundary.eventId &&
+      boundary.observedAt <= evidence.observedAt &&
+      evidence.repository.commit === candidate.headCommit &&
+      evidence.repository.tree === candidate.tree &&
+      evidence.pullRequest.number === candidate.pullRequest.number &&
+      evidence.pullRequest.baseBranch === candidate.pullRequest.baseBranch &&
+      evidence.pullRequest.headBranch === candidate.pullRequest.headBranch &&
+      evidence.pullRequest.headCommit === candidate.headCommit,
+  );
+  if (currentEvidence.length === 0) return false;
+  const latestObservedAt = currentEvidence.reduce(
+    (latest, evidence) =>
+      evidence.observedAt > latest ? evidence.observedAt : latest,
+    currentEvidence[0]!.observedAt,
+  );
+  return currentEvidence
+    .filter((evidence) => evidence.observedAt === latestObservedAt)
+    .every(
+      (evidence) =>
+        evidence.ci.verdict === "PASS" &&
+        evidence.ci.runId !== null &&
+        evidence.ci.checkId !== null,
+    );
+}
+
+function expectedAttemptUsage(contract: DeliveryAuthorityContract): {
+  implementationAttempts: number;
+  verificationRepairAttempts: number;
+  ciRepairAttempts: number;
+} {
+  const usage = { ...contract.workflow.checkpoint.attemptUsage };
+  let repairBudget = contract.workflow.checkpoint.activeRepairBudget;
+  for (const audit of contract.workflow.audit) {
+    if (!audit.accepted) continue;
+    if (audit.to === "repair-required")
+      repairBudget = audit.from === "pr-ci-monitoring" ? "ci" : "verification";
+    if (audit.to !== "implementation") continue;
+    if (audit.from === "ready") usage.implementationAttempts += 1;
+    else if (audit.from === "repair-required") {
+      if (repairBudget === "ci") usage.ciRepairAttempts += 1;
+      else if (repairBudget === "verification")
+        usage.verificationRepairAttempts += 1;
+    }
+  }
+  return usage;
+}
+
 function semanticErrors(
   contract: DeliveryAuthorityContract,
 ): DeliveryContractError[] {
   const errors: DeliveryContractError[] = [];
+  const observations = contract.workflow.observations;
+  const requiredEscalations: Array<
+    readonly [boolean, MandatoryEscalationReason]
+  > = [
+    [observations.worktree === "dirty-unexpected", "dirty-unexpected-worktree"],
+    [
+      observations.verifierCandidate === "modified",
+      "verifier-modified-candidate",
+    ],
+    [
+      observations.assurance === "unknown" ||
+        observations.security === "unknown",
+      "unknown-security-assurance-elevation",
+    ],
+    [observations.credentialScope === "expanded", "credential-scope-expansion"],
+  ];
+  for (const [unsafe, reason] of requiredEscalations) {
+    if (unsafe && !contract.activeEscalations.includes(reason))
+      errors.push(
+        fixedError(
+          "/workflow/observations",
+          "mandatory-escalation",
+          "unsafe observations must activate their canonical escalation gate",
+        ),
+      );
+  }
+  if (
+    (contract.workflow.state === "merge-gate" ||
+      contract.workflow.state === "completed") &&
+    observations.ci !== "passed"
+  )
+    errors.push(
+      fixedError(
+        "/workflow/observations/ci",
+        "ci-gate",
+        "merge and completion require a passing CI observation",
+      ),
+    );
+  if (
+    (contract.workflow.state === "merge-gate" ||
+      contract.workflow.state === "completed") &&
+    !hasFreshPassingCiEvidence(contract)
+  )
+    errors.push(
+      fixedError(
+        "/evidence",
+        "ci-evidence",
+        "merge and completion require fresh exact-candidate passing CI evidence",
+      ),
+    );
+  const merge = observations.merge;
+  const emptyMergeObservation =
+    merge.status === "not-merged" &&
+    merge.targetTree === null &&
+    merge.pullRequestNumber === null &&
+    merge.mergeCommit === null &&
+    merge.observedAt === null &&
+    merge.receiptId === null &&
+    merge.freshThroughEventId === null;
+  if (
+    (!emptyMergeObservation && !mergeObservationIsFresh(contract)) ||
+    (contract.workflow.state === "completed" &&
+      !mergeObservationIsFresh(contract))
+  )
+    errors.push(
+      fixedError(
+        "/workflow/observations/merge",
+        "merge-observation",
+        "completion requires a fresh exact-tree merge success receipt",
+      ),
+    );
 
   if (contract.authorityDigest !== computeDeliveryAuthorityDigest(contract))
     errors.push(
@@ -601,6 +1049,30 @@ function semanticErrors(
         "/authorityDigest",
         "authority-digest",
         "must match the canonical immutable authority digest",
+      ),
+    );
+  if (!isCanonicalLifecycleTimestamp(contract.meteringObservedAt))
+    errors.push(
+      fixedError(
+        "/meteringObservedAt",
+        "canonical-timestamp",
+        "must use a canonical trusted metering timestamp with milliseconds",
+      ),
+    );
+  if (contract.meteringObservedAt < latestRecordedTimestamp(contract))
+    errors.push(
+      fixedError(
+        "/meteringObservedAt",
+        "metering-order",
+        "trusted metering time cannot precede retained evidence or decisions",
+      ),
+    );
+  if (contract.meteringDigest !== computeDeliveryMeteringDigest(contract))
+    errors.push(
+      fixedError(
+        "/meteringDigest",
+        "metering-digest",
+        "must match the canonical monotonic metering state digest",
       ),
     );
 
@@ -661,6 +1133,9 @@ function semanticErrors(
   const driftFree =
     candidate.verification.reviewedTree === candidate.tree &&
     candidate.remoteBase.expectedCommit ===
+      contract.task.repository.baseCommit &&
+    candidate.remoteBase.expectedTree === contract.task.repository.baseTree &&
+    candidate.remoteBase.expectedCommit ===
       candidate.remoteBase.observedCommit &&
     candidate.remoteBase.expectedTree === candidate.remoteBase.observedTree &&
     candidate.pullRequest.expectedHeadCommit ===
@@ -715,10 +1190,39 @@ function semanticErrors(
   }
 
   for (const recovery of contract.administrativeRecoveries) {
+    const recoveryBinding = contract.roles[recovery.actorRole];
+    const reconstructedRecovery: AdministrativeRecoveryRequest = {
+      recoveryId: recovery.recoveryId,
+      kind: recovery.kind,
+      idempotencyKey: recovery.idempotencyKey,
+      actorRole: recovery.actorRole,
+      actorId: recovery.actorId,
+      executionId: recovery.executionId,
+      workspaceId: recovery.workspaceId,
+      identityRevalidated: recovery.identityRevalidated,
+      targetGate: recovery.targetGate,
+      observedAt: recovery.observedAt,
+    };
+    if (recovery.requestDigest !== sha256(reconstructedRecovery))
+      errors.push(
+        fixedError(
+          "/administrativeRecoveries",
+          "audit-digest",
+          "recovery request digest must match its immutable request fields",
+        ),
+      );
     if (
       recovery.accepted &&
       (!recovery.identityRevalidated ||
-        recovery.targetGate !== "administrative")
+        recovery.targetGate !== "administrative" ||
+        recovery.actorId !== recoveryBinding.actorId ||
+        recovery.executionId !== recoveryBinding.executionId ||
+        recovery.workspaceId !== recoveryBinding.workspaceId ||
+        (recovery.workflowState !== "blocked" &&
+          recovery.workflowState !== "escalated") ||
+        (recovery.kind === "interrupted-ci-polling" &&
+          recovery.ciStatus !== "pending" &&
+          recovery.ciStatus !== "failed"))
     )
       errors.push(
         fixedError(
@@ -767,6 +1271,21 @@ function semanticErrors(
         ),
       );
   }
+  const derivedAttemptUsage = expectedAttemptUsage(contract);
+  for (const field of [
+    "implementationAttempts",
+    "verificationRepairAttempts",
+    "ciRepairAttempts",
+  ] as const) {
+    if (contract.autonomy.usage[field] !== derivedAttemptUsage[field])
+      errors.push(
+        fixedError(
+          `/autonomy/usage/${field}`,
+          "attempt-usage-provenance",
+          "attempt usage must equal the frozen checkpoint plus accepted attempt transitions",
+        ),
+      );
+  }
   if (
     contract.autonomy.usage.cancelled &&
     !new Set<DeliveryWorkflowState>(["blocked", "completed"]).has(
@@ -794,8 +1313,32 @@ function semanticErrors(
       ),
     );
 
+  const checkpoint = contract.workflow.checkpoint;
+  if (!isCanonicalLifecycleTimestamp(checkpoint.observedAt))
+    errors.push(
+      fixedError(
+        "/workflow/checkpoint/observedAt",
+        "canonical-timestamp",
+        "checkpoint must use a canonical UTC timestamp with milliseconds",
+      ),
+    );
+  if (
+    checkpoint.state === "repair-required" &&
+    checkpoint.activeRepairBudget === "implementation"
+  )
+    errors.push(
+      fixedError(
+        "/workflow/checkpoint/activeRepairBudget",
+        "repair-provenance",
+        "a repair-required checkpoint must retain its repair budget provenance",
+      ),
+    );
+
   const auditByKey = new Map<string, string>();
   const auditEventIdsSeen = new Set<string>();
+  let auditState: DeliveryWorkflowState | null = null;
+  let auditTimestamp: string | null = null;
+  let terminalCandidateTree: string | null = null;
   for (const audit of contract.workflow.audit) {
     const reconstructedRequest: DeliveryTransitionRequest = {
       eventId: audit.eventId,
@@ -804,7 +1347,10 @@ function semanticErrors(
       to: audit.to,
       actorRole: audit.actorRole,
       actorId: audit.actorId,
+      executionId: audit.executionId,
+      workspaceId: audit.workspaceId,
       candidateTree: audit.candidateTree,
+      observedAt: audit.observedAt,
     };
     if (audit.requestDigest !== sha256(reconstructedRequest))
       errors.push(
@@ -827,8 +1373,10 @@ function semanticErrors(
       (audit.accepted &&
         (audit.code !== "accepted" ||
           !transitions[audit.from].includes(audit.to) ||
+          !roleMayTransition(audit.actorRole, audit.from, audit.to) ||
           contract.roles[audit.actorRole].actorId !== audit.actorId ||
-          audit.candidateTree !== candidate.tree)) ||
+          contract.roles[audit.actorRole].executionId !== audit.executionId ||
+          contract.roles[audit.actorRole].workspaceId !== audit.workspaceId)) ||
       (!audit.accepted && audit.code === "accepted")
     )
       errors.push(
@@ -846,7 +1394,66 @@ function semanticErrors(
           "must use canonical UTC timestamps with milliseconds",
         ),
       );
+    if (auditTimestamp !== null && audit.observedAt < auditTimestamp)
+      errors.push(
+        fixedError(
+          "/workflow/audit",
+          "audit-order",
+          "controller audit timestamps must be nondecreasing",
+        ),
+      );
+    auditTimestamp = audit.observedAt;
+    if (!audit.accepted) continue;
+    if (auditState === null) auditState = audit.from;
+    if (audit.from !== auditState)
+      errors.push(
+        fixedError(
+          "/workflow/audit",
+          "audit-chain",
+          "accepted controller events must form one contiguous state transition chain",
+        ),
+      );
+    auditState = audit.to;
+    terminalCandidateTree = audit.candidateTree;
   }
+  const firstAcceptedAudit = contract.workflow.audit.find(
+    (audit) => audit.accepted,
+  );
+  if (
+    (firstAcceptedAudit === undefined &&
+      (contract.workflow.state !== checkpoint.state ||
+        candidate.tree !== checkpoint.candidateTree)) ||
+    (firstAcceptedAudit !== undefined &&
+      (firstAcceptedAudit.from !== checkpoint.state ||
+        firstAcceptedAudit.candidateTree !== checkpoint.candidateTree ||
+        firstAcceptedAudit.observedAt < checkpoint.observedAt))
+  )
+    errors.push(
+      fixedError(
+        "/workflow/checkpoint",
+        "checkpoint-mismatch",
+        "the audit trace must continue from its frozen workflow checkpoint",
+      ),
+    );
+  if (auditState !== null && auditState !== contract.workflow.state)
+    errors.push(
+      fixedError(
+        "/workflow/state",
+        "audit-state-mismatch",
+        "workflow state must equal the terminal accepted controller event",
+      ),
+    );
+  if (
+    terminalCandidateTree !== null &&
+    terminalCandidateTree !== candidate.tree
+  )
+    errors.push(
+      fixedError(
+        "/workflow/candidate/tree",
+        "audit-candidate-mismatch",
+        "current candidate tree must equal the terminal accepted controller event tree",
+      ),
+    );
   for (const audit of contract.effectAudit) {
     const effect = audit.effect as DeliveryEffect;
     const reconstructedRequest: DeliveryEffectRequest = {
@@ -854,7 +1461,10 @@ function semanticErrors(
       idempotencyKey: audit.idempotencyKey,
       actorRole: audit.actorRole,
       actorId: audit.actorId,
+      executionId: audit.executionId,
+      workspaceId: audit.workspaceId,
       targetTree: audit.targetTree,
+      observedAt: audit.observedAt,
     };
     if (audit.requestDigest !== sha256(reconstructedRequest))
       errors.push(
@@ -869,29 +1479,59 @@ function semanticErrors(
       effect === "publication" ||
       effect === "feature-push" ||
       effect === "pr-create-update";
+    const automaticEffect = (
+      AUTOMATIC_DELIVERY_ACTIONS as readonly string[]
+    ).includes(effect)
+      ? (effect as AutomaticDeliveryAction)
+      : null;
+    const automaticOrPublicationEffect =
+      automaticEffect !== null || effect === "publication";
+    const auditSafetyGatesHold =
+      audit.observedAt <= contract.meteringObservedAt &&
+      contract.activeEscalations.length === 0 &&
+      !contract.autonomy.usage.cancelled &&
+      (!automaticOrPublicationEffect ||
+        contract.autonomy.usage.elapsedMinutes <
+          contract.autonomy.limits.durationMinutes) &&
+      (automaticEffect === null ||
+        !effectBudgetExhausted(contract, automaticEffect)) &&
+      (automaticEffect !== "ci-repair" ||
+        contract.workflow.observations.ci === "failed") &&
+      (automaticEffect !== "ci-monitor" ||
+        contract.workflow.observations.ci === "pending" ||
+        contract.workflow.observations.ci === "failed");
     const validAllowedEffect =
-      ((AUTOMATIC_DELIVERY_ACTIONS as readonly string[]).includes(effect) &&
+      (auditSafetyGatesHold &&
+        (AUTOMATIC_DELIVERY_ACTIONS as readonly string[]).includes(effect) &&
         roleMayPerformAutomatic(
           audit.actorRole,
           effect as AutomaticDeliveryAction,
         ) &&
+        effectAllowedInState(
+          effect as AutomaticDeliveryAction,
+          audit.workflowState,
+        ) &&
         !publicationEffect) ||
       (publicationEffect &&
-        publicationStates.has(contract.workflow.state) &&
-        publicationIsFresh(contract) &&
+        publicationEffectStates.has(audit.workflowState) &&
+        hasApprovalEvidenceForTree(contract, audit.targetTree) &&
         ((effect === "publication" && audit.actorRole === "flow") ||
           (effect !== "publication" &&
             roleMayPerformAutomatic(
               audit.actorRole,
               effect as AutomaticDeliveryAction,
             )))) ||
-      (protectedEffect !== null && hasGrant(contract, protectedEffect));
+      (protectedEffect !== null &&
+        audit.actorRole === "flow" &&
+        protectedEffectAllowedInState(effect, audit.workflowState) &&
+        hasGrant(contract, protectedEffect, audit.targetTree));
     if (
       (audit.allowed &&
         (audit.code !== "accepted" ||
           !validAllowedEffect ||
           contract.roles[audit.actorRole].actorId !== audit.actorId ||
-          audit.targetTree !== candidate.tree)) ||
+          contract.roles[audit.actorRole].executionId !== audit.executionId ||
+          contract.roles[audit.actorRole].workspaceId !== audit.workspaceId)) ||
       (!audit.allowed && audit.code === "accepted")
     )
       errors.push(
@@ -910,9 +1550,9 @@ function semanticErrors(
         ),
       );
   }
-  for (const audit of [...contract.workflow.audit, ...contract.effectAudit]) {
-    const previous = auditByKey.get(audit.idempotencyKey);
-    if (previous !== undefined && previous !== audit.requestDigest)
+  const registerIdempotency = (key: string, digest: string): void => {
+    const previous = auditByKey.get(key);
+    if (previous !== undefined)
       errors.push(
         fixedError(
           "/",
@@ -920,13 +1560,48 @@ function semanticErrors(
           "an idempotency key must identify exactly one request",
         ),
       );
-    auditByKey.set(audit.idempotencyKey, audit.requestDigest);
+    auditByKey.set(key, digest);
+  };
+  for (const audit of [...contract.workflow.audit, ...contract.effectAudit])
+    registerIdempotency(audit.idempotencyKey, audit.requestDigest);
+  for (const recovery of contract.administrativeRecoveries)
+    registerIdempotency(recovery.idempotencyKey, recovery.requestDigest);
+  const grantIds = new Set<string>();
+  const grantKeys = new Set<string>();
+  for (const grant of contract.effectGrants) {
+    if (grantIds.has(grant.grantId) || grantKeys.has(grant.idempotencyKey))
+      errors.push(
+        fixedError(
+          "/effectGrants",
+          "grant-duplicate",
+          "stakeholder grant and idempotency identities must be unique",
+        ),
+      );
+    grantIds.add(grant.grantId);
+    grantKeys.add(grant.idempotencyKey);
+    registerIdempotency(grant.idempotencyKey, sha256(grant));
   }
 
-  const auditEventIds = new Set(
-    contract.workflow.audit.map((audit) => audit.eventId),
+  const actualEvidenceBytes = Buffer.byteLength(
+    canonicalSerializeLifecycleValue(contract.evidence),
+    "utf8",
+  );
+  if (contract.autonomy.usage.evidenceBytes !== actualEvidenceBytes)
+    errors.push(
+      fixedError(
+        "/autonomy/usage/evidenceBytes",
+        "evidence-bytes",
+        "must equal the canonical serialized evidence byte count",
+      ),
+    );
+
+  const auditEvents = new Map(
+    contract.workflow.audit.map((audit) => [audit.eventId, audit] as const),
   );
   const evidenceKeys = new Set<string>();
+  const ciRunBoundaries = new Map<string, string>();
+  const ciCheckBoundaries = new Map<string, string>();
+  let currentApprovalEvidenceFound = false;
   for (let index = 0; index < contract.evidence.length; index += 1) {
     const evidence = contract.evidence[index]!;
     const path = `/evidence/${String(index)}`;
@@ -946,6 +1621,37 @@ function semanticErrors(
           "must be a canonical UTC timestamp with milliseconds",
         ),
       );
+    const ciEvidenceIsConsistent =
+      evidence.ci.verdict === null
+        ? (evidence.ci.runId === null) === (evidence.ci.checkId === null)
+        : evidence.ci.runId !== null && evidence.ci.checkId !== null;
+    if (!ciEvidenceIsConsistent)
+      errors.push(
+        fixedError(
+          `${path}/ci`,
+          "ci-evidence",
+          "CI verdicts must retain their run and check identities",
+        ),
+      );
+    for (const [identity, boundaries] of [
+      [evidence.ci.runId, ciRunBoundaries],
+      [evidence.ci.checkId, ciCheckBoundaries],
+    ] as const) {
+      if (identity === null) continue;
+      const priorBoundary = boundaries.get(identity);
+      if (
+        priorBoundary !== undefined &&
+        priorBoundary !== evidence.freshThroughEventId
+      )
+        errors.push(
+          fixedError(
+            `${path}/ci`,
+            "ci-identity-reuse",
+            "CI run and check identities cannot move between monitoring boundaries",
+          ),
+        );
+      else boundaries.set(identity, evidence.freshThroughEventId);
+    }
     const binding = contract.roles[evidence.actor.role];
     if (
       evidence.task.projectId !== contract.task.paca.projectId ||
@@ -966,33 +1672,63 @@ function semanticErrors(
           "must match the immutable task, repository, role, execution, workspace, and assurance identity",
         ),
       );
-    if (!auditEventIds.has(evidence.freshThroughEventId))
+    const freshEvent = auditEvents.get(evidence.freshThroughEventId);
+    const freshCheckpoint =
+      evidence.freshThroughEventId === checkpoint.checkpointId &&
+      checkpoint.candidateTree === evidence.repository.tree &&
+      checkpoint.observedAt <= evidence.observedAt;
+    if (
+      (freshEvent === undefined ||
+        freshEvent.candidateTree !== evidence.repository.tree) &&
+      !freshCheckpoint
+    )
       errors.push(
         fixedError(
           `${path}/freshThroughEventId`,
           "evidence-freshness",
-          "must identify an auditable controller event",
+          "must identify an auditable controller event for the evidence tree",
         ),
       );
+    const hasVerification = evidence.verification.verdict !== null;
+    const approvalIdIsValid =
+      evidence.verification.verdict === "APPROVE"
+        ? evidence.verification.approvalId !== null
+        : evidence.verification.approvalId === null;
     if (
-      evidence.verification.verdict !== null &&
-      (evidence.actor.role !== "independent-verifier" ||
-        evidence.verification.reviewedTree !== candidate.tree ||
-        evidence.repository.commit !== candidate.headCommit ||
-        evidence.repository.tree !== candidate.tree ||
-        evidence.pullRequest.baseBranch !==
-          contract.task.repository.baseBranch ||
-        evidence.pullRequest.headBranch !==
-          contract.task.repository.featureBranch ||
-        evidence.pullRequest.headCommit !== candidate.headCommit)
+      (hasVerification &&
+        (evidence.actor.role !== "independent-verifier" ||
+          evidence.verification.reviewedTree !== evidence.repository.tree ||
+          evidence.pullRequest.number === null ||
+          evidence.pullRequest.baseBranch !==
+            contract.task.repository.baseBranch ||
+          evidence.pullRequest.headBranch !==
+            contract.task.repository.featureBranch ||
+          evidence.pullRequest.headCommit !== evidence.repository.commit ||
+          !approvalIdIsValid)) ||
+      (!hasVerification &&
+        (evidence.verification.reviewedTree !== null ||
+          evidence.verification.approvalId !== null))
     )
       errors.push(
         fixedError(
           `${path}/verification`,
           "verification-evidence-binding",
-          "verification evidence must bind the independent verifier and exact candidate and pull request identities",
+          "verification evidence must bind its verifier, candidate, approval, and pull request identities",
         ),
       );
+    if (
+      evidence.verification.verdict === "APPROVE" &&
+      evidence.verification.approvalId === candidate.verification.approvalId &&
+      evidence.verification.reviewedTree === candidate.tree &&
+      evidence.repository.commit === candidate.headCommit &&
+      evidence.repository.tree === candidate.tree &&
+      evidence.pullRequest.number === candidate.pullRequest.number &&
+      evidence.pullRequest.baseBranch === candidate.pullRequest.baseBranch &&
+      evidence.pullRequest.headBranch === candidate.pullRequest.headBranch &&
+      evidence.pullRequest.headCommit === candidate.headCommit &&
+      evidence.observedAt === candidate.verification.observedAt
+    )
+      currentApprovalEvidenceFound = true;
     if (evidenceKeys.has(evidence.idempotencyKey))
       errors.push(
         fixedError(
@@ -1002,7 +1738,19 @@ function semanticErrors(
         ),
       );
     evidenceKeys.add(evidence.idempotencyKey);
+    registerIdempotency(evidence.idempotencyKey, evidence.evidenceDigest);
   }
+  if (
+    publicationStates.has(contract.workflow.state) &&
+    !currentApprovalEvidenceFound
+  )
+    errors.push(
+      fixedError(
+        "/evidence",
+        "publication-evidence",
+        "publication requires fresh exact-tree verifier approval evidence",
+      ),
+    );
 
   return errors;
 }
@@ -1027,6 +1775,34 @@ export function validateDeliveryAuthorityContract(
   return errors.length === 0
     ? { valid: true, value: contract }
     : { valid: false, errors };
+}
+
+export function validateFrozenDeliveryAuthorityContract(
+  value: unknown,
+  expectedAuthorityDigest: unknown,
+  expectedMeteringDigest: unknown,
+): DeliveryAuthorityValidationResult {
+  const validation = validateDeliveryAuthorityContract(value);
+  if (!validation.valid) return validation;
+  if (
+    typeof expectedAuthorityDigest === "string" &&
+    /^[0-9a-f]{64}$/.test(expectedAuthorityDigest) &&
+    validation.value.authorityDigest === expectedAuthorityDigest &&
+    typeof expectedMeteringDigest === "string" &&
+    /^[0-9a-f]{64}$/.test(expectedMeteringDigest) &&
+    validation.value.meteringDigest === expectedMeteringDigest
+  )
+    return validation;
+  return {
+    valid: false,
+    errors: [
+      fixedError(
+        "/authorityDigest",
+        "frozen-authority",
+        "must match the trusted frozen authority and monotonic metering digests",
+      ),
+    ],
+  };
 }
 
 export function isDeliveryAuthorityContract(
@@ -1078,7 +1854,10 @@ export interface DeliveryTransitionRequest {
   to: DeliveryWorkflowState;
   actorRole: DeliveryRole;
   actorId: string;
+  executionId: string;
+  workspaceId: string;
   candidateTree: string;
+  observedAt: string;
 }
 
 export interface DeliveryTransitionDecision {
@@ -1118,7 +1897,10 @@ function isDeliveryTransitionRequest(
       "to",
       "actorRole",
       "actorId",
+      "executionId",
+      "workspaceId",
       "candidateTree",
+      "observedAt",
     ])
   )
     return false;
@@ -1130,13 +1912,45 @@ function isDeliveryTransitionRequest(
     (WORKFLOW_STATES as readonly unknown[]).includes(request.to) &&
     (DELIVERY_ROLES as readonly unknown[]).includes(request.actorRole) &&
     isSafeRequestId(request.actorId) &&
+    isSafeRequestId(request.executionId) &&
+    isSafeRequestId(request.workspaceId) &&
     typeof request.candidateTree === "string" &&
-    /^[0-9a-f]{40}$/.test(request.candidateTree)
+    /^[0-9a-f]{40}$/.test(request.candidateTree) &&
+    typeof request.observedAt === "string" &&
+    isCanonicalLifecycleTimestamp(request.observedAt)
+  );
+}
+
+function latestRecordedTimestamp(contract: DeliveryAuthorityContract): string {
+  const timestamps = [
+    contract.workflow.checkpoint.observedAt,
+    contract.workflow.candidate.verification.observedAt,
+    ...contract.workflow.audit.map((record) => record.observedAt),
+    ...contract.effectAudit.map((record) => record.observedAt),
+    ...contract.administrativeRecoveries.map((record) => record.observedAt),
+    ...contract.evidence.map((record) => record.observedAt),
+  ];
+  return timestamps.reduce((latest, value) =>
+    value > latest ? value : latest,
+  );
+}
+
+function idempotencyKeyExists(
+  contract: DeliveryAuthorityContract,
+  key: string,
+): boolean {
+  return (
+    contract.workflow.audit.some((record) => record.idempotencyKey === key) ||
+    contract.effectAudit.some((record) => record.idempotencyKey === key) ||
+    contract.administrativeRecoveries.some(
+      (record) => record.idempotencyKey === key,
+    ) ||
+    contract.effectGrants.some((grant) => grant.idempotencyKey === key) ||
+    contract.evidence.some((evidence) => evidence.idempotencyKey === key)
   );
 }
 
 function decisionAudit(
-  contract: DeliveryAuthorityContract | null,
   request: DeliveryTransitionRequest,
   requestDigest: string,
   accepted: boolean,
@@ -1148,22 +1962,28 @@ function decisionAudit(
     requestDigest,
     actorRole: request.actorRole,
     actorId: request.actorId,
+    executionId: request.executionId,
+    workspaceId: request.workspaceId,
     candidateTree: request.candidateTree,
     accepted,
     code,
     from: request.from,
     to: request.to,
-    observedAt:
-      contract?.workflow.candidate.verification.observedAt ??
-      "1970-01-01T00:00:00.000Z",
+    observedAt: request.observedAt,
   };
 }
 
 export function evaluateDeliveryTransition(
   value: unknown,
   requestValue: unknown,
+  expectedAuthorityDigest: unknown,
+  expectedMeteringDigest: unknown,
 ): DeliveryTransitionDecision {
-  const validation = validateDeliveryAuthorityContract(value);
+  const validation = validateFrozenDeliveryAuthorityContract(
+    value,
+    expectedAuthorityDigest,
+    expectedMeteringDigest,
+  );
   const requestSnapshot = canonicalSnapshot<unknown>(requestValue);
   const request = isDeliveryTransitionRequest(requestSnapshot)
     ? requestSnapshot
@@ -1179,7 +1999,10 @@ export function evaluateDeliveryTransition(
       to: "blocked",
       actorRole: "flow",
       actorId: "rejected-actor",
+      executionId: "rejected-execution",
+      workspaceId: "rejected-workspace",
       candidateTree: "0".repeat(40),
+      observedAt: "1970-01-01T00:00:00.000Z",
     };
     return {
       accepted: false,
@@ -1187,7 +2010,6 @@ export function evaluateDeliveryTransition(
       code: "contract-invalid",
       nextState: fallbackState,
       audit: decisionAudit(
-        validation.valid ? validation.value : null,
         fallback,
         sha256(fallback),
         false,
@@ -1197,6 +2019,15 @@ export function evaluateDeliveryTransition(
   }
   const contract = validation.value;
   const requestDigest = sha256(request);
+  if (request.actorRole !== contract.activeRole) {
+    return {
+      accepted: false,
+      idempotent: false,
+      code: "identity-drift",
+      nextState: contract.workflow.state,
+      audit: decisionAudit(request, requestDigest, false, "identity-drift"),
+    };
+  }
   const prior = contract.workflow.audit.find(
     (record) => record.idempotencyKey === request.idempotencyKey,
   );
@@ -1206,46 +2037,77 @@ export function evaluateDeliveryTransition(
       accepted: same && prior.accepted,
       idempotent: same,
       code: same ? prior.code : "idempotency-conflict",
-      nextState: same && prior.accepted ? prior.to : contract.workflow.state,
+      nextState: contract.workflow.state,
       audit: same
         ? prior
-        : decisionAudit(
-            contract,
-            request,
-            requestDigest,
-            false,
-            "idempotency-conflict",
-          ),
+        : decisionAudit(request, requestDigest, false, "idempotency-conflict"),
     };
   }
+  if (
+    idempotencyKeyExists(contract, request.idempotencyKey) ||
+    contract.workflow.audit.some((record) => record.eventId === request.eventId)
+  )
+    return {
+      accepted: false,
+      idempotent: false,
+      code: "idempotency-conflict",
+      nextState: contract.workflow.state,
+      audit: decisionAudit(
+        request,
+        requestDigest,
+        false,
+        "idempotency-conflict",
+      ),
+    };
 
   let code: DeliveryTransitionDecisionCode = "accepted";
   const binding = contract.roles[request.actorRole];
   if (containsCredentialShapedContent(request.actorId)) code = "request-denied";
   else if (
+    request.observedAt !== contract.meteringObservedAt ||
+    request.observedAt <= latestRecordedTimestamp(contract)
+  )
+    code = "stale-observation";
+  else if (
     request.from !== contract.workflow.state ||
     request.candidateTree !== contract.workflow.candidate.tree ||
-    binding.actorId !== request.actorId
+    binding.actorId !== request.actorId ||
+    binding.executionId !== request.executionId ||
+    binding.workspaceId !== request.workspaceId
   )
     code = "identity-drift";
-  else if (!transitions[request.from].includes(request.to))
+  else if (
+    !transitions[request.from].includes(request.to) ||
+    !roleMayTransition(request.actorRole, request.from, request.to) ||
+    contract.autonomy.usage.cancelled ||
+    (contract.activeEscalations.length > 0 && request.to === "ready")
+  )
     code = "transition-denied";
+  else if (transitionBudgetExhausted(contract, request.from, request.to))
+    code = "autonomy-exhausted";
   else if (
     request.to === "publication-authorized" &&
     !publicationIsFresh(contract)
   )
     code = "publication-denied";
+  else if (
+    (request.to === "merge-gate" || request.to === "completed") &&
+    !hasFreshPassingCiEvidence(contract)
+  )
+    code = "ci-evidence-required";
   else if (request.to === "merge-gate" && !hasGrant(contract, "merge"))
     code = "merge-grant-required";
   else if (request.to === "completed" && !hasGrant(contract, "merge"))
     code = "merge-grant-required";
+  else if (request.to === "completed" && !mergeObservationIsFresh(contract))
+    code = "merge-observation-required";
   const accepted = code === "accepted";
   return {
     accepted,
     idempotent: false,
     code,
     nextState: accepted ? request.to : contract.workflow.state,
-    audit: decisionAudit(contract, request, requestDigest, accepted, code),
+    audit: decisionAudit(request, requestDigest, accepted, code),
   };
 }
 
@@ -1254,7 +2116,10 @@ export interface DeliveryEffectRequest {
   idempotencyKey: string;
   actorRole: DeliveryRole;
   actorId: string;
+  executionId: string;
+  workspaceId: string;
   targetTree: string;
+  observedAt: string;
 }
 
 export interface DeliveryEffectDecision {
@@ -1282,7 +2147,10 @@ function isDeliveryEffectRequest(
       "idempotencyKey",
       "actorRole",
       "actorId",
+      "executionId",
+      "workspaceId",
       "targetTree",
+      "observedAt",
     ])
   )
     return false;
@@ -1293,9 +2161,21 @@ function isDeliveryEffectRequest(
     isSafeRequestId(request.idempotencyKey) &&
     (DELIVERY_ROLES as readonly unknown[]).includes(request.actorRole) &&
     isSafeRequestId(request.actorId) &&
+    isSafeRequestId(request.executionId) &&
+    isSafeRequestId(request.workspaceId) &&
     typeof request.targetTree === "string" &&
-    /^[0-9a-f]{40}$/.test(request.targetTree)
+    /^[0-9a-f]{40}$/.test(request.targetTree) &&
+    typeof request.observedAt === "string" &&
+    isCanonicalLifecycleTimestamp(request.observedAt)
   );
+}
+
+function protectedEffectAllowedInState(
+  effect: DeliveryEffect,
+  state: DeliveryWorkflowState,
+): boolean {
+  if (effect === "merge") return state === "merge-gate";
+  return true;
 }
 
 function protectedGrantFor(effect: DeliveryEffect): DistinctGrantEffect | null {
@@ -1326,21 +2206,28 @@ function protectedGrantFor(effect: DeliveryEffect): DistinctGrantEffect | null {
 export function authorizeDeliveryEffect(
   value: unknown,
   requestValue: unknown,
+  expectedAuthorityDigest: unknown,
+  expectedMeteringDigest: unknown,
 ): DeliveryEffectDecision {
-  const validation = validateDeliveryAuthorityContract(value);
+  const validation = validateFrozenDeliveryAuthorityContract(
+    value,
+    expectedAuthorityDigest,
+    expectedMeteringDigest,
+  );
   const requestSnapshot = canonicalSnapshot<unknown>(requestValue);
   const request = isDeliveryEffectRequest(requestSnapshot)
     ? requestSnapshot
     : null;
-  const observedAt = validation.valid
-    ? validation.value.workflow.candidate.verification.observedAt
-    : "1970-01-01T00:00:00.000Z";
+  const observedAt = request?.observedAt ?? "1970-01-01T00:00:00.000Z";
   const fallbackRequest: DeliveryEffectRequest = request ?? {
     effect: "diagnose-repair",
     idempotencyKey: "rejected-effect",
     actorRole: "flow",
     actorId: "rejected-actor",
+    executionId: "rejected-execution",
+    workspaceId: "rejected-workspace",
     targetTree: "0".repeat(40),
+    observedAt: "1970-01-01T00:00:00.000Z",
   };
   const requestDigest = sha256(fallbackRequest);
   const make = (
@@ -1357,7 +2244,12 @@ export function authorizeDeliveryEffect(
       effect: fallbackRequest.effect,
       actorRole: fallbackRequest.actorRole,
       actorId: fallbackRequest.actorId,
+      executionId: fallbackRequest.executionId,
+      workspaceId: fallbackRequest.workspaceId,
       targetTree: fallbackRequest.targetTree,
+      workflowState: validation.valid
+        ? validation.value.workflow.state
+        : "blocked",
       allowed,
       code,
       observedAt,
@@ -1366,34 +2258,54 @@ export function authorizeDeliveryEffect(
   if (!validation.valid || request === null)
     return make(false, false, "contract-invalid");
   const contract = validation.value;
+  if (request.actorRole !== contract.activeRole)
+    return make(false, false, "role-authority-denied");
   const prior = contract.effectAudit.find(
     (record) => record.idempotencyKey === request.idempotencyKey,
   );
   if (prior)
     return prior.requestDigest === requestDigest
       ? {
-          allowed: prior.allowed,
+          allowed: false,
           idempotent: true,
           code: prior.code,
           audit: prior,
         }
       : make(false, false, "idempotency-conflict");
+  if (idempotencyKeyExists(contract, request.idempotencyKey))
+    return make(false, false, "idempotency-conflict");
   if (
     contract.roles[request.actorRole].actorId !== request.actorId ||
+    contract.roles[request.actorRole].executionId !== request.executionId ||
+    contract.roles[request.actorRole].workspaceId !== request.workspaceId ||
     request.targetTree !== contract.workflow.candidate.tree ||
     containsCredentialShapedContent(request.actorId)
   )
     return make(false, false, "identity-drift");
+  if (
+    request.observedAt !== contract.meteringObservedAt ||
+    request.observedAt <= latestRecordedTimestamp(contract)
+  )
+    return make(false, false, "stale-observation");
   if (
     contract.activeEscalations.length > 0 ||
     contract.autonomy.usage.cancelled
   )
     return make(false, false, "escalation-required");
   if (
+    ((AUTOMATIC_DELIVERY_ACTIONS as readonly string[]).includes(
+      request.effect,
+    ) ||
+      request.effect === "publication") &&
+    contract.autonomy.usage.elapsedMinutes >=
+      contract.autonomy.limits.durationMinutes
+  )
+    return make(false, false, "escalation-required");
+  if (
     request.effect === "feature-push" ||
     request.effect === "pr-create-update"
   )
-    return publicationStates.has(contract.workflow.state) &&
+    return publicationEffectStates.has(contract.workflow.state) &&
       publicationIsFresh(contract) &&
       roleMayPerformAutomatic(
         request.actorRole,
@@ -1403,15 +2315,25 @@ export function authorizeDeliveryEffect(
       : make(false, false, "publication-denied");
   if (
     (AUTOMATIC_DELIVERY_ACTIONS as readonly string[]).includes(request.effect)
-  )
-    return roleMayPerformAutomatic(
-      request.actorRole,
-      request.effect as AutomaticDeliveryAction,
+  ) {
+    const automaticEffect = request.effect as AutomaticDeliveryAction;
+    if (effectBudgetExhausted(contract, automaticEffect))
+      return make(false, false, "escalation-required");
+    if (
+      (automaticEffect === "ci-repair" &&
+        contract.workflow.observations.ci !== "failed") ||
+      (automaticEffect === "ci-monitor" &&
+        contract.workflow.observations.ci !== "pending" &&
+        contract.workflow.observations.ci !== "failed")
     )
+      return make(false, false, "role-authority-denied");
+    return roleMayPerformAutomatic(request.actorRole, automaticEffect) &&
+      effectAllowedInState(automaticEffect, contract.workflow.state)
       ? make(true, false, "accepted")
       : make(false, false, "role-authority-denied");
+  }
   if (request.effect === "publication")
-    return publicationStates.has(contract.workflow.state) &&
+    return publicationEffectStates.has(contract.workflow.state) &&
       publicationIsFresh(contract) &&
       request.actorRole === "flow"
       ? make(true, false, "accepted")
@@ -1420,8 +2342,16 @@ export function authorizeDeliveryEffect(
   if (
     protectedEffect !== null &&
     hasGrant(contract, protectedEffect, request.targetTree)
-  )
-    return make(true, false, "accepted");
+  ) {
+    if (request.actorRole !== "flow")
+      return make(false, false, "role-authority-denied");
+    return protectedEffectAllowedInState(
+      request.effect,
+      contract.workflow.state,
+    )
+      ? make(true, false, "accepted")
+      : make(false, false, "publication-denied");
+  }
   return make(false, false, "distinct-grant-required");
 }
 
@@ -1429,8 +2359,13 @@ export interface AdministrativeRecoveryRequest {
   recoveryId: string;
   kind: AdministrativeRecoveryKind;
   idempotencyKey: string;
+  actorRole: DeliveryRole;
+  actorId: string;
+  executionId: string;
+  workspaceId: string;
   identityRevalidated: boolean;
   targetGate: AdministrativeRecoveryRecord["targetGate"];
+  observedAt: string;
 }
 
 export interface AdministrativeRecoveryDecision {
@@ -1459,8 +2394,13 @@ function isAdministrativeRecoveryRequest(
       "recoveryId",
       "kind",
       "idempotencyKey",
+      "actorRole",
+      "actorId",
+      "executionId",
+      "workspaceId",
       "identityRevalidated",
       "targetGate",
+      "observedAt",
     ])
   )
     return false;
@@ -1471,31 +2411,46 @@ function isAdministrativeRecoveryRequest(
       request.kind,
     ) &&
     isSafeRequestId(request.idempotencyKey) &&
+    (DELIVERY_ROLES as readonly unknown[]).includes(request.actorRole) &&
+    isSafeRequestId(request.actorId) &&
+    isSafeRequestId(request.executionId) &&
+    isSafeRequestId(request.workspaceId) &&
     typeof request.identityRevalidated === "boolean" &&
     recoveryTargets.has(
       request.targetGate as AdministrativeRecoveryRecord["targetGate"],
-    )
+    ) &&
+    typeof request.observedAt === "string" &&
+    isCanonicalLifecycleTimestamp(request.observedAt)
   );
 }
 
 export function evaluateAdministrativeRecovery(
   value: unknown,
   requestValue: unknown,
+  expectedAuthorityDigest: unknown,
+  expectedMeteringDigest: unknown,
 ): AdministrativeRecoveryDecision {
-  const validation = validateDeliveryAuthorityContract(value);
+  const validation = validateFrozenDeliveryAuthorityContract(
+    value,
+    expectedAuthorityDigest,
+    expectedMeteringDigest,
+  );
   const requestSnapshot = canonicalSnapshot<unknown>(requestValue);
   const request = isAdministrativeRecoveryRequest(requestSnapshot)
     ? requestSnapshot
     : null;
-  const observedAt = validation.valid
-    ? validation.value.workflow.candidate.verification.observedAt
-    : "1970-01-01T00:00:00.000Z";
+  const observedAt = request?.observedAt ?? "1970-01-01T00:00:00.000Z";
   const fallback: AdministrativeRecoveryRequest = request ?? {
     recoveryId: "rejected-recovery",
     kind: "canonical-digest-refetch",
     idempotencyKey: "rejected-recovery",
+    actorRole: "flow",
+    actorId: "rejected-actor",
+    executionId: "rejected-execution",
+    workspaceId: "rejected-workspace",
     identityRevalidated: false,
     targetGate: "identity",
+    observedAt: "1970-01-01T00:00:00.000Z",
   };
   const make = (
     allowed: boolean,
@@ -1505,11 +2460,33 @@ export function evaluateAdministrativeRecovery(
     allowed,
     idempotent,
     code,
-    audit: { ...fallback, accepted: allowed, code, observedAt },
+    audit: {
+      ...fallback,
+      requestDigest: sha256(fallback),
+      workflowState: validation.valid
+        ? validation.value.workflow.state
+        : "blocked",
+      ciStatus: validation.valid
+        ? validation.value.workflow.observations.ci
+        : "not-started",
+      accepted: allowed,
+      code,
+      observedAt,
+    },
   });
   if (!validation.valid || request === null)
     return make(false, false, "contract-invalid");
-  const prior = validation.value.administrativeRecoveries.find(
+  const contract = validation.value;
+  const binding = contract.roles[request.actorRole];
+  if (
+    !request.identityRevalidated ||
+    request.actorRole !== contract.activeRole ||
+    request.actorId !== binding.actorId ||
+    request.executionId !== binding.executionId ||
+    request.workspaceId !== binding.workspaceId
+  )
+    return make(false, false, "identity-not-revalidated");
+  const prior = contract.administrativeRecoveries.find(
     (record) => record.idempotencyKey === request.idempotencyKey,
   );
   const requestDigest = sha256(request);
@@ -1518,21 +2495,38 @@ export function evaluateAdministrativeRecovery(
       recoveryId: prior.recoveryId,
       kind: prior.kind,
       idempotencyKey: prior.idempotencyKey,
+      actorRole: prior.actorRole,
+      actorId: prior.actorId,
+      executionId: prior.executionId,
+      workspaceId: prior.workspaceId,
       identityRevalidated: prior.identityRevalidated,
       targetGate: prior.targetGate,
+      observedAt: prior.observedAt,
     });
     return priorDigest === requestDigest
       ? {
-          allowed: prior.accepted,
+          allowed: false,
           idempotent: true,
           code: prior.code,
           audit: prior,
         }
       : make(false, false, "idempotency-conflict");
   }
-  if (!request.identityRevalidated)
-    return make(false, false, "identity-not-revalidated");
-  if (request.targetGate !== "administrative")
+  if (idempotencyKeyExists(contract, request.idempotencyKey))
+    return make(false, false, "idempotency-conflict");
+  if (
+    request.observedAt !== contract.meteringObservedAt ||
+    request.observedAt <= latestRecordedTimestamp(contract)
+  )
+    return make(false, false, "stale-observation");
+  if (
+    request.targetGate !== "administrative" ||
+    (contract.workflow.state !== "blocked" &&
+      contract.workflow.state !== "escalated") ||
+    (request.kind === "interrupted-ci-polling" &&
+      contract.workflow.observations.ci !== "pending" &&
+      contract.workflow.observations.ci !== "failed")
+  )
     return make(false, false, "recovery-gate-denied");
   return make(true, false, "accepted");
 }

@@ -1,7 +1,7 @@
 {
   "contractId": "spts.delivery-authority",
   "contractVersion": "1.0.0",
-  "authorityDigest": "e2f1a4b236975a1060c06dbd193a1730147a7fac1b5c7e160ed4c7ec0b0c3c35",
+  "authorityDigest": "6ac79ac2ee5c77be4cdedad57898b46c0e01cdc5e88ad372f227b5064eaaff11",
   "activeRole": "principal-developer",
   "task": {
     "paca": {
@@ -105,6 +105,35 @@
   ],
   "workflow": {
     "state": "publication-authorized",
+    "checkpoint": {
+      "checkpointId": "checkpoint-spts9-initial",
+      "state": "independent-verification",
+      "candidateTree": "dddddddddddddddddddddddddddddddddddddddd",
+      "activeRepairBudget": "implementation",
+      "observedAt": "2026-08-25T23:00:00.000Z",
+      "attemptUsage": {
+        "implementationAttempts": 1,
+        "verificationRepairAttempts": 0,
+        "ciRepairAttempts": 0
+      }
+    },
+    "observations": {
+      "worktree": "clean",
+      "verifierCandidate": "unchanged",
+      "assurance": "known",
+      "security": "known",
+      "credentialScope": "unchanged",
+      "ci": "not-started",
+      "merge": {
+        "status": "not-merged",
+        "targetTree": null,
+        "pullRequestNumber": null,
+        "mergeCommit": null,
+        "observedAt": null,
+        "receiptId": null,
+        "freshThroughEventId": null
+      }
+    },
     "candidate": {
       "headCommit": "cccccccccccccccccccccccccccccccccccccccc",
       "tree": "dddddddddddddddddddddddddddddddddddddddd",
@@ -134,7 +163,7 @@
       {
         "eventId": "event-publication-approval",
         "idempotencyKey": "transition-publication-approval",
-        "requestDigest": "b4de68574fb8ff8f109c4578f7dda6e9184a185dfcb1d4f95fd2c5b18f86771f",
+        "requestDigest": "bfffd362acb0b852f21daf31fb5a81e7a185f14dcf468f3e88d4fe1d217675a8",
         "accepted": true,
         "code": "accepted",
         "from": "independent-verification",
@@ -142,7 +171,9 @@
         "observedAt": "2026-08-25T23:00:00.000Z",
         "actorRole": "flow",
         "actorId": "actor-flow",
-        "candidateTree": "dddddddddddddddddddddddddddddddddddddddd"
+        "candidateTree": "dddddddddddddddddddddddddddddddddddddddd",
+        "executionId": "execution-flow",
+        "workspaceId": "workspace-flow"
       }
     ]
   },
@@ -172,7 +203,8 @@
       },
       "verification": {
         "verdict": "APPROVE",
-        "reviewedTree": "dddddddddddddddddddddddddddddddddddddddd"
+        "reviewedTree": "dddddddddddddddddddddddddddddddddddddddd",
+        "approvalId": "approval-verifier-1"
       },
       "pullRequest": {
         "number": 9,
@@ -181,15 +213,16 @@
         "headCommit": "cccccccccccccccccccccccccccccccccccccccc"
       },
       "ci": {
-        "runId": "ci-run-9",
-        "checkId": "ci-check-contracts"
+        "runId": null,
+        "checkId": null,
+        "verdict": null
       },
       "pacaUpdateId": "paca-update-evidence-9",
       "observedAt": "2026-08-25T23:00:00.000Z",
       "freshThroughEventId": "event-publication-approval",
       "correlationId": "correlation-spts9-1",
       "idempotencyKey": "evidence-verification-spts9-1",
-      "evidenceDigest": "b5c5256daf9a465860e6fb6462dab9b9800720e2b294393e1765d0f42997208b"
+      "evidenceDigest": "0d2565e49448c97fdfe97f119ea5aa1e1d4027de01184a9bb5ea3f6cded05914"
     }
   ],
   "autonomy": {
@@ -210,7 +243,7 @@
       "elapsedMinutes": 60,
       "concurrentAgents": 2,
       "worktrees": 2,
-      "evidenceBytes": 2048,
+      "evidenceBytes": 1160,
       "cancelled": false
     }
   },
@@ -225,5 +258,7 @@
     "governedBy": "pi-daddy",
     "supervisor": "herdr",
     "externalEffects": "decision-only"
-  }
+  },
+  "meteringDigest": "4a0d0538cfd31feb9756f854130685678110d9c7489e7f850db7583385bf1df9",
+  "meteringObservedAt": "2026-08-25T23:00:00.001Z"
 }

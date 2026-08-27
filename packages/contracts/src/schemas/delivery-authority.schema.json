@@ -10,6 +10,8 @@
     "contractId",
     "contractVersion",
     "authorityDigest",
+    "meteringDigest",
+    "meteringObservedAt",
     "activeRole",
     "governance",
     "task",
@@ -29,6 +31,8 @@
     "contractId": { "const": "spts.delivery-authority" },
     "contractVersion": { "const": "1.0.0" },
     "authorityDigest": { "$ref": "#/definitions/sha256" },
+    "meteringDigest": { "$ref": "#/definitions/sha256" },
+    "meteringObservedAt": { "$ref": "#/definitions/timestamp" },
     "activeRole": { "$ref": "#/definitions/role" },
     "governance": {
       "type": "object",
@@ -110,12 +114,14 @@
             "included": {
               "type": "array",
               "minItems": 1,
+              "maxItems": 100,
               "uniqueItems": true,
               "items": { "$ref": "#/definitions/safeProse" }
             },
             "excluded": {
               "type": "array",
               "minItems": 1,
+              "maxItems": 100,
               "uniqueItems": true,
               "items": { "$ref": "#/definitions/safeProse" }
             }
@@ -158,9 +164,123 @@
     "workflow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["state", "candidate", "audit"],
+      "required": ["state", "checkpoint", "observations", "candidate", "audit"],
       "properties": {
         "state": { "$ref": "#/definitions/workflowState" },
+        "checkpoint": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "checkpointId",
+            "state",
+            "candidateTree",
+            "activeRepairBudget",
+            "attemptUsage",
+            "observedAt"
+          ],
+          "properties": {
+            "checkpointId": { "$ref": "#/definitions/safeId" },
+            "state": { "$ref": "#/definitions/workflowState" },
+            "candidateTree": { "$ref": "#/definitions/sha1" },
+            "activeRepairBudget": {
+              "enum": ["implementation", "verification", "ci"]
+            },
+            "attemptUsage": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "implementationAttempts",
+                "verificationRepairAttempts",
+                "ciRepairAttempts"
+              ],
+              "properties": {
+                "implementationAttempts": {
+                  "$ref": "#/definitions/nonnegative"
+                },
+                "verificationRepairAttempts": {
+                  "$ref": "#/definitions/nonnegative"
+                },
+                "ciRepairAttempts": {
+                  "$ref": "#/definitions/nonnegative"
+                }
+              }
+            },
+            "observedAt": { "$ref": "#/definitions/timestamp" }
+          }
+        },
+        "observations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "worktree",
+            "verifierCandidate",
+            "assurance",
+            "security",
+            "credentialScope",
+            "ci",
+            "merge"
+          ],
+          "properties": {
+            "worktree": { "enum": ["clean", "dirty-unexpected"] },
+            "verifierCandidate": { "enum": ["unchanged", "modified"] },
+            "assurance": { "enum": ["known", "unknown"] },
+            "security": { "enum": ["known", "unknown"] },
+            "credentialScope": { "enum": ["unchanged", "expanded"] },
+            "ci": {
+              "enum": ["not-started", "pending", "passed", "failed"]
+            },
+            "merge": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "status",
+                "targetTree",
+                "pullRequestNumber",
+                "mergeCommit",
+                "observedAt",
+                "receiptId",
+                "freshThroughEventId"
+              ],
+              "properties": {
+                "status": { "enum": ["not-merged", "merged"] },
+                "targetTree": {
+                  "anyOf": [
+                    { "$ref": "#/definitions/sha1" },
+                    { "type": "null" }
+                  ]
+                },
+                "pullRequestNumber": {
+                  "type": ["integer", "null"],
+                  "minimum": 1
+                },
+                "mergeCommit": {
+                  "anyOf": [
+                    { "$ref": "#/definitions/sha1" },
+                    { "type": "null" }
+                  ]
+                },
+                "observedAt": {
+                  "anyOf": [
+                    { "$ref": "#/definitions/timestamp" },
+                    { "type": "null" }
+                  ]
+                },
+                "receiptId": {
+                  "anyOf": [
+                    { "$ref": "#/definitions/safeId" },
+                    { "type": "null" }
+                  ]
+                },
+                "freshThroughEventId": {
+                  "anyOf": [
+                    { "$ref": "#/definitions/safeId" },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        },
         "candidate": {
           "type": "object",
           "additionalProperties": false,
@@ -232,6 +352,7 @@
         },
         "audit": {
           "type": "array",
+          "maxItems": 1000,
           "items": { "$ref": "#/definitions/auditRecord" }
         }
       }
@@ -239,6 +360,7 @@
     "evidence": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 1000,
       "items": { "$ref": "#/definitions/evidence" }
     },
     "autonomy": {
@@ -279,7 +401,7 @@
             "evidenceBytes": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 104857600
+              "maximum": 10485760
             },
             "cancellationBehavior": {
               "const": "stop-after-current-atomic-operation"
@@ -316,24 +438,29 @@
     },
     "effectGrants": {
       "type": "array",
+      "maxItems": 100,
       "items": { "$ref": "#/definitions/effectGrant" }
     },
     "requestedEffects": {
       "type": "array",
+      "maxItems": 5,
       "uniqueItems": true,
       "items": { "$ref": "#/definitions/distinctEffect" }
     },
     "administrativeRecoveries": {
       "type": "array",
+      "maxItems": 1000,
       "items": { "$ref": "#/definitions/recoveryRecord" }
     },
     "activeEscalations": {
       "type": "array",
+      "maxItems": 8,
       "uniqueItems": true,
       "items": { "$ref": "#/definitions/escalationReason" }
     },
     "effectAudit": {
       "type": "array",
+      "maxItems": 1000,
       "items": { "$ref": "#/definitions/effectAuditRecord" }
     }
   },
@@ -468,6 +595,8 @@
         "observedAt",
         "actorRole",
         "actorId",
+        "executionId",
+        "workspaceId",
         "candidateTree"
       ],
       "properties": {
@@ -476,6 +605,8 @@
         "requestDigest": { "$ref": "#/definitions/sha256" },
         "actorRole": { "$ref": "#/definitions/role" },
         "actorId": { "$ref": "#/definitions/safeId" },
+        "executionId": { "$ref": "#/definitions/safeId" },
+        "workspaceId": { "$ref": "#/definitions/safeId" },
         "candidateTree": { "$ref": "#/definitions/sha1" },
         "accepted": { "type": "boolean" },
         "code": {
@@ -484,10 +615,14 @@
             "contract-invalid",
             "idempotency-conflict",
             "request-denied",
+            "stale-observation",
             "identity-drift",
             "transition-denied",
             "publication-denied",
-            "merge-grant-required"
+            "autonomy-exhausted",
+            "ci-evidence-required",
+            "merge-grant-required",
+            "merge-observation-required"
           ]
         },
         "from": { "$ref": "#/definitions/workflowState" },
@@ -570,7 +705,7 @@
         "verification": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["verdict", "reviewedTree"],
+          "required": ["verdict", "reviewedTree", "approvalId"],
           "properties": {
             "verdict": {
               "type": ["string", "null"],
@@ -578,6 +713,9 @@
             },
             "reviewedTree": {
               "anyOf": [{ "$ref": "#/definitions/sha1" }, { "type": "null" }]
+            },
+            "approvalId": {
+              "anyOf": [{ "$ref": "#/definitions/safeId" }, { "type": "null" }]
             }
           }
         },
@@ -607,13 +745,17 @@
         "ci": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["runId", "checkId"],
+          "required": ["runId", "checkId", "verdict"],
           "properties": {
             "runId": {
               "anyOf": [{ "$ref": "#/definitions/safeId" }, { "type": "null" }]
             },
             "checkId": {
               "anyOf": [{ "$ref": "#/definitions/safeId" }, { "type": "null" }]
+            },
+            "verdict": {
+              "type": ["string", "null"],
+              "enum": ["PASS", "FAIL", null]
             }
           }
         },
@@ -669,6 +811,13 @@
         "recoveryId",
         "kind",
         "idempotencyKey",
+        "requestDigest",
+        "actorRole",
+        "actorId",
+        "executionId",
+        "workspaceId",
+        "workflowState",
+        "ciStatus",
         "identityRevalidated",
         "targetGate",
         "accepted",
@@ -679,6 +828,15 @@
         "recoveryId": { "$ref": "#/definitions/safeId" },
         "kind": { "$ref": "#/definitions/recoveryKind" },
         "idempotencyKey": { "$ref": "#/definitions/safeId" },
+        "requestDigest": { "$ref": "#/definitions/sha256" },
+        "actorRole": { "$ref": "#/definitions/role" },
+        "actorId": { "$ref": "#/definitions/safeId" },
+        "executionId": { "$ref": "#/definitions/safeId" },
+        "workspaceId": { "$ref": "#/definitions/safeId" },
+        "workflowState": { "$ref": "#/definitions/workflowState" },
+        "ciStatus": {
+          "enum": ["not-started", "pending", "passed", "failed"]
+        },
         "identityRevalidated": { "type": "boolean" },
         "targetGate": {
           "enum": [
@@ -697,6 +855,7 @@
             "contract-invalid",
             "idempotency-conflict",
             "identity-not-revalidated",
+            "stale-observation",
             "recovery-gate-denied"
           ]
         },
@@ -727,7 +886,10 @@
         "observedAt",
         "actorRole",
         "actorId",
-        "targetTree"
+        "executionId",
+        "workspaceId",
+        "targetTree",
+        "workflowState"
       ],
       "properties": {
         "idempotencyKey": { "$ref": "#/definitions/safeId" },
@@ -735,7 +897,10 @@
         "effect": { "type": "string", "minLength": 1, "maxLength": 64 },
         "actorRole": { "$ref": "#/definitions/role" },
         "actorId": { "$ref": "#/definitions/safeId" },
+        "executionId": { "$ref": "#/definitions/safeId" },
+        "workspaceId": { "$ref": "#/definitions/safeId" },
         "targetTree": { "$ref": "#/definitions/sha1" },
+        "workflowState": { "$ref": "#/definitions/workflowState" },
         "allowed": { "type": "boolean" },
         "code": {
           "enum": [
@@ -743,6 +908,7 @@
             "contract-invalid",
             "idempotency-conflict",
             "identity-drift",
+            "stale-observation",
             "escalation-required",
             "publication-denied",
             "role-authority-denied",
