@@ -148,11 +148,6 @@ function recoveryDetails(
       meteringDigest: contract.meteringDigest,
       controllerStateDigest: contract.controllerStateDigest,
     };
-  if (kind === "disappeared-agent-clean-worktree")
-    return {
-      agentExecutionId: contract.roles["principal-developer"].executionId,
-      agentWorkspaceId: contract.roles["principal-developer"].workspaceId,
-    };
   if (kind === "idempotent-push-pr-reconciliation")
     return {
       candidateTree: contract.workflow.candidate.tree,
@@ -1641,7 +1636,11 @@ describe("spts.delivery-authority", () => {
     });
     expect(
       evaluateDeliveryTransition(contract, { ...request, to: "blocked" }),
-    ).toMatchObject({ accepted: false, code: "idempotency-conflict" });
+    ).toMatchObject({
+      accepted: false,
+      code: "idempotency-conflict",
+      audit: { authentication: null },
+    });
 
     const effectRequest = {
       effect: "test" as const,
@@ -1661,7 +1660,11 @@ describe("spts.delivery-authority", () => {
     });
     expect(
       authorizeDeliveryEffect(contract, { ...effectRequest, effect: "build" }),
-    ).toMatchObject({ allowed: false, code: "idempotency-conflict" });
+    ).toMatchObject({
+      allowed: false,
+      code: "idempotency-conflict",
+      audit: { authentication: null },
+    });
   });
 
   it("keeps historical transition replays at the current workflow state", () => {
@@ -1733,8 +1736,7 @@ describe("spts.delivery-authority", () => {
       });
       if (
         kind === "repair-receipt-sequencing" ||
-        kind === "canonical-digest-refetch" ||
-        kind === "disappeared-agent-clean-worktree"
+        kind === "canonical-digest-refetch"
       )
         expect(decision).toMatchObject({ allowed: true, code: "accepted" });
       else
@@ -1798,7 +1800,11 @@ describe("spts.delivery-authority", () => {
         ...request,
         recoveryId: "recovery-repeat-changed",
       }),
-    ).toMatchObject({ allowed: false, code: "idempotency-conflict" });
+    ).toMatchObject({
+      allowed: false,
+      code: "idempotency-conflict",
+      audit: { authentication: null },
+    });
   });
 
   it("denies mutating effects after completion and at exhausted repair budgets", () => {
@@ -2158,7 +2164,11 @@ describe("spts.delivery-authority", () => {
         ...decisionIdentity(contract, "flow"),
         targetTree: contract.workflow.candidate.tree,
       }),
-    ).toMatchObject({ allowed: false, code: "idempotency-conflict" });
+    ).toMatchObject({
+      allowed: false,
+      code: "idempotency-conflict",
+      audit: { authentication: null },
+    });
     expect(
       evaluateDeliveryTransition(contract, {
         eventId: "cross-namespace-transition",
@@ -2169,7 +2179,11 @@ describe("spts.delivery-authority", () => {
         ...decisionIdentity(contract, "flow"),
         candidateTree: contract.workflow.candidate.tree,
       }),
-    ).toMatchObject({ accepted: false, code: "idempotency-conflict" });
+    ).toMatchObject({
+      accepted: false,
+      code: "idempotency-conflict",
+      audit: { authentication: null },
+    });
 
     setState(contract, "publication-authorized", "blocked");
     expect(
@@ -2182,7 +2196,11 @@ describe("spts.delivery-authority", () => {
         identityRevalidated: true,
         targetGate: "administrative",
       }),
-    ).toMatchObject({ allowed: false, code: "idempotency-conflict" });
+    ).toMatchObject({
+      allowed: false,
+      code: "idempotency-conflict",
+      audit: { authentication: null },
+    });
   });
 
   it("uses one idempotency namespace across transitions, effects, recoveries, grants, and evidence", () => {

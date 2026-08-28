@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import completeExample from "../examples/delivery-authority.complete.json" with { type: "json" };
 import flowExample from "../examples/delivery-authority.role-flow.json" with { type: "json" };
-import controllerBoundaries from "./fixtures/invalid/delivery-authority-controller-state-boundaries.json" with { type: "json" };
 import {
+  ADMINISTRATIVE_RECOVERY_KINDS,
   authorizeDeliveryEffect,
   canonicalSerializeLifecycleValue,
   computeDeliveryAuthorityDigest,
@@ -185,6 +185,33 @@ function addEffectGrant(
   rehash(contract);
 }
 
+function reapproveSameTreeCandidate(
+  contract: DeliveryAuthorityContract,
+  headCommit: string,
+  pullRequestNumber: number,
+): void {
+  advanceMetering(contract);
+  const candidate = contract.workflow.candidate;
+  candidate.headCommit = headCommit;
+  candidate.pullRequest.number = pullRequestNumber;
+  candidate.pullRequest.expectedHeadCommit = headCommit;
+  candidate.pullRequest.observedHeadCommit = headCommit;
+  candidate.verification.approvalId = "controller-state-reapproved-candidate";
+  candidate.verification.observedAt = contract.meteringObservedAt;
+  const evidence = structuredClone(contract.evidence[0]!) as DeliveryEvidence;
+  evidence.evidenceId = "controller-state-reapproved-candidate";
+  evidence.repository.commit = headCommit;
+  evidence.pullRequest.number = pullRequestNumber;
+  evidence.pullRequest.headCommit = headCommit;
+  evidence.verification.approvalId = candidate.verification.approvalId;
+  evidence.observedAt = contract.meteringObservedAt;
+  evidence.correlationId = "controller-state-reapproved-candidate";
+  evidence.idempotencyKey = "controller-state-reapproved-candidate";
+  evidence.pacaUpdateId = "controller-state-reapproved-candidate";
+  contract.evidence.push(evidence);
+  rehash(contract);
+}
+
 function passingCiEvidence(contract: DeliveryAuthorityContract): void {
   const evidence = structuredClone(contract.evidence[0]!) as DeliveryEvidence;
   evidence.evidenceId = "controller-state-matrix-ci";
@@ -245,26 +272,6 @@ function completedContract(): DeliveryAuthorityContract {
 }
 
 describe("trusted delivery controller state", () => {
-  it("declares the complete adversarial controller-state fixture matrix", () => {
-    expect(
-      new Set(controllerBoundaries.map((fixture) => fixture.operation)),
-    ).toEqual(
-      new Set([
-        "attacker-recomputed-controller-state",
-        "forged-approval-tree",
-        "truncated-exhausted-attempt-trace",
-        "reordered-decision-chain",
-        "historical-push-before-approval",
-        "publication-safety-gate-bypass",
-        "future-merge-completion",
-        "recovery-without-prior-effect",
-        "recovery-rejected-or-wrong-tree",
-        "protected-effect-during-intake",
-        "exact-retry-after-role-handoff",
-        "idempotency-key-changed-request",
-      ]),
-    );
-  });
   it("keeps static authority stable while active controller role evolves", () => {
     const contract = clone();
     const authorityDigest = contract.authorityDigest;
@@ -1019,6 +1026,63 @@ describe("trusted delivery controller state", () => {
       );
   });
 
+  it("rejects unsupported cleanup of a currently live agent worktree", () => {
+    const contract = structuredClone(flowExample) as DeliveryAuthorityContract;
+    resetAtState(contract, "blocked", "flow");
+    advanceMetering(contract);
+    expect(ADMINISTRATIVE_RECOVERY_KINDS).not.toContain(
+      "disappeared-agent-clean-worktree",
+    );
+    expect(
+      evaluateAdministrativeRecovery(
+        contract,
+        {
+          recoveryId: "controller-state-clean-live-agent",
+          kind: "disappeared-agent-clean-worktree",
+          idempotencyKey: "controller-state-clean-live-agent",
+          ...flowIdentity(contract),
+          identityRevalidated: true,
+          targetGate: "administrative",
+          details: {
+            agentExecutionId: contract.roles.flow.executionId,
+            agentWorkspaceId: contract.roles.flow.workspaceId,
+          },
+          observedAt: contract.meteringObservedAt,
+        },
+        contract.authorityDigest,
+        contract.meteringDigest,
+        contract.controllerStateDigest,
+      ),
+    ).toMatchObject({ allowed: false, code: "contract-invalid" });
+  });
+
+  it("rejects non-string recovery profile values without coercion", () => {
+    const contract = structuredClone(flowExample) as DeliveryAuthorityContract;
+    resetAtState(contract, "blocked", "flow");
+    advanceMetering(contract);
+    expect(
+      evaluateAdministrativeRecovery(
+        contract,
+        {
+          recoveryId: "controller-state-array-profile",
+          kind: "redundant-profile-downgrade",
+          idempotencyKey: "controller-state-array-profile",
+          ...flowIdentity(contract),
+          identityRevalidated: true,
+          targetGate: "administrative",
+          details: {
+            fromProfile: contract.task.assurance.profile,
+            toProfile: ["lean"],
+          },
+          observedAt: contract.meteringObservedAt,
+        },
+        contract.authorityDigest,
+        contract.meteringDigest,
+        contract.controllerStateDigest,
+      ),
+    ).toMatchObject({ allowed: false, code: "contract-invalid" });
+  });
+
   it("preserves Product authority for an explicitly safe blocked recovery", () => {
     const contract = clone();
     resetAtState(contract, "blocked", "product");
@@ -1194,6 +1258,89 @@ describe("trusted delivery controller state", () => {
         rejected.controllerStateDigest,
       ),
     ).toMatchObject({ allowed: false, code: "recovery-gate-denied" });
+  });
+
+  it("rejects publication reconciliation across same-tree commit and PR identities", () => {
+    const contract = structuredClone(flowExample) as DeliveryAuthorityContract;
+    advanceMetering(contract);
+    const effect = authorizeDeliveryEffect(
+      contract,
+      {
+        effect: "feature-push",
+        idempotencyKey: "controller-state-prior-candidate-push",
+        ...flowIdentity(contract),
+        targetTree: contract.workflow.candidate.tree,
+        observedAt: contract.meteringObservedAt,
+      },
+      contract.authorityDigest,
+      contract.meteringDigest,
+      contract.controllerStateDigest,
+    );
+    expect(effect).toMatchObject({ allowed: true, code: "accepted" });
+    contract.effectAudit.push(effect.audit);
+    contract.workflow.decisionChain = {
+      sequence: effect.audit.authentication!.sequence,
+      digest: effect.audit.authentication!.resultingChainDigest,
+    };
+    contract.controllerStateDigest =
+      computeDeliveryControllerStateDigest(contract);
+    const priorContext = effect.audit.authentication!.historicalContext;
+
+    for (const changedIdentity of [
+      {
+        name: "commit",
+        headCommit: "b".repeat(40),
+        pullRequestNumber: priorContext.candidate.pullRequest.number,
+      },
+      {
+        name: "pull-request",
+        headCommit: priorContext.candidate.headCommit,
+        pullRequestNumber: priorContext.candidate.pullRequest.number + 1,
+      },
+    ]) {
+      const changed = structuredClone(contract);
+      reapproveSameTreeCandidate(
+        changed,
+        changedIdentity.headCommit,
+        changedIdentity.pullRequestNumber,
+      );
+      expect(changed.workflow.candidate.tree).toBe(priorContext.candidate.tree);
+      expect(validateDeliveryAuthorityContract(changed).valid).toBe(true);
+      appendFlowTransition(
+        changed,
+        "blocked",
+        `controller-state-cross-${changedIdentity.name}-blocked`,
+      );
+      advanceMetering(changed);
+
+      expect(
+        evaluateAdministrativeRecovery(
+          changed,
+          {
+            recoveryId: `controller-state-cross-${changedIdentity.name}-reconcile`,
+            kind: "idempotent-push-pr-reconciliation",
+            idempotencyKey: `controller-state-cross-${changedIdentity.name}-reconcile`,
+            ...flowIdentity(changed),
+            identityRevalidated: true,
+            targetGate: "administrative",
+            details: {
+              candidateTree: changed.workflow.candidate.tree,
+              candidateCommit: changed.workflow.candidate.headCommit,
+              pullRequestNumber: changed.workflow.candidate.pullRequest.number,
+              priorEffectSequence: effect.audit.authentication!.sequence,
+              originalIdempotencyKey: effect.audit.idempotencyKey,
+              originalRequestDigest: effect.audit.requestDigest,
+              priorOutcome: "authorization-issued-outcome-unknown",
+            },
+            observedAt: changed.meteringObservedAt,
+          },
+          changed.authorityDigest,
+          changed.meteringDigest,
+          changed.controllerStateDigest,
+        ),
+        changedIdentity.name,
+      ).toMatchObject({ allowed: false, code: "recovery-gate-denied" });
+    }
   });
 
   it("returns an authenticated prior recovery after role handoff", () => {

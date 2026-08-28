@@ -101,7 +101,6 @@ export const ADMINISTRATIVE_RECOVERY_KINDS = freeze([
   "repair-receipt-sequencing",
   "stale-evidence-after-controller-event",
   "canonical-digest-refetch",
-  "disappeared-agent-clean-worktree",
   "idempotent-push-pr-reconciliation",
   "interrupted-ci-polling",
 ] as const);
@@ -334,7 +333,6 @@ export type AdministrativeRecoveryDetails =
       meteringDigest: string;
       controllerStateDigest: string;
     }
-  | { agentExecutionId: string; agentWorkspaceId: string }
   | {
       candidateTree: string;
       candidateCommit: string;
@@ -2859,8 +2857,8 @@ export function evaluateDeliveryTransition(
       audit: same
         ? prior
         : decisionAudit(
-            contract,
-            expectedControllerStateDigest as string,
+            null,
+            null,
             request,
             requestDigest,
             false,
@@ -2878,8 +2876,8 @@ export function evaluateDeliveryTransition(
       code: "idempotency-conflict",
       nextState: contract.workflow.state,
       audit: decisionAudit(
-        contract,
-        expectedControllerStateDigest as string,
+        null,
+        null,
         request,
         requestDigest,
         false,
@@ -3147,6 +3145,7 @@ export function authorizeDeliveryEffect(
     allowed: boolean,
     idempotent: boolean,
     code: DeliveryEffectDecisionCode,
+    authenticate = true,
   ): DeliveryEffectDecision => {
     const audit: DeliveryEffectAuditRecord = {
       authentication: null,
@@ -3166,6 +3165,7 @@ export function authorizeDeliveryEffect(
       observedAt,
     };
     if (
+      authenticate &&
       validation.valid &&
       request !== null &&
       typeof expectedControllerStateDigest === "string"
@@ -3198,9 +3198,9 @@ export function authorizeDeliveryEffect(
           code: prior.code,
           audit: prior,
         }
-      : make(false, false, "idempotency-conflict");
+      : make(false, false, "idempotency-conflict", false);
   if (idempotencyKeyExists(contract, request.idempotencyKey))
-    return make(false, false, "idempotency-conflict");
+    return make(false, false, "idempotency-conflict", false);
   const code = deliveryEffectPolicyCode(contract, request);
   return make(code === "accepted", false, code);
 }
@@ -3249,13 +3249,6 @@ export type AdministrativeRecoveryRequest = AdministrativeRecoveryRequestBase &
         >;
       }
     | {
-        kind: "disappeared-agent-clean-worktree";
-        details: Extract<
-          AdministrativeRecoveryDetails,
-          { agentExecutionId: string }
-        >;
-      }
-    | {
         kind: "idempotent-push-pr-reconciliation";
         details: Extract<
           AdministrativeRecoveryDetails,
@@ -3301,8 +3294,10 @@ function isAdministrativeRecoveryDetails(
   if (kind === "redundant-profile-downgrade")
     return (
       hasExactKeys(value, ["fromProfile", "toProfile"]) &&
-      ["lean", "standard", "critical"].includes(String(details.fromProfile)) &&
-      ["lean", "standard"].includes(String(details.toProfile))
+      typeof details.fromProfile === "string" &&
+      ["lean", "standard", "critical"].includes(details.fromProfile) &&
+      typeof details.toProfile === "string" &&
+      ["lean", "standard"].includes(details.toProfile)
     );
   if (kind === "missing-keep-branch-finish")
     return (
@@ -3337,12 +3332,6 @@ function isAdministrativeRecoveryDetails(
       isSha256(details.authorityDigest) &&
       isSha256(details.meteringDigest) &&
       isSha256(details.controllerStateDigest)
-    );
-  if (kind === "disappeared-agent-clean-worktree")
-    return (
-      hasExactKeys(value, ["agentExecutionId", "agentWorkspaceId"]) &&
-      isSafeRequestId(details.agentExecutionId) &&
-      isSafeRequestId(details.agentWorkspaceId)
     );
   if (kind === "idempotent-push-pr-reconciliation")
     return (
@@ -3433,7 +3422,6 @@ function roleMayPerformRecovery(
     return new Set<AdministrativeRecoveryKind>([
       "repair-receipt-sequencing",
       "canonical-digest-refetch",
-      "disappeared-agent-clean-worktree",
       "interrupted-ci-polling",
     ]).has(kind);
   if (role === "independent-verifier")
@@ -3537,19 +3525,6 @@ function deliveryRecoveryPolicyCode(
       ? "accepted"
       : "recovery-gate-denied";
   }
-  if (request.kind === "disappeared-agent-clean-worktree") {
-    const details = request.details as Extract<
-      AdministrativeRecoveryDetails,
-      { agentExecutionId: string }
-    >;
-    return Object.values(contract.roles).some(
-      (role) =>
-        role.executionId === details.agentExecutionId &&
-        role.workspaceId === details.agentWorkspaceId,
-    )
-      ? "accepted"
-      : "recovery-gate-denied";
-  }
   if (request.kind === "interrupted-ci-polling") {
     const details = request.details as Extract<
       AdministrativeRecoveryDetails,
@@ -3599,7 +3574,15 @@ function deliveryRecoveryPolicyCode(
   const priorContext = decisionContextAsContract(
     prior.authentication.historicalContext,
   );
-  return publicationIsFresh(priorContext) &&
+  const priorCandidate = priorContext.workflow.candidate;
+  return priorCandidate.tree === details.candidateTree &&
+    priorCandidate.headCommit === details.candidateCommit &&
+    priorCandidate.pullRequest.number === details.pullRequestNumber &&
+    priorCandidate.pullRequest.baseBranch ===
+      candidate.pullRequest.baseBranch &&
+    priorCandidate.pullRequest.headBranch ===
+      candidate.pullRequest.headBranch &&
+    publicationIsFresh(priorContext) &&
     hasCurrentApprovalEvidence(priorContext)
     ? "accepted"
     : "recovery-gate-denied";
@@ -3644,6 +3627,7 @@ export function evaluateAdministrativeRecovery(
     allowed: boolean,
     idempotent: boolean,
     code: AdministrativeRecoveryDecisionCode,
+    authenticate = true,
   ): AdministrativeRecoveryDecision => {
     const audit: AdministrativeRecoveryRecord = {
       authentication: null,
@@ -3660,6 +3644,7 @@ export function evaluateAdministrativeRecovery(
       observedAt,
     };
     if (
+      authenticate &&
       validation.valid &&
       request !== null &&
       typeof expectedControllerStateDigest === "string"
@@ -3693,10 +3678,10 @@ export function evaluateAdministrativeRecovery(
           code: prior.code,
           audit: prior,
         }
-      : make(false, false, "idempotency-conflict");
+      : make(false, false, "idempotency-conflict", false);
   }
   if (idempotencyKeyExists(contract, request.idempotencyKey))
-    return make(false, false, "idempotency-conflict");
+    return make(false, false, "idempotency-conflict", false);
   const code = deliveryRecoveryPolicyCode(contract, request);
   return make(code === "accepted", false, code);
 }

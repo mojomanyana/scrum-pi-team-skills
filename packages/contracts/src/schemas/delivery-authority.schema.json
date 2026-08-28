@@ -901,7 +901,6 @@
         "repair-receipt-sequencing",
         "stale-evidence-after-controller-event",
         "canonical-digest-refetch",
-        "disappeared-agent-clean-worktree",
         "idempotent-push-pr-reconciliation",
         "interrupted-ci-polling"
       ]
@@ -957,15 +956,6 @@
             "authorityDigest": { "$ref": "#/definitions/sha256" },
             "meteringDigest": { "$ref": "#/definitions/sha256" },
             "controllerStateDigest": { "$ref": "#/definitions/sha256" }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["agentExecutionId", "agentWorkspaceId"],
-          "properties": {
-            "agentExecutionId": { "$ref": "#/definitions/safeId" },
-            "agentWorkspaceId": { "$ref": "#/definitions/safeId" }
           }
         },
         {
