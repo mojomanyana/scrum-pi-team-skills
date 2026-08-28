@@ -1,0 +1,1118 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mojomanyana/scrum-pi-team-skills/schemas/spts.delivery-authority/1.0.0",
+  "title": "spts.delivery-authority structural envelope",
+  "description": "Portable structural schema for a task-scoped delivery authority contract; structural success does not authorize any delivery action or effect.",
+  "$comment": "NON-AUTHORIZING ARTIFACT: validateDeliveryAuthorityContract proves canonical internal consistency only. Effects require validateFrozenDeliveryAuthorityContract with separately trusted static-authority, metering, and complete controller-state digests.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractId",
+    "contractVersion",
+    "authorityDigest",
+    "controllerStateDigest",
+    "meteringDigest",
+    "meteringObservedAt",
+    "activeRole",
+    "governance",
+    "task",
+    "roles",
+    "automaticActions",
+    "humanGatedActions",
+    "workflow",
+    "evidence",
+    "autonomy",
+    "effectGrants",
+    "requestedEffects",
+    "administrativeRecoveries",
+    "activeEscalations",
+    "effectAudit"
+  ],
+  "properties": {
+    "contractId": { "const": "spts.delivery-authority" },
+    "contractVersion": { "const": "1.0.0" },
+    "authorityDigest": { "$ref": "#/definitions/sha256" },
+    "controllerStateDigest": { "$ref": "#/definitions/sha256" },
+    "meteringDigest": { "$ref": "#/definitions/sha256" },
+    "meteringObservedAt": { "$ref": "#/definitions/timestamp" },
+    "activeRole": { "$ref": "#/definitions/role" },
+    "governance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "systemOfRecord",
+        "process",
+        "governedBy",
+        "supervisor",
+        "externalEffects"
+      ],
+      "properties": {
+        "systemOfRecord": { "const": "paca" },
+        "process": { "const": "local-pi" },
+        "governedBy": { "const": "pi-daddy" },
+        "supervisor": { "const": "herdr" },
+        "externalEffects": { "const": "decision-only" }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paca", "repository", "assurance", "scope"],
+      "properties": {
+        "paca": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["projectId", "taskId"],
+          "properties": {
+            "projectId": { "$ref": "#/definitions/safeId" },
+            "taskId": { "$ref": "#/definitions/safeId" }
+          }
+        },
+        "repository": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repositoryId",
+            "remoteName",
+            "remoteUrl",
+            "root",
+            "baseBranch",
+            "baseCommit",
+            "baseTree",
+            "featureBranch"
+          ],
+          "properties": {
+            "repositoryId": { "$ref": "#/definitions/safeId" },
+            "remoteName": { "$ref": "#/definitions/safeId" },
+            "remoteUrl": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 512,
+              "pattern": "^https://(?![^/]*@)[A-Za-z0-9.-]+(?::[0-9]+)?(?:/[A-Za-z0-9._~!()+,=%/-]*)?$"
+            },
+            "root": { "$ref": "#/definitions/absolutePath" },
+            "baseBranch": { "$ref": "#/definitions/gitBranch" },
+            "baseCommit": { "$ref": "#/definitions/sha1" },
+            "baseTree": { "$ref": "#/definitions/sha1" },
+            "featureBranch": { "$ref": "#/definitions/gitBranch" }
+          }
+        },
+        "assurance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profile", "runId", "scope"],
+          "properties": {
+            "profile": { "enum": ["lean", "standard", "critical"] },
+            "runId": { "$ref": "#/definitions/safeId" },
+            "scope": { "$ref": "#/definitions/safeProse" }
+          }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["objective", "included", "excluded"],
+          "properties": {
+            "objective": { "$ref": "#/definitions/safeProse" },
+            "included": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100,
+              "uniqueItems": true,
+              "items": { "$ref": "#/definitions/safeProse" }
+            },
+            "excluded": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100,
+              "uniqueItems": true,
+              "items": { "$ref": "#/definitions/safeProse" }
+            }
+          }
+        }
+      }
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "flow",
+        "principal-developer",
+        "independent-verifier",
+        "stakeholder"
+      ],
+      "properties": {
+        "product": { "$ref": "#/definitions/roleBinding" },
+        "flow": { "$ref": "#/definitions/roleBinding" },
+        "principal-developer": { "$ref": "#/definitions/roleBinding" },
+        "independent-verifier": { "$ref": "#/definitions/roleBinding" },
+        "stakeholder": { "$ref": "#/definitions/roleBinding" }
+      }
+    },
+    "automaticActions": {
+      "type": "array",
+      "minItems": 17,
+      "maxItems": 17,
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/automaticAction" }
+    },
+    "humanGatedActions": {
+      "type": "array",
+      "minItems": 16,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/humanAction" }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "checkpoint",
+        "decisionChain",
+        "observations",
+        "candidate",
+        "audit"
+      ],
+      "properties": {
+        "state": { "$ref": "#/definitions/workflowState" },
+        "checkpoint": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "checkpointId",
+            "decisionSequence",
+            "decisionChainDigest",
+            "state",
+            "candidateTree",
+            "activeRepairBudget",
+            "attemptUsage",
+            "observedAt"
+          ],
+          "properties": {
+            "checkpointId": { "$ref": "#/definitions/safeId" },
+            "decisionSequence": { "$ref": "#/definitions/nonnegative" },
+            "decisionChainDigest": { "$ref": "#/definitions/sha256" },
+            "state": { "$ref": "#/definitions/workflowState" },
+            "candidateTree": { "$ref": "#/definitions/sha1" },
+            "activeRepairBudget": {
+              "enum": ["implementation", "verification", "ci"]
+            },
+            "attemptUsage": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "implementationAttempts",
+                "verificationRepairAttempts",
+                "ciRepairAttempts"
+              ],
+              "properties": {
+                "implementationAttempts": {
+                  "$ref": "#/definitions/nonnegative"
+                },
+                "verificationRepairAttempts": {
+                  "$ref": "#/definitions/nonnegative"
+                },
+                "ciRepairAttempts": {
+                  "$ref": "#/definitions/nonnegative"
+                }
+              }
+            },
+            "observedAt": { "$ref": "#/definitions/timestamp" }
+          }
+        },
+        "decisionChain": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sequence", "digest"],
+          "properties": {
+            "sequence": { "$ref": "#/definitions/nonnegative" },
+            "digest": { "$ref": "#/definitions/sha256" }
+          }
+        },
+        "observations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "worktree",
+            "verifierCandidate",
+            "assurance",
+            "security",
+            "credentialScope",
+            "ci",
+            "merge"
+          ],
+          "properties": {
+            "worktree": { "enum": ["clean", "dirty-unexpected"] },
+            "verifierCandidate": { "enum": ["unchanged", "modified"] },
+            "assurance": { "enum": ["known", "unknown"] },
+            "security": { "enum": ["known", "unknown"] },
+            "credentialScope": { "enum": ["unchanged", "expanded"] },
+            "ci": {
+              "enum": ["not-started", "pending", "passed", "failed"]
+            },
+            "merge": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "status",
+                "targetTree",
+                "pullRequestNumber",
+                "mergeCommit",
+                "observedAt",
+                "receiptId",
+                "freshThroughEventId"
+              ],
+              "properties": {
+                "status": { "enum": ["not-merged", "merged"] },
+                "targetTree": {
+                  "anyOf": [
+                    { "$ref": "#/definitions/sha1" },
+                    { "type": "null" }
+                  ]
+                },
+                "pullRequestNumber": {
+                  "type": ["integer", "null"],
+                  "minimum": 1
+                },
+                "mergeCommit": {
+                  "anyOf": [
+                    { "$ref": "#/definitions/sha1" },
+                    { "type": "null" }
+                  ]
+                },
+                "observedAt": {
+                  "anyOf": [
+                    { "$ref": "#/definitions/timestamp" },
+                    { "type": "null" }
+                  ]
+                },
+                "receiptId": {
+                  "anyOf": [
+                    { "$ref": "#/definitions/safeId" },
+                    { "type": "null" }
+                  ]
+                },
+                "freshThroughEventId": {
+                  "anyOf": [
+                    { "$ref": "#/definitions/safeId" },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "candidate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "headCommit",
+            "tree",
+            "remoteBase",
+            "pullRequest",
+            "verification"
+          ],
+          "properties": {
+            "headCommit": { "$ref": "#/definitions/sha1" },
+            "tree": { "$ref": "#/definitions/sha1" },
+            "remoteBase": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "expectedCommit",
+                "expectedTree",
+                "observedCommit",
+                "observedTree"
+              ],
+              "properties": {
+                "expectedCommit": { "$ref": "#/definitions/sha1" },
+                "expectedTree": { "$ref": "#/definitions/sha1" },
+                "observedCommit": { "$ref": "#/definitions/sha1" },
+                "observedTree": { "$ref": "#/definitions/sha1" }
+              }
+            },
+            "pullRequest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "number",
+                "baseBranch",
+                "headBranch",
+                "expectedHeadCommit",
+                "observedHeadCommit"
+              ],
+              "properties": {
+                "number": { "type": "integer", "minimum": 1 },
+                "baseBranch": { "$ref": "#/definitions/gitBranch" },
+                "headBranch": { "$ref": "#/definitions/gitBranch" },
+                "expectedHeadCommit": { "$ref": "#/definitions/sha1" },
+                "observedHeadCommit": { "$ref": "#/definitions/sha1" }
+              }
+            },
+            "verification": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "verdict",
+                "reviewedTree",
+                "approvalId",
+                "executionId",
+                "workspaceId",
+                "observedAt"
+              ],
+              "properties": {
+                "verdict": { "enum": ["APPROVE", "REJECT", "UNVERIFIED"] },
+                "reviewedTree": { "$ref": "#/definitions/sha1" },
+                "approvalId": { "$ref": "#/definitions/safeId" },
+                "executionId": { "$ref": "#/definitions/safeId" },
+                "workspaceId": { "$ref": "#/definitions/safeId" },
+                "observedAt": { "$ref": "#/definitions/timestamp" }
+              }
+            }
+          }
+        },
+        "audit": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": { "$ref": "#/definitions/auditRecord" }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": { "$ref": "#/definitions/evidence" }
+    },
+    "autonomy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limits", "usage"],
+      "properties": {
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "implementationAttempts",
+            "verificationRepairAttempts",
+            "ciRepairAttempts",
+            "durationMinutes",
+            "concurrentAgents",
+            "worktrees",
+            "evidenceBytes",
+            "cancellationBehavior"
+          ],
+          "properties": {
+            "implementationAttempts": { "$ref": "#/definitions/positiveLimit" },
+            "verificationRepairAttempts": {
+              "$ref": "#/definitions/positiveLimit"
+            },
+            "ciRepairAttempts": { "$ref": "#/definitions/positiveLimit" },
+            "durationMinutes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10080
+            },
+            "concurrentAgents": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32
+            },
+            "worktrees": { "type": "integer", "minimum": 1, "maximum": 32 },
+            "evidenceBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10485760
+            },
+            "cancellationBehavior": {
+              "const": "stop-after-current-atomic-operation"
+            }
+          }
+        },
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "implementationAttempts",
+            "verificationRepairAttempts",
+            "ciRepairAttempts",
+            "elapsedMinutes",
+            "concurrentAgents",
+            "worktrees",
+            "evidenceBytes",
+            "cancelled"
+          ],
+          "properties": {
+            "implementationAttempts": { "$ref": "#/definitions/nonnegative" },
+            "verificationRepairAttempts": {
+              "$ref": "#/definitions/nonnegative"
+            },
+            "ciRepairAttempts": { "$ref": "#/definitions/nonnegative" },
+            "elapsedMinutes": { "$ref": "#/definitions/nonnegative" },
+            "concurrentAgents": { "$ref": "#/definitions/nonnegative" },
+            "worktrees": { "$ref": "#/definitions/nonnegative" },
+            "evidenceBytes": { "$ref": "#/definitions/nonnegative" },
+            "cancelled": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "effectGrants": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/definitions/effectGrant" }
+    },
+    "requestedEffects": {
+      "type": "array",
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/distinctEffect" }
+    },
+    "administrativeRecoveries": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "#/definitions/recoveryRecord" }
+    },
+    "activeEscalations": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/escalationReason" }
+    },
+    "effectAudit": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "#/definitions/effectAuditRecord" }
+    }
+  },
+  "definitions": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"
+    },
+    "safeProse": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(?!.*(?:\\$\\(|`|[;&|<>]|\\r|\\n|\\u0000)).*\\S.*$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^(?!.*(?:/\\.{1,2})(?:/|$))(?!.*[\\u0000-\\u001F\\u007F`$;&|<>\"'\\\\])/(?:[^/]+/)*[^/]+$"
+    },
+    "gitBranch": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 255,
+      "pattern": "^(?!.*(?:\\.\\.|//|@\\{|\\\\|[~^:?*\\[]))(?!.*(?:/\\.|\\.lock(?:/|$)))[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,253}[A-Za-z0-9])$"
+    },
+    "sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "nonnegative": { "type": "integer", "minimum": 0 },
+    "positiveLimit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "role": {
+      "enum": [
+        "product",
+        "flow",
+        "principal-developer",
+        "independent-verifier",
+        "stakeholder"
+      ]
+    },
+    "access": {
+      "enum": [
+        "product-control",
+        "orchestrate",
+        "read-write",
+        "read-only",
+        "authorize-merge"
+      ]
+    },
+    "roleBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "actorId", "executionId", "workspaceId", "access"],
+      "properties": {
+        "role": { "$ref": "#/definitions/role" },
+        "actorId": { "$ref": "#/definitions/safeId" },
+        "executionId": { "$ref": "#/definitions/safeId" },
+        "workspaceId": { "$ref": "#/definitions/safeId" },
+        "access": { "$ref": "#/definitions/access" }
+      }
+    },
+    "automaticAction": {
+      "enum": [
+        "diagnose-repair",
+        "edit",
+        "test",
+        "build",
+        "format",
+        "worktree-create",
+        "worktree-inspect",
+        "worktree-cleanup",
+        "feature-branch-commit",
+        "independent-verification",
+        "feature-push",
+        "pr-create-update",
+        "ci-monitor",
+        "ci-repair",
+        "paca-evidence-update",
+        "paca-status-update",
+        "administrative-recovery"
+      ]
+    },
+    "humanAction": {
+      "enum": [
+        "merge",
+        "force-push",
+        "history-rewrite",
+        "branch-delete",
+        "tag",
+        "release",
+        "artifact-publication",
+        "production-access",
+        "deployment",
+        "real-pi-execution",
+        "credential-expansion",
+        "scope-expansion",
+        "material-architecture-change",
+        "material-product-change",
+        "unknown-assurance-escalation",
+        "unknown-security-escalation"
+      ]
+    },
+    "workflowState": {
+      "enum": [
+        "intake",
+        "ready",
+        "implementation",
+        "internal-review",
+        "independent-verification",
+        "repair-required",
+        "publication-authorized",
+        "pr-ci-monitoring",
+        "merge-gate",
+        "completed",
+        "blocked",
+        "escalated"
+      ]
+    },
+    "decisionContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractId",
+        "contractVersion",
+        "controllerStateDigest",
+        "authorityDigest",
+        "meteringDigest",
+        "meteringObservedAt",
+        "activeRole",
+        "governance",
+        "task",
+        "roles",
+        "workflowCheckpoint",
+        "workflowState",
+        "activeRepairBudget",
+        "observations",
+        "candidate",
+        "evidence",
+        "autonomy",
+        "effectGrants",
+        "requestedEffects",
+        "activeEscalations"
+      ],
+      "properties": {
+        "contractId": { "const": "spts.delivery-authority" },
+        "contractVersion": { "const": "1.0.0" },
+        "controllerStateDigest": { "$ref": "#/definitions/sha256" },
+        "authorityDigest": { "$ref": "#/definitions/sha256" },
+        "meteringDigest": { "$ref": "#/definitions/sha256" },
+        "meteringObservedAt": { "$ref": "#/definitions/timestamp" },
+        "activeRole": { "$ref": "#/definitions/role" },
+        "governance": { "$ref": "#/properties/governance" },
+        "task": { "$ref": "#/properties/task" },
+        "roles": { "$ref": "#/properties/roles" },
+        "workflowCheckpoint": {
+          "$ref": "#/properties/workflow/properties/checkpoint"
+        },
+        "workflowState": { "$ref": "#/definitions/workflowState" },
+        "activeRepairBudget": {
+          "enum": ["implementation", "verification", "ci"]
+        },
+        "observations": {
+          "$ref": "#/properties/workflow/properties/observations"
+        },
+        "candidate": {
+          "$ref": "#/properties/workflow/properties/candidate"
+        },
+        "evidence": { "$ref": "#/properties/evidence" },
+        "autonomy": { "$ref": "#/properties/autonomy" },
+        "effectGrants": { "$ref": "#/properties/effectGrants" },
+        "requestedEffects": { "$ref": "#/properties/requestedEffects" },
+        "activeEscalations": { "$ref": "#/properties/activeEscalations" }
+      }
+    },
+    "decisionAuthentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "previousChainDigest",
+        "controllerStateDigest",
+        "historicalContext",
+        "historicalContextDigest",
+        "resultingStateDigest",
+        "resultingChainDigest"
+      ],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "previousChainDigest": { "$ref": "#/definitions/sha256" },
+        "controllerStateDigest": { "$ref": "#/definitions/sha256" },
+        "historicalContext": { "$ref": "#/definitions/decisionContext" },
+        "historicalContextDigest": { "$ref": "#/definitions/sha256" },
+        "resultingStateDigest": { "$ref": "#/definitions/sha256" },
+        "resultingChainDigest": { "$ref": "#/definitions/sha256" }
+      }
+    },
+    "auditRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authentication",
+        "eventId",
+        "idempotencyKey",
+        "requestDigest",
+        "accepted",
+        "code",
+        "from",
+        "to",
+        "observedAt",
+        "actorRole",
+        "actorId",
+        "executionId",
+        "workspaceId",
+        "candidateTree"
+      ],
+      "properties": {
+        "authentication": { "$ref": "#/definitions/decisionAuthentication" },
+        "eventId": { "$ref": "#/definitions/safeId" },
+        "idempotencyKey": { "$ref": "#/definitions/safeId" },
+        "requestDigest": { "$ref": "#/definitions/sha256" },
+        "actorRole": { "$ref": "#/definitions/role" },
+        "actorId": { "$ref": "#/definitions/safeId" },
+        "executionId": { "$ref": "#/definitions/safeId" },
+        "workspaceId": { "$ref": "#/definitions/safeId" },
+        "candidateTree": { "$ref": "#/definitions/sha1" },
+        "accepted": { "type": "boolean" },
+        "code": {
+          "enum": [
+            "accepted",
+            "contract-invalid",
+            "idempotency-conflict",
+            "request-denied",
+            "stale-observation",
+            "identity-drift",
+            "transition-denied",
+            "publication-denied",
+            "autonomy-exhausted",
+            "ci-evidence-required",
+            "merge-grant-required",
+            "merge-observation-required"
+          ]
+        },
+        "from": { "$ref": "#/definitions/workflowState" },
+        "to": { "$ref": "#/definitions/workflowState" },
+        "observedAt": { "$ref": "#/definitions/timestamp" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceId",
+        "task",
+        "repository",
+        "actor",
+        "assurance",
+        "verification",
+        "pullRequest",
+        "ci",
+        "pacaUpdateId",
+        "observedAt",
+        "freshThroughEventId",
+        "correlationId",
+        "idempotencyKey",
+        "evidenceDigest"
+      ],
+      "properties": {
+        "evidenceId": { "$ref": "#/definitions/safeId" },
+        "task": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["projectId", "taskId"],
+          "properties": {
+            "projectId": { "$ref": "#/definitions/safeId" },
+            "taskId": { "$ref": "#/definitions/safeId" }
+          }
+        },
+        "repository": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repositoryId", "branch", "commit", "tree"],
+          "properties": {
+            "repositoryId": { "$ref": "#/definitions/safeId" },
+            "branch": { "$ref": "#/definitions/gitBranch" },
+            "commit": { "$ref": "#/definitions/sha1" },
+            "tree": { "$ref": "#/definitions/sha1" }
+          }
+        },
+        "actor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "actorId", "executionId", "workspaceId"],
+          "properties": {
+            "role": { "$ref": "#/definitions/role" },
+            "actorId": { "$ref": "#/definitions/safeId" },
+            "executionId": { "$ref": "#/definitions/safeId" },
+            "workspaceId": { "$ref": "#/definitions/safeId" }
+          }
+        },
+        "assurance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runId", "profile", "phase"],
+          "properties": {
+            "runId": { "$ref": "#/definitions/safeId" },
+            "profile": { "enum": ["lean", "standard", "critical"] },
+            "phase": {
+              "enum": [
+                "plan",
+                "build",
+                "review",
+                "git-ops",
+                "verification",
+                "ci",
+                "paca-update"
+              ]
+            }
+          }
+        },
+        "verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["verdict", "reviewedTree", "approvalId"],
+          "properties": {
+            "verdict": {
+              "type": ["string", "null"],
+              "enum": ["APPROVE", "REJECT", "UNVERIFIED", null]
+            },
+            "reviewedTree": {
+              "anyOf": [{ "$ref": "#/definitions/sha1" }, { "type": "null" }]
+            },
+            "approvalId": {
+              "anyOf": [{ "$ref": "#/definitions/safeId" }, { "type": "null" }]
+            }
+          }
+        },
+        "pullRequest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["number", "baseBranch", "headBranch", "headCommit"],
+          "properties": {
+            "number": { "type": ["integer", "null"], "minimum": 1 },
+            "baseBranch": {
+              "anyOf": [
+                { "$ref": "#/definitions/gitBranch" },
+                { "type": "null" }
+              ]
+            },
+            "headBranch": {
+              "anyOf": [
+                { "$ref": "#/definitions/gitBranch" },
+                { "type": "null" }
+              ]
+            },
+            "headCommit": {
+              "anyOf": [{ "$ref": "#/definitions/sha1" }, { "type": "null" }]
+            }
+          }
+        },
+        "ci": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runId", "checkId", "verdict"],
+          "properties": {
+            "runId": {
+              "anyOf": [{ "$ref": "#/definitions/safeId" }, { "type": "null" }]
+            },
+            "checkId": {
+              "anyOf": [{ "$ref": "#/definitions/safeId" }, { "type": "null" }]
+            },
+            "verdict": {
+              "type": ["string", "null"],
+              "enum": ["PASS", "FAIL", null]
+            }
+          }
+        },
+        "pacaUpdateId": {
+          "anyOf": [{ "$ref": "#/definitions/safeId" }, { "type": "null" }]
+        },
+        "observedAt": { "$ref": "#/definitions/timestamp" },
+        "freshThroughEventId": { "$ref": "#/definitions/safeId" },
+        "correlationId": { "$ref": "#/definitions/safeId" },
+        "idempotencyKey": { "$ref": "#/definitions/safeId" },
+        "evidenceDigest": { "$ref": "#/definitions/sha256" }
+      }
+    },
+    "distinctEffect": {
+      "enum": ["merge", "release", "production", "destructive-git", "real-pi"]
+    },
+    "effectGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "effect",
+        "grantId",
+        "authorizedByRole",
+        "authorizedByActorId",
+        "targetTree",
+        "idempotencyKey"
+      ],
+      "properties": {
+        "effect": { "$ref": "#/definitions/distinctEffect" },
+        "grantId": { "$ref": "#/definitions/safeId" },
+        "authorizedByRole": { "const": "stakeholder" },
+        "authorizedByActorId": { "$ref": "#/definitions/safeId" },
+        "targetTree": { "$ref": "#/definitions/sha1" },
+        "idempotencyKey": { "$ref": "#/definitions/safeId" }
+      }
+    },
+    "recoveryKind": {
+      "enum": [
+        "redundant-profile-downgrade",
+        "missing-keep-branch-finish",
+        "repair-receipt-sequencing",
+        "stale-evidence-after-controller-event",
+        "canonical-digest-refetch",
+        "idempotent-push-pr-reconciliation",
+        "interrupted-ci-polling"
+      ]
+    },
+    "recoveryDetails": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fromProfile", "toProfile"],
+          "properties": {
+            "fromProfile": { "enum": ["lean", "standard", "critical"] },
+            "toProfile": { "enum": ["lean", "standard"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["branch", "headCommit", "targetTree"],
+          "properties": {
+            "branch": { "$ref": "#/definitions/gitBranch" },
+            "headCommit": { "$ref": "#/definitions/sha1" },
+            "targetTree": { "$ref": "#/definitions/sha1" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["priorDecisionSequence", "priorDecisionChainDigest"],
+          "properties": {
+            "priorDecisionSequence": { "$ref": "#/definitions/nonnegative" },
+            "priorDecisionChainDigest": { "$ref": "#/definitions/sha256" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidenceId", "freshThroughEventId"],
+          "properties": {
+            "evidenceId": { "$ref": "#/definitions/safeId" },
+            "freshThroughEventId": { "$ref": "#/definitions/safeId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "authorityDigest",
+            "meteringDigest",
+            "controllerStateDigest"
+          ],
+          "properties": {
+            "authorityDigest": { "$ref": "#/definitions/sha256" },
+            "meteringDigest": { "$ref": "#/definitions/sha256" },
+            "controllerStateDigest": { "$ref": "#/definitions/sha256" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "candidateTree",
+            "candidateCommit",
+            "pullRequestNumber",
+            "priorEffectSequence",
+            "originalIdempotencyKey",
+            "originalRequestDigest",
+            "priorOutcome"
+          ],
+          "properties": {
+            "candidateTree": { "$ref": "#/definitions/sha1" },
+            "candidateCommit": { "$ref": "#/definitions/sha1" },
+            "pullRequestNumber": { "type": "integer", "minimum": 1 },
+            "priorEffectSequence": { "type": "integer", "minimum": 1 },
+            "originalIdempotencyKey": { "$ref": "#/definitions/safeId" },
+            "originalRequestDigest": { "$ref": "#/definitions/sha256" },
+            "priorOutcome": {
+              "const": "authorization-issued-outcome-unknown"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ciRunId", "ciCheckId"],
+          "properties": {
+            "ciRunId": { "$ref": "#/definitions/safeId" },
+            "ciCheckId": { "$ref": "#/definitions/safeId" }
+          }
+        }
+      ]
+    },
+    "recoveryRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authentication",
+        "recoveryId",
+        "kind",
+        "idempotencyKey",
+        "requestDigest",
+        "details",
+        "actorRole",
+        "actorId",
+        "executionId",
+        "workspaceId",
+        "workflowState",
+        "ciStatus",
+        "identityRevalidated",
+        "targetGate",
+        "accepted",
+        "code",
+        "observedAt"
+      ],
+      "properties": {
+        "authentication": { "$ref": "#/definitions/decisionAuthentication" },
+        "recoveryId": { "$ref": "#/definitions/safeId" },
+        "kind": { "$ref": "#/definitions/recoveryKind" },
+        "idempotencyKey": { "$ref": "#/definitions/safeId" },
+        "requestDigest": { "$ref": "#/definitions/sha256" },
+        "details": { "$ref": "#/definitions/recoveryDetails" },
+        "actorRole": { "$ref": "#/definitions/role" },
+        "actorId": { "$ref": "#/definitions/safeId" },
+        "executionId": { "$ref": "#/definitions/safeId" },
+        "workspaceId": { "$ref": "#/definitions/safeId" },
+        "workflowState": { "$ref": "#/definitions/workflowState" },
+        "ciStatus": {
+          "enum": ["not-started", "pending", "passed", "failed"]
+        },
+        "identityRevalidated": { "type": "boolean" },
+        "targetGate": {
+          "enum": [
+            "administrative",
+            "identity",
+            "security",
+            "scope",
+            "destructive-effect",
+            "production"
+          ]
+        },
+        "accepted": { "type": "boolean" },
+        "code": {
+          "enum": [
+            "accepted",
+            "contract-invalid",
+            "idempotency-conflict",
+            "identity-not-revalidated",
+            "stale-observation",
+            "recovery-gate-denied"
+          ]
+        },
+        "observedAt": { "$ref": "#/definitions/timestamp" }
+      }
+    },
+    "escalationReason": {
+      "enum": [
+        "identity-drift",
+        "dirty-unexpected-worktree",
+        "verifier-modified-candidate",
+        "candidate-changed-after-approval",
+        "unknown-security-assurance-elevation",
+        "credential-scope-expansion",
+        "destructive-git-or-production-effect",
+        "autonomy-limits-exhausted"
+      ]
+    },
+    "effectAuditRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authentication",
+        "idempotencyKey",
+        "requestDigest",
+        "effect",
+        "allowed",
+        "code",
+        "observedAt",
+        "actorRole",
+        "actorId",
+        "executionId",
+        "workspaceId",
+        "targetTree",
+        "workflowState"
+      ],
+      "properties": {
+        "authentication": { "$ref": "#/definitions/decisionAuthentication" },
+        "idempotencyKey": { "$ref": "#/definitions/safeId" },
+        "requestDigest": { "$ref": "#/definitions/sha256" },
+        "effect": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "actorRole": { "$ref": "#/definitions/role" },
+        "actorId": { "$ref": "#/definitions/safeId" },
+        "executionId": { "$ref": "#/definitions/safeId" },
+        "workspaceId": { "$ref": "#/definitions/safeId" },
+        "targetTree": { "$ref": "#/definitions/sha1" },
+        "workflowState": { "$ref": "#/definitions/workflowState" },
+        "allowed": { "type": "boolean" },
+        "code": {
+          "enum": [
+            "accepted",
+            "contract-invalid",
+            "idempotency-conflict",
+            "identity-drift",
+            "stale-observation",
+            "escalation-required",
+            "publication-denied",
+            "effect-state-denied",
+            "role-authority-denied",
+            "distinct-grant-required"
+          ]
+        },
+        "observedAt": { "$ref": "#/definitions/timestamp" }
+      }
+    }
+  }
+}

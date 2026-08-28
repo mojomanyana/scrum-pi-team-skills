@@ -5,6 +5,7 @@ import executionContextSchema from "./schemas/execution-context.schema.json" wit
 import { containsCredentialShapedContent } from "./credential-shape.js";
 
 export { containsCredentialShapedContent } from "./credential-shape.js";
+export * from "./delivery-authority.js";
 export * from "./lifecycle-receipt.js";
 export * from "./lifecycle-receipt-anchor.js";
 

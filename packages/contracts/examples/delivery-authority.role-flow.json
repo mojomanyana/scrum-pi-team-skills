@@ -1,0 +1,493 @@
+{
+  "contractId": "spts.delivery-authority",
+  "contractVersion": "1.0.0",
+  "authorityDigest": "6d6530e790aa17c4a3aa643f2155f511e91ddd34ef64f1b788eecc04943e1e9b",
+  "controllerStateDigest": "e9cddf9c78b18d20bf5492f14cffa1a6faec53631a8064102db3100be050a945",
+  "activeRole": "flow",
+  "task": {
+    "paca": {
+      "projectId": "SPTS",
+      "taskId": "SPTS-9"
+    },
+    "repository": {
+      "repositoryId": "scrum-pi-team-skills",
+      "remoteName": "origin",
+      "remoteUrl": "https://github.com/mojomanyana/scrum-pi-team-skills.git",
+      "root": "/home/operator/Code/scrum-pi-team-skills",
+      "baseBranch": "main",
+      "baseCommit": "bede5a0484ec3e6532d0b8975f7843289788338d",
+      "baseTree": "1326ca891b087134a1831b66bf1c6dfbfd5a0d3d",
+      "featureBranch": "feature/spts-9-autonomous-delivery-contract"
+    },
+    "assurance": {
+      "profile": "standard",
+      "runId": "run-spts9-r1",
+      "scope": "entire task contract implementation"
+    },
+    "scope": {
+      "objective": "Define governed autonomous delivery authority and workflow contracts",
+      "included": ["Contract schemas types validation tests and documentation"],
+      "excluded": ["Live adapters external effects and remote execution"]
+    }
+  },
+  "roles": {
+    "product": {
+      "role": "product",
+      "actorId": "actor-product",
+      "executionId": "execution-product",
+      "workspaceId": "workspace-product",
+      "access": "product-control"
+    },
+    "flow": {
+      "role": "flow",
+      "actorId": "actor-flow",
+      "executionId": "execution-flow",
+      "workspaceId": "workspace-flow",
+      "access": "orchestrate"
+    },
+    "principal-developer": {
+      "role": "principal-developer",
+      "actorId": "actor-principal",
+      "executionId": "execution-principal",
+      "workspaceId": "workspace-principal",
+      "access": "read-write"
+    },
+    "independent-verifier": {
+      "role": "independent-verifier",
+      "actorId": "actor-verifier",
+      "executionId": "execution-verifier",
+      "workspaceId": "workspace-verifier",
+      "access": "read-only"
+    },
+    "stakeholder": {
+      "role": "stakeholder",
+      "actorId": "actor-stakeholder",
+      "executionId": "execution-stakeholder",
+      "workspaceId": "workspace-stakeholder",
+      "access": "authorize-merge"
+    }
+  },
+  "automaticActions": [
+    "diagnose-repair",
+    "edit",
+    "test",
+    "build",
+    "format",
+    "worktree-create",
+    "worktree-inspect",
+    "worktree-cleanup",
+    "feature-branch-commit",
+    "independent-verification",
+    "feature-push",
+    "pr-create-update",
+    "ci-monitor",
+    "ci-repair",
+    "paca-evidence-update",
+    "paca-status-update",
+    "administrative-recovery"
+  ],
+  "humanGatedActions": [
+    "merge",
+    "force-push",
+    "history-rewrite",
+    "branch-delete",
+    "tag",
+    "release",
+    "artifact-publication",
+    "production-access",
+    "deployment",
+    "real-pi-execution",
+    "credential-expansion",
+    "scope-expansion",
+    "material-architecture-change",
+    "material-product-change",
+    "unknown-assurance-escalation",
+    "unknown-security-escalation"
+  ],
+  "workflow": {
+    "state": "publication-authorized",
+    "checkpoint": {
+      "checkpointId": "checkpoint-spts9-initial",
+      "state": "independent-verification",
+      "candidateTree": "dddddddddddddddddddddddddddddddddddddddd",
+      "activeRepairBudget": "implementation",
+      "observedAt": "2026-08-25T23:00:00.000Z",
+      "attemptUsage": {
+        "implementationAttempts": 1,
+        "verificationRepairAttempts": 0,
+        "ciRepairAttempts": 0
+      },
+      "decisionSequence": 0,
+      "decisionChainDigest": "f9d5bfccc8ff50e5d71c859ba4f3e9d30895d6906a28b37552384b88cd5ad045"
+    },
+    "observations": {
+      "worktree": "clean",
+      "verifierCandidate": "unchanged",
+      "assurance": "known",
+      "security": "known",
+      "credentialScope": "unchanged",
+      "ci": "not-started",
+      "merge": {
+        "status": "not-merged",
+        "targetTree": null,
+        "pullRequestNumber": null,
+        "mergeCommit": null,
+        "observedAt": null,
+        "receiptId": null,
+        "freshThroughEventId": null
+      }
+    },
+    "candidate": {
+      "headCommit": "cccccccccccccccccccccccccccccccccccccccc",
+      "tree": "dddddddddddddddddddddddddddddddddddddddd",
+      "remoteBase": {
+        "expectedCommit": "bede5a0484ec3e6532d0b8975f7843289788338d",
+        "expectedTree": "1326ca891b087134a1831b66bf1c6dfbfd5a0d3d",
+        "observedCommit": "bede5a0484ec3e6532d0b8975f7843289788338d",
+        "observedTree": "1326ca891b087134a1831b66bf1c6dfbfd5a0d3d"
+      },
+      "pullRequest": {
+        "number": 9,
+        "baseBranch": "main",
+        "headBranch": "feature/spts-9-autonomous-delivery-contract",
+        "expectedHeadCommit": "cccccccccccccccccccccccccccccccccccccccc",
+        "observedHeadCommit": "cccccccccccccccccccccccccccccccccccccccc"
+      },
+      "verification": {
+        "verdict": "APPROVE",
+        "reviewedTree": "dddddddddddddddddddddddddddddddddddddddd",
+        "approvalId": "approval-verifier-1",
+        "executionId": "execution-verifier",
+        "workspaceId": "workspace-verifier",
+        "observedAt": "2026-08-25T23:00:00.002Z"
+      }
+    },
+    "audit": [
+      {
+        "eventId": "event-publication-approval",
+        "idempotencyKey": "transition-publication-approval",
+        "requestDigest": "2d6f8d87441aee3f0e2a85c8af2d9e85ac96b16c32139080a8823e96527d80ec",
+        "accepted": true,
+        "code": "accepted",
+        "from": "independent-verification",
+        "to": "publication-authorized",
+        "observedAt": "2026-08-25T23:00:00.001Z",
+        "actorRole": "flow",
+        "actorId": "actor-flow",
+        "candidateTree": "dddddddddddddddddddddddddddddddddddddddd",
+        "executionId": "execution-flow",
+        "workspaceId": "workspace-flow",
+        "authentication": {
+          "sequence": 1,
+          "previousChainDigest": "f9d5bfccc8ff50e5d71c859ba4f3e9d30895d6906a28b37552384b88cd5ad045",
+          "controllerStateDigest": "6cc3c098c828ad21624dc15f46ee584a1f445a413a329020d4580ab30b12f49f",
+          "historicalContext": {
+            "contractId": "spts.delivery-authority",
+            "contractVersion": "1.0.0",
+            "controllerStateDigest": "6cc3c098c828ad21624dc15f46ee584a1f445a413a329020d4580ab30b12f49f",
+            "authorityDigest": "6d6530e790aa17c4a3aa643f2155f511e91ddd34ef64f1b788eecc04943e1e9b",
+            "meteringDigest": "4a0d0538cfd31feb9756f854130685678110d9c7489e7f850db7583385bf1df9",
+            "meteringObservedAt": "2026-08-25T23:00:00.001Z",
+            "activeRole": "flow",
+            "governance": {
+              "systemOfRecord": "paca",
+              "process": "local-pi",
+              "governedBy": "pi-daddy",
+              "supervisor": "herdr",
+              "externalEffects": "decision-only"
+            },
+            "task": {
+              "paca": {
+                "projectId": "SPTS",
+                "taskId": "SPTS-9"
+              },
+              "repository": {
+                "repositoryId": "scrum-pi-team-skills",
+                "remoteName": "origin",
+                "remoteUrl": "https://github.com/mojomanyana/scrum-pi-team-skills.git",
+                "root": "/home/operator/Code/scrum-pi-team-skills",
+                "baseBranch": "main",
+                "baseCommit": "bede5a0484ec3e6532d0b8975f7843289788338d",
+                "baseTree": "1326ca891b087134a1831b66bf1c6dfbfd5a0d3d",
+                "featureBranch": "feature/spts-9-autonomous-delivery-contract"
+              },
+              "assurance": {
+                "profile": "standard",
+                "runId": "run-spts9-r1",
+                "scope": "entire task contract implementation"
+              },
+              "scope": {
+                "objective": "Define governed autonomous delivery authority and workflow contracts",
+                "included": [
+                  "Contract schemas types validation tests and documentation"
+                ],
+                "excluded": [
+                  "Live adapters external effects and remote execution"
+                ]
+              }
+            },
+            "roles": {
+              "product": {
+                "role": "product",
+                "actorId": "actor-product",
+                "executionId": "execution-product",
+                "workspaceId": "workspace-product",
+                "access": "product-control"
+              },
+              "flow": {
+                "role": "flow",
+                "actorId": "actor-flow",
+                "executionId": "execution-flow",
+                "workspaceId": "workspace-flow",
+                "access": "orchestrate"
+              },
+              "principal-developer": {
+                "role": "principal-developer",
+                "actorId": "actor-principal",
+                "executionId": "execution-principal",
+                "workspaceId": "workspace-principal",
+                "access": "read-write"
+              },
+              "independent-verifier": {
+                "role": "independent-verifier",
+                "actorId": "actor-verifier",
+                "executionId": "execution-verifier",
+                "workspaceId": "workspace-verifier",
+                "access": "read-only"
+              },
+              "stakeholder": {
+                "role": "stakeholder",
+                "actorId": "actor-stakeholder",
+                "executionId": "execution-stakeholder",
+                "workspaceId": "workspace-stakeholder",
+                "access": "authorize-merge"
+              }
+            },
+            "workflowCheckpoint": {
+              "checkpointId": "checkpoint-spts9-initial",
+              "state": "independent-verification",
+              "candidateTree": "dddddddddddddddddddddddddddddddddddddddd",
+              "activeRepairBudget": "implementation",
+              "observedAt": "2026-08-25T23:00:00.000Z",
+              "attemptUsage": {
+                "implementationAttempts": 1,
+                "verificationRepairAttempts": 0,
+                "ciRepairAttempts": 0
+              },
+              "decisionSequence": 0,
+              "decisionChainDigest": "f9d5bfccc8ff50e5d71c859ba4f3e9d30895d6906a28b37552384b88cd5ad045"
+            },
+            "workflowState": "independent-verification",
+            "activeRepairBudget": "implementation",
+            "observations": {
+              "worktree": "clean",
+              "verifierCandidate": "unchanged",
+              "assurance": "known",
+              "security": "known",
+              "credentialScope": "unchanged",
+              "ci": "not-started",
+              "merge": {
+                "status": "not-merged",
+                "targetTree": null,
+                "pullRequestNumber": null,
+                "mergeCommit": null,
+                "observedAt": null,
+                "receiptId": null,
+                "freshThroughEventId": null
+              }
+            },
+            "candidate": {
+              "headCommit": "cccccccccccccccccccccccccccccccccccccccc",
+              "tree": "dddddddddddddddddddddddddddddddddddddddd",
+              "remoteBase": {
+                "expectedCommit": "bede5a0484ec3e6532d0b8975f7843289788338d",
+                "expectedTree": "1326ca891b087134a1831b66bf1c6dfbfd5a0d3d",
+                "observedCommit": "bede5a0484ec3e6532d0b8975f7843289788338d",
+                "observedTree": "1326ca891b087134a1831b66bf1c6dfbfd5a0d3d"
+              },
+              "pullRequest": {
+                "number": 9,
+                "baseBranch": "main",
+                "headBranch": "feature/spts-9-autonomous-delivery-contract",
+                "expectedHeadCommit": "cccccccccccccccccccccccccccccccccccccccc",
+                "observedHeadCommit": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "verification": {
+                "verdict": "APPROVE",
+                "reviewedTree": "dddddddddddddddddddddddddddddddddddddddd",
+                "approvalId": "approval-verifier-1",
+                "executionId": "execution-verifier",
+                "workspaceId": "workspace-verifier",
+                "observedAt": "2026-08-25T23:00:00.000Z"
+              }
+            },
+            "evidence": [
+              {
+                "evidenceId": "evidence-verification-1",
+                "task": {
+                  "projectId": "SPTS",
+                  "taskId": "SPTS-9"
+                },
+                "repository": {
+                  "repositoryId": "scrum-pi-team-skills",
+                  "branch": "feature/spts-9-autonomous-delivery-contract",
+                  "commit": "cccccccccccccccccccccccccccccccccccccccc",
+                  "tree": "dddddddddddddddddddddddddddddddddddddddd"
+                },
+                "actor": {
+                  "role": "independent-verifier",
+                  "actorId": "actor-verifier",
+                  "executionId": "execution-verifier",
+                  "workspaceId": "workspace-verifier"
+                },
+                "assurance": {
+                  "runId": "run-spts9-r1",
+                  "profile": "standard",
+                  "phase": "verification"
+                },
+                "verification": {
+                  "verdict": "APPROVE",
+                  "reviewedTree": "dddddddddddddddddddddddddddddddddddddddd",
+                  "approvalId": "approval-verifier-1"
+                },
+                "pullRequest": {
+                  "number": 9,
+                  "baseBranch": "main",
+                  "headBranch": "feature/spts-9-autonomous-delivery-contract",
+                  "headCommit": "cccccccccccccccccccccccccccccccccccccccc"
+                },
+                "ci": {
+                  "runId": null,
+                  "checkId": null,
+                  "verdict": null
+                },
+                "pacaUpdateId": "paca-update-evidence-9",
+                "observedAt": "2026-08-25T23:00:00.000Z",
+                "freshThroughEventId": "checkpoint-spts9-initial",
+                "correlationId": "correlation-spts9-1",
+                "idempotencyKey": "evidence-verification-spts9-1",
+                "evidenceDigest": "b833b0c591cfb919c752c8dde4fad70cd5e91f775090bde6a3eb813f8283f182"
+              }
+            ],
+            "autonomy": {
+              "limits": {
+                "implementationAttempts": 3,
+                "verificationRepairAttempts": 2,
+                "ciRepairAttempts": 2,
+                "durationMinutes": 480,
+                "concurrentAgents": 2,
+                "worktrees": 3,
+                "evidenceBytes": 1048576,
+                "cancellationBehavior": "stop-after-current-atomic-operation"
+              },
+              "usage": {
+                "implementationAttempts": 1,
+                "verificationRepairAttempts": 0,
+                "ciRepairAttempts": 0,
+                "elapsedMinutes": 60,
+                "concurrentAgents": 2,
+                "worktrees": 2,
+                "evidenceBytes": 1158,
+                "cancelled": false
+              }
+            },
+            "effectGrants": [],
+            "requestedEffects": [],
+            "activeEscalations": []
+          },
+          "historicalContextDigest": "fa2dffba7b6d427bc2df3ec841700cffe667c7c52c8bb64f9e5814dfa83a2f57",
+          "resultingStateDigest": "93b234bcbf6512a8c2458ef3dba1acc5a203a55de7691af9dcfdc671cd5d9d73",
+          "resultingChainDigest": "79ed9f38c52ab666cd5af1ecf108b92c515278f6595f8ea2c8cbc13c7b841397"
+        }
+      }
+    ],
+    "decisionChain": {
+      "sequence": 1,
+      "digest": "79ed9f38c52ab666cd5af1ecf108b92c515278f6595f8ea2c8cbc13c7b841397"
+    }
+  },
+  "evidence": [
+    {
+      "evidenceId": "evidence-verification-1",
+      "task": {
+        "projectId": "SPTS",
+        "taskId": "SPTS-9"
+      },
+      "repository": {
+        "repositoryId": "scrum-pi-team-skills",
+        "branch": "feature/spts-9-autonomous-delivery-contract",
+        "commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "tree": "dddddddddddddddddddddddddddddddddddddddd"
+      },
+      "actor": {
+        "role": "independent-verifier",
+        "actorId": "actor-verifier",
+        "executionId": "execution-verifier",
+        "workspaceId": "workspace-verifier"
+      },
+      "assurance": {
+        "runId": "run-spts9-r1",
+        "profile": "standard",
+        "phase": "verification"
+      },
+      "verification": {
+        "verdict": "APPROVE",
+        "reviewedTree": "dddddddddddddddddddddddddddddddddddddddd",
+        "approvalId": "approval-verifier-1"
+      },
+      "pullRequest": {
+        "number": 9,
+        "baseBranch": "main",
+        "headBranch": "feature/spts-9-autonomous-delivery-contract",
+        "headCommit": "cccccccccccccccccccccccccccccccccccccccc"
+      },
+      "ci": {
+        "runId": null,
+        "checkId": null,
+        "verdict": null
+      },
+      "pacaUpdateId": "paca-update-evidence-9",
+      "observedAt": "2026-08-25T23:00:00.002Z",
+      "freshThroughEventId": "event-publication-approval",
+      "correlationId": "correlation-spts9-1",
+      "idempotencyKey": "evidence-verification-spts9-1",
+      "evidenceDigest": "8c6515be63f05e84024943d2cc057e129b9d5c6084e32372e7caf3ce932839d0"
+    }
+  ],
+  "autonomy": {
+    "limits": {
+      "implementationAttempts": 3,
+      "verificationRepairAttempts": 2,
+      "ciRepairAttempts": 2,
+      "durationMinutes": 480,
+      "concurrentAgents": 2,
+      "worktrees": 3,
+      "evidenceBytes": 1048576,
+      "cancellationBehavior": "stop-after-current-atomic-operation"
+    },
+    "usage": {
+      "implementationAttempts": 1,
+      "verificationRepairAttempts": 0,
+      "ciRepairAttempts": 0,
+      "elapsedMinutes": 60,
+      "concurrentAgents": 2,
+      "worktrees": 2,
+      "evidenceBytes": 1160,
+      "cancelled": false
+    }
+  },
+  "effectGrants": [],
+  "requestedEffects": [],
+  "administrativeRecoveries": [],
+  "activeEscalations": [],
+  "effectAudit": [],
+  "governance": {
+    "systemOfRecord": "paca",
+    "process": "local-pi",
+    "governedBy": "pi-daddy",
+    "supervisor": "herdr",
+    "externalEffects": "decision-only"
+  },
+  "meteringDigest": "49c862c4b8c07829df12dd7df25d7bc50070661e500b4b9b9750f83c35decd43",
+  "meteringObservedAt": "2026-08-25T23:00:00.003Z"
+}
