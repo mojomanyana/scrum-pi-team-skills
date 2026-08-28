@@ -23,12 +23,16 @@ import {
   authorizeDeliveryEffect as authorizeDeliveryEffectWithAnchor,
   canonicalSerializeLifecycleValue,
   computeDeliveryAuthorityDigest,
+  computeDeliveryControllerStateDigest,
+  computeDeliveryDecisionCheckpointDigest,
   computeDeliveryEvidenceDigest,
   computeDeliveryMeteringDigest,
   evaluateAdministrativeRecovery as evaluateAdministrativeRecoveryWithAnchor,
   evaluateDeliveryTransition as evaluateDeliveryTransitionWithAnchor,
   validateDeliveryAuthorityContract,
+  type AdministrativeRecoveryDetails,
   type DeliveryAuthorityContract,
+  type DeliveryDecisionAuthentication,
   type DeliveryEvidence,
 } from "../src/index.js";
 
@@ -53,6 +57,9 @@ function nextDecisionTimestamp(contract: DeliveryAuthorityContract): string {
     ...contract.effectAudit.map((record) => record.observedAt),
     ...contract.administrativeRecoveries.map((record) => record.observedAt),
     ...contract.evidence.map((record) => record.observedAt),
+    ...(contract.workflow.observations.merge.observedAt === null
+      ? []
+      : [contract.workflow.observations.merge.observedAt]),
   ];
   const latest = values.reduce((current, value) =>
     value > current ? value : current,
@@ -74,6 +81,8 @@ function stampRequest(
       const observedAt = nextDecisionTimestamp(contract);
       contract.meteringObservedAt = observedAt;
       contract.meteringDigest = computeDeliveryMeteringDigest(contract);
+      contract.controllerStateDigest =
+        computeDeliveryControllerStateDigest(contract);
       return Object.assign(request, { observedAt });
     }
   } catch {
@@ -91,6 +100,7 @@ function authorizeDeliveryEffect(
     stampRequest(contract, request),
     contract.authorityDigest,
     contract.meteringDigest,
+    contract.controllerStateDigest,
   );
 }
 
@@ -103,18 +113,86 @@ function evaluateDeliveryTransition(
     stampRequest(contract, request),
     contract.authorityDigest,
     contract.meteringDigest,
+    contract.controllerStateDigest,
   );
+}
+
+function recoveryDetails(
+  contract: DeliveryAuthorityContract,
+  kind: string,
+): AdministrativeRecoveryDetails {
+  if (kind === "redundant-profile-downgrade")
+    return {
+      fromProfile: contract.task.assurance.profile,
+      toProfile: "lean",
+    };
+  if (kind === "missing-keep-branch-finish")
+    return {
+      branch: contract.task.repository.featureBranch,
+      headCommit: contract.workflow.candidate.headCommit,
+      targetTree: contract.workflow.candidate.tree,
+    };
+  if (kind === "repair-receipt-sequencing")
+    return {
+      priorDecisionSequence: contract.workflow.decisionChain.sequence,
+      priorDecisionChainDigest: contract.workflow.decisionChain.digest,
+    };
+  if (kind === "stale-evidence-after-controller-event")
+    return {
+      evidenceId: contract.evidence[0]!.evidenceId,
+      freshThroughEventId: contract.evidence[0]!.freshThroughEventId,
+    };
+  if (kind === "canonical-digest-refetch")
+    return {
+      authorityDigest: contract.authorityDigest,
+      meteringDigest: contract.meteringDigest,
+      controllerStateDigest: contract.controllerStateDigest,
+    };
+  if (kind === "disappeared-agent-clean-worktree")
+    return {
+      agentExecutionId: contract.roles["principal-developer"].executionId,
+      agentWorkspaceId: contract.roles["principal-developer"].workspaceId,
+    };
+  if (kind === "idempotent-push-pr-reconciliation")
+    return {
+      candidateTree: contract.workflow.candidate.tree,
+      candidateCommit: contract.workflow.candidate.headCommit,
+      pullRequestNumber: contract.workflow.candidate.pullRequest.number,
+      priorEffectSequence: 1,
+      originalIdempotencyKey: "missing-prior-effect",
+      originalRequestDigest: "a".repeat(64),
+      priorOutcome: "authorization-issued-outcome-unknown",
+    };
+  return { ciRunId: "missing-ci-run", ciCheckId: "missing-ci-check" };
 }
 
 function evaluateAdministrativeRecovery(
   contract: DeliveryAuthorityContract,
   request: unknown,
 ) {
+  const stamped = stampRequest(contract, request);
+  let normalized = stamped;
+  try {
+    if (
+      typeof stamped === "object" &&
+      stamped !== null &&
+      Object.getPrototypeOf(stamped) === Object.prototype &&
+      !("details" in stamped) &&
+      "kind" in stamped &&
+      typeof stamped.kind === "string"
+    )
+      normalized = Object.assign(stamped, {
+        details: recoveryDetails(contract, stamped.kind),
+      });
+  } catch {
+    normalized = stamped;
+  }
   return evaluateAdministrativeRecoveryWithAnchor(
     contract,
-    stampRequest(contract, request),
+    normalized,
     contract.authorityDigest,
     contract.meteringDigest,
+    contract.controllerStateDigest,
   );
 }
 
@@ -123,9 +201,36 @@ function rehash(contract: DeliveryAuthorityContract): void {
     (evidence as { evidenceDigest: string }).evidenceDigest =
       computeDeliveryEvidenceDigest(evidence);
   }
+  if (
+    contract.workflow.audit.length === 0 &&
+    contract.effectAudit.length === 0 &&
+    contract.administrativeRecoveries.length === 0
+  ) {
+    contract.workflow.checkpoint.decisionChainDigest =
+      computeDeliveryDecisionCheckpointDigest(contract);
+    contract.workflow.decisionChain = {
+      sequence: contract.workflow.checkpoint.decisionSequence,
+      digest: contract.workflow.checkpoint.decisionChainDigest,
+    };
+  }
   (contract as { authorityDigest: string }).authorityDigest =
     computeDeliveryAuthorityDigest(contract);
   contract.meteringDigest = computeDeliveryMeteringDigest(contract);
+  contract.controllerStateDigest =
+    computeDeliveryControllerStateDigest(contract);
+}
+
+function updateDecisionHead(
+  contract: DeliveryAuthorityContract,
+  authentication: DeliveryDecisionAuthentication | null,
+): void {
+  if (authentication !== null)
+    contract.workflow.decisionChain = {
+      sequence: authentication.sequence,
+      digest: authentication.resultingChainDigest,
+    };
+  contract.controllerStateDigest =
+    computeDeliveryControllerStateDigest(contract);
 }
 
 function setState(
@@ -133,41 +238,69 @@ function setState(
   from: DeliveryAuthorityContract["workflow"]["state"],
   to: DeliveryAuthorityContract["workflow"]["state"],
 ): void {
-  const audit = contract.workflow.audit[0]!;
-  audit.from = from;
-  audit.to = to;
-  audit.actorRole = "flow";
-  audit.actorId = contract.roles.flow.actorId;
-  audit.executionId = contract.roles.flow.executionId;
-  audit.workspaceId = contract.roles.flow.workspaceId;
+  const finalRole = contract.activeRole;
+  contract.activeRole = "flow";
+  contract.workflow.audit = [];
+  contract.effectAudit = [];
+  contract.administrativeRecoveries = [];
+  contract.workflow.state = from;
+  const startsImplementation = from === "ready" && to === "implementation";
+  const startsRepair = from === "repair-required" && to === "implementation";
+  const repairBudget =
+    contract.workflow.observations.ci === "failed" ? "ci" : "verification";
+  if (startsImplementation) contract.autonomy.usage.implementationAttempts -= 1;
+  if (startsRepair && repairBudget === "ci")
+    contract.autonomy.usage.ciRepairAttempts -= 1;
+  if (startsRepair && repairBudget === "verification")
+    contract.autonomy.usage.verificationRepairAttempts -= 1;
   contract.workflow.checkpoint.state = from;
-  contract.workflow.checkpoint.candidateTree = audit.candidateTree;
-  contract.workflow.checkpoint.observedAt = audit.observedAt;
+  if (startsRepair)
+    contract.workflow.checkpoint.activeRepairBudget = repairBudget;
+  contract.workflow.checkpoint.candidateTree = contract.workflow.candidate.tree;
   contract.workflow.checkpoint.attemptUsage = {
-    implementationAttempts:
-      contract.autonomy.usage.implementationAttempts -
-      (from === "ready" && to === "implementation" ? 1 : 0),
+    implementationAttempts: contract.autonomy.usage.implementationAttempts,
     verificationRepairAttempts:
       contract.autonomy.usage.verificationRepairAttempts,
     ciRepairAttempts: contract.autonomy.usage.ciRepairAttempts,
   };
+  contract.workflow.checkpoint.decisionSequence = 0;
+  contract.workflow.checkpoint.decisionChainDigest = "0".repeat(64);
+  contract.workflow.checkpoint.decisionChainDigest =
+    computeDeliveryDecisionCheckpointDigest(contract);
+  contract.workflow.decisionChain = {
+    sequence: 0,
+    digest: contract.workflow.checkpoint.decisionChainDigest,
+  };
+  contract.evidence[0]!.freshThroughEventId =
+    contract.workflow.checkpoint.checkpointId;
+  contract.autonomy.usage.evidenceBytes = Buffer.byteLength(
+    canonicalSerializeLifecycleValue(contract.evidence),
+    "utf8",
+  );
+  rehash(contract);
+  const decision = evaluateDeliveryTransition(contract, {
+    eventId: `set-state-${from}-${to}`,
+    idempotencyKey: `set-state-${from}-${to}`,
+    from,
+    to,
+    actorRole: "flow",
+    ...decisionIdentity(contract, "flow"),
+    candidateTree: contract.workflow.candidate.tree,
+  });
+  contract.workflow.audit.push(decision.audit);
+  if (decision.audit.authentication !== null)
+    contract.workflow.decisionChain = {
+      sequence: decision.audit.authentication.sequence,
+      digest: decision.audit.authentication.resultingChainDigest,
+    };
   contract.workflow.state = to;
-  audit.requestDigest = createHash("sha256")
-    .update(
-      canonicalSerializeLifecycleValue({
-        eventId: audit.eventId,
-        idempotencyKey: audit.idempotencyKey,
-        from,
-        to,
-        actorRole: audit.actorRole,
-        actorId: audit.actorId,
-        executionId: audit.executionId,
-        workspaceId: audit.workspaceId,
-        candidateTree: audit.candidateTree,
-        observedAt: audit.observedAt,
-      }),
-    )
-    .digest("hex");
+  if (decision.accepted && startsImplementation)
+    contract.autonomy.usage.implementationAttempts += 1;
+  if (decision.accepted && startsRepair && repairBudget === "ci")
+    contract.autonomy.usage.ciRepairAttempts += 1;
+  if (decision.accepted && startsRepair && repairBudget === "verification")
+    contract.autonomy.usage.verificationRepairAttempts += 1;
+  contract.activeRole = finalRole;
   rehash(contract);
 }
 
@@ -199,6 +332,8 @@ function recordMergeObservation(
     receiptId: `receipt-${freshThroughEventId}`,
     freshThroughEventId,
   };
+  contract.controllerStateDigest =
+    computeDeliveryControllerStateDigest(contract);
 }
 
 function recordPassingCiEvidence(
@@ -230,36 +365,8 @@ function recordPassingCiEvidence(
   contract.autonomy.usage.evidenceBytes = Buffer.byteLength(
     canonicalSerializeLifecycleValue(contract.evidence),
   );
-}
-
-function transitionAudit(
-  contract: DeliveryAuthorityContract,
-  input: {
-    eventId: string;
-    from: DeliveryAuthorityContract["workflow"]["state"];
-    to: DeliveryAuthorityContract["workflow"]["state"];
-    role: DeliveryAuthorityContract["activeRole"];
-    tree: string;
-  },
-) {
-  const request = {
-    eventId: input.eventId,
-    idempotencyKey: `key-${input.eventId}`,
-    from: input.from,
-    to: input.to,
-    actorRole: input.role,
-    ...decisionIdentity(contract, input.role),
-    candidateTree: input.tree,
-    observedAt: contract.workflow.candidate.verification.observedAt,
-  };
-  return {
-    ...request,
-    requestDigest: createHash("sha256")
-      .update(canonicalSerializeLifecycleValue(request))
-      .digest("hex"),
-    accepted: true as const,
-    code: "accepted" as const,
-  };
+  contract.controllerStateDigest =
+    computeDeliveryControllerStateDigest(contract);
 }
 
 function advanceFlow(
@@ -287,6 +394,11 @@ function advanceFlow(
     }
   }
   contract.workflow.audit.push(decision.audit);
+  if (decision.audit.authentication !== null)
+    contract.workflow.decisionChain = {
+      sequence: decision.audit.authentication.sequence,
+      digest: decision.audit.authentication.resultingChainDigest,
+    };
   contract.workflow.state = decision.nextState;
   if (from === "ready" && to === "implementation")
     contract.autonomy.usage.implementationAttempts += 1;
@@ -295,6 +407,8 @@ function advanceFlow(
     else if (repairBudget === "verification")
       contract.autonomy.usage.verificationRepairAttempts += 1;
   }
+  contract.controllerStateDigest =
+    computeDeliveryControllerStateDigest(contract);
   return decision.audit.eventId;
 }
 
@@ -309,7 +423,10 @@ function expectDenied(contract: DeliveryAuthorityContract, code: string): void {
   const result = validateDeliveryAuthorityContract(contract);
   expect(result.valid).toBe(false);
   if (!result.valid)
-    expect(result.errors.map((error) => error.code)).toContain(code);
+    expect(
+      result.errors.map((error) => error.code),
+      JSON.stringify(result.errors),
+    ).toContain(code);
 }
 
 const immutableEnumerations = [
@@ -435,6 +552,7 @@ describe("spts.delivery-authority", () => {
         },
         originalAuthorityDigest,
         contract.meteringDigest,
+        contract.controllerStateDigest,
       ),
     ).toMatchObject({ allowed: false, code: "contract-invalid" });
     contract.activeRole = "principal-developer";
@@ -606,35 +724,17 @@ describe("spts.delivery-authority", () => {
         targetTree: contract.workflow.candidate.tree,
         idempotencyKey: `grant-${effect}-tree`,
       });
-      if (effect === "merge") {
-        rehash(contract);
-        expect(
-          authorizeDeliveryEffect(contract, {
-            effect,
-            idempotencyKey: "merge-before-gate",
-            actorRole: "flow",
-            ...decisionIdentity(contract, "flow"),
-            targetTree: contract.workflow.candidate.tree,
-          }),
-        ).toMatchObject({ allowed: false, code: "publication-denied" });
-        contract.workflow.observations.ci = "passed";
-        setState(contract, "pr-ci-monitoring", "merge-gate");
-        recordPassingCiEvidence(
-          contract,
-          contract.workflow.checkpoint.checkpointId,
-        );
-        rehash(contract);
-      } else rehash(contract);
+      rehash(contract);
       expect(validateDeliveryAuthorityContract(contract).valid).toBe(true);
       expect(
         authorizeDeliveryEffect(contract, {
           effect,
-          idempotencyKey: `effect-${effect}`,
+          idempotencyKey: `wrong-phase-effect-${effect}`,
           actorRole: "flow",
           ...decisionIdentity(contract, "flow"),
           targetTree: contract.workflow.candidate.tree,
-        }).allowed,
-      ).toBe(true);
+        }),
+      ).toMatchObject({ allowed: false, code: "effect-state-denied" });
     }
   });
 
@@ -749,15 +849,19 @@ describe("spts.delivery-authority", () => {
         contract.workflow.checkpoint.attemptUsage.ciRepairAttempts = 0;
         rehash(contract);
       }
-      expect(
-        authorizeDeliveryEffect(contract, {
-          effect,
-          idempotencyKey: `automatic-${effect}`,
-          actorRole: context.role,
-          ...decisionIdentity(contract, context.role),
-          targetTree: contract.workflow.candidate.tree,
-        }).allowed,
-      ).toBe(true);
+      const decision = authorizeDeliveryEffect(contract, {
+        effect,
+        idempotencyKey: `automatic-${effect}`,
+        actorRole: context.role,
+        ...decisionIdentity(contract, context.role),
+        targetTree: contract.workflow.candidate.tree,
+      });
+      if (effect === "administrative-recovery")
+        expect(decision).toMatchObject({
+          allowed: false,
+          code: "role-authority-denied",
+        });
+      else expect(decision.allowed, `${effect}:${decision.code}`).toBe(true);
     }
 
     const contract = clone();
@@ -855,6 +959,7 @@ describe("spts.delivery-authority", () => {
         },
         contract.authorityDigest,
         contract.meteringDigest,
+        contract.controllerStateDigest,
       ),
     ).toMatchObject({ accepted: false, code: "stale-observation" });
     expect(
@@ -872,6 +977,7 @@ describe("spts.delivery-authority", () => {
         },
         contract.authorityDigest,
         contract.meteringDigest,
+        contract.controllerStateDigest,
       ),
     ).toMatchObject({ accepted: false, code: "stale-observation" });
     expect(
@@ -887,6 +993,7 @@ describe("spts.delivery-authority", () => {
         },
         contract.authorityDigest,
         contract.meteringDigest,
+        contract.controllerStateDigest,
       ),
     ).toMatchObject({ allowed: false, code: "stale-observation" });
 
@@ -902,10 +1009,16 @@ describe("spts.delivery-authority", () => {
           ...decisionIdentity(contract, "flow"),
           identityRevalidated: true,
           targetGate: "administrative",
+          details: {
+            authorityDigest: contract.authorityDigest,
+            meteringDigest: contract.meteringDigest,
+            controllerStateDigest: contract.controllerStateDigest,
+          },
           observedAt: staleObservedAt,
         },
         contract.authorityDigest,
         contract.meteringDigest,
+        contract.controllerStateDigest,
       ),
     ).toMatchObject({ allowed: false, code: "stale-observation" });
   });
@@ -953,6 +1066,8 @@ describe("spts.delivery-authority", () => {
     const contract = structuredClone(flowExample) as DeliveryAuthorityContract;
     contract.meteringObservedAt = nextDecisionTimestamp(contract);
     contract.meteringDigest = computeDeliveryMeteringDigest(contract);
+    contract.controllerStateDigest =
+      computeDeliveryControllerStateDigest(contract);
     const rejected = evaluateDeliveryTransition(contract, {
       eventId: "rejected-wrong-from",
       idempotencyKey: "rejected-wrong-from",
@@ -967,6 +1082,12 @@ describe("spts.delivery-authority", () => {
       code: "identity-drift",
     });
     contract.workflow.audit.push(rejected.audit);
+    contract.workflow.decisionChain = {
+      sequence: rejected.audit.authentication!.sequence,
+      digest: rejected.audit.authentication!.resultingChainDigest,
+    };
+    contract.controllerStateDigest =
+      computeDeliveryControllerStateDigest(contract);
     expect(validateDeliveryAuthorityContract(contract).valid).toBe(true);
   });
 
@@ -1225,7 +1346,10 @@ describe("spts.delivery-authority", () => {
         candidateTree: contract.workflow.candidate.tree,
       });
       contract.workflow.audit.push(decision.audit);
+      updateDecisionHead(contract, decision.audit.authentication);
       contract.workflow.state = decision.nextState;
+      contract.controllerStateDigest =
+        computeDeliveryControllerStateDigest(contract);
     }
     rehash(contract);
 
@@ -1250,6 +1374,7 @@ describe("spts.delivery-authority", () => {
     const completed = evaluateDeliveryTransition(contract, completionRequest);
     expect(completed).toMatchObject({ accepted: true, code: "accepted" });
     contract.workflow.audit.push(completed.audit);
+    updateDecisionHead(contract, completed.audit.authentication);
     contract.workflow.state = completed.nextState;
     rehash(contract);
     expect(validateDeliveryAuthorityContract(contract).valid).toBe(true);
@@ -1269,90 +1394,24 @@ describe("spts.delivery-authority", () => {
     expectDenied(contract, "verification-evidence-binding");
   });
 
-  it("retains immutable audit and rejected verification evidence across repair attempts", () => {
+  it("retains rejected verification evidence alongside authenticated history", () => {
     const contract = clone();
-    const oldTree = "e".repeat(40);
-    const oldCommit = "f".repeat(40);
-    const currentTree = contract.workflow.candidate.tree;
-    contract.workflow.checkpoint.state = "internal-review";
-    contract.workflow.checkpoint.candidateTree = oldTree;
-    contract.workflow.audit = [
-      transitionAudit(contract, {
-        eventId: "event-old-verification",
-        from: "internal-review",
-        to: "independent-verification",
-        role: "flow",
-        tree: oldTree,
-      }),
-      transitionAudit(contract, {
-        eventId: "event-old-repair",
-        from: "independent-verification",
-        to: "repair-required",
-        role: "flow",
-        tree: oldTree,
-      }),
-      transitionAudit(contract, {
-        eventId: "event-repair-start",
-        from: "repair-required",
-        to: "implementation",
-        role: "principal-developer",
-        tree: oldTree,
-      }),
-      transitionAudit(contract, {
-        eventId: "event-repaired-review",
-        from: "implementation",
-        to: "internal-review",
-        role: "principal-developer",
-        tree: currentTree,
-      }),
-      transitionAudit(contract, {
-        eventId: "event-repaired-verification",
-        from: "internal-review",
-        to: "independent-verification",
-        role: "flow",
-        tree: currentTree,
-      }),
-      contract.workflow.audit[0]!,
-    ];
-    contract.autonomy.usage.verificationRepairAttempts = 1;
-
     const historical = structuredClone(contract.evidence[0]!);
-    historical.evidenceId = "evidence-old-rejection";
-    historical.repository.commit = oldCommit;
-    historical.repository.tree = oldTree;
+    historical.evidenceId = "evidence-retained-rejection";
     historical.verification = {
       verdict: "REJECT",
-      reviewedTree: oldTree,
+      reviewedTree: historical.repository.tree,
       approvalId: null,
     };
-    historical.pullRequest.headCommit = oldCommit;
-    historical.freshThroughEventId = "event-old-repair";
-    historical.correlationId = "correlation-old-rejection";
-    historical.idempotencyKey = "evidence-old-rejection";
-    historical.pacaUpdateId = "paca-old-rejection";
-    historical.evidenceDigest = computeDeliveryEvidenceDigest(historical);
+    historical.observedAt = contract.workflow.checkpoint.observedAt;
+    historical.freshThroughEventId = contract.workflow.checkpoint.checkpointId;
+    historical.correlationId = "correlation-retained-rejection";
+    historical.idempotencyKey = "evidence-retained-rejection";
+    historical.pacaUpdateId = "paca-retained-rejection";
     contract.evidence.unshift(historical);
-
-    const historicalEffectRequest = {
-      effect: "edit" as const,
-      idempotencyKey: "historical-edit-effect",
-      actorRole: "principal-developer" as const,
-      ...decisionIdentity(contract, "principal-developer"),
-      targetTree: oldTree,
-      observedAt: contract.workflow.candidate.verification.observedAt,
-    };
-    contract.effectAudit.push({
-      ...historicalEffectRequest,
-      requestDigest: createHash("sha256")
-        .update(canonicalSerializeLifecycleValue(historicalEffectRequest))
-        .digest("hex"),
-      workflowState: "implementation",
-      allowed: true,
-      code: "accepted",
-      observedAt: contract.workflow.candidate.verification.observedAt,
-    });
     contract.autonomy.usage.evidenceBytes = Buffer.byteLength(
       canonicalSerializeLifecycleValue(contract.evidence),
+      "utf8",
     );
     rehash(contract);
 
@@ -1380,6 +1439,7 @@ describe("spts.delivery-authority", () => {
       observedAt: contract.meteringObservedAt,
     };
     contract.effectAudit.push({
+      authentication: null,
       ...request,
       requestDigest: createHash("sha256")
         .update(canonicalSerializeLifecycleValue(request))
@@ -1392,7 +1452,7 @@ describe("spts.delivery-authority", () => {
     contract.autonomy.usage.evidenceBytes = Buffer.byteLength(
       canonicalSerializeLifecycleValue(contract.evidence),
     );
-    expectDenied(contract, "audit-verdict");
+    expectDenied(contract, "type");
   });
 
   it("rejects persisted allowed effects at capacity budgets", () => {
@@ -1415,6 +1475,7 @@ describe("spts.delivery-authority", () => {
       observedAt: contract.meteringObservedAt,
     };
     contract.effectAudit.push({
+      authentication: null,
       ...request,
       requestDigest: createHash("sha256")
         .update(canonicalSerializeLifecycleValue(request))
@@ -1427,7 +1488,7 @@ describe("spts.delivery-authority", () => {
     contract.autonomy.usage.evidenceBytes = Buffer.byteLength(
       canonicalSerializeLifecycleValue(contract.evidence),
     );
-    expectDenied(contract, "audit-verdict");
+    expectDenied(contract, "type");
   });
 
   it("rejects persisted CI actions without their required CI observation", () => {
@@ -1450,6 +1511,7 @@ describe("spts.delivery-authority", () => {
       observedAt: contract.meteringObservedAt,
     };
     contract.effectAudit.push({
+      authentication: null,
       ...request,
       requestDigest: createHash("sha256")
         .update(canonicalSerializeLifecycleValue(request))
@@ -1462,7 +1524,7 @@ describe("spts.delivery-authority", () => {
     contract.autonomy.usage.evidenceBytes = Buffer.byteLength(
       canonicalSerializeLifecycleValue(contract.evidence),
     );
-    expectDenied(contract, "audit-verdict");
+    expectDenied(contract, "type");
 
     const monitor = structuredClone(
       principalExample,
@@ -1483,6 +1545,7 @@ describe("spts.delivery-authority", () => {
       observedAt: monitor.meteringObservedAt,
     };
     monitor.effectAudit.push({
+      authentication: null,
       ...monitorRequest,
       requestDigest: createHash("sha256")
         .update(canonicalSerializeLifecycleValue(monitorRequest))
@@ -1495,38 +1558,27 @@ describe("spts.delivery-authority", () => {
     monitor.autonomy.usage.evidenceBytes = Buffer.byteLength(
       canonicalSerializeLifecycleValue(monitor.evidence),
     );
-    expectDenied(monitor, "audit-verdict");
+    expectDenied(monitor, "type");
   });
 
   it("retains historically authorized effects after the active role changes", () => {
-    const contract = structuredClone(flowExample) as DeliveryAuthorityContract;
-    contract.workflow.audit = [];
-    contract.workflow.state = "implementation";
-    contract.workflow.checkpoint.state = "implementation";
-    contract.evidence[0]!.freshThroughEventId =
-      contract.workflow.checkpoint.checkpointId;
-    contract.meteringObservedAt = nextDecisionTimestamp(contract);
+    const contract = structuredClone(
+      principalExample,
+    ) as DeliveryAuthorityContract;
+    setState(contract, "ready", "implementation");
     const request = {
       effect: "edit" as const,
       idempotencyKey: "historical-principal-edit",
       actorRole: "principal-developer" as const,
       ...decisionIdentity(contract, "principal-developer"),
       targetTree: contract.workflow.candidate.tree,
-      observedAt: contract.meteringObservedAt,
     };
-    contract.effectAudit.push({
-      ...request,
-      requestDigest: createHash("sha256")
-        .update(canonicalSerializeLifecycleValue(request))
-        .digest("hex"),
-      workflowState: "implementation",
-      allowed: true,
-      code: "accepted",
-    });
+    const decision = authorizeDeliveryEffect(contract, request);
+    expect(decision).toMatchObject({ allowed: true, code: "accepted" });
+    contract.effectAudit.push(decision.audit);
+    updateDecisionHead(contract, decision.audit.authentication);
+    contract.activeRole = "flow";
     rehash(contract);
-    contract.autonomy.usage.evidenceBytes = Buffer.byteLength(
-      canonicalSerializeLifecycleValue(contract.evidence),
-    );
     expect(validateDeliveryAuthorityContract(contract).valid).toBe(true);
   });
 
@@ -1550,6 +1602,7 @@ describe("spts.delivery-authority", () => {
       observedAt: contract.meteringObservedAt,
     };
     contract.effectAudit.push({
+      authentication: null,
       ...request,
       requestDigest: createHash("sha256")
         .update(canonicalSerializeLifecycleValue(request))
@@ -1562,7 +1615,7 @@ describe("spts.delivery-authority", () => {
     contract.autonomy.usage.evidenceBytes = Buffer.byteLength(
       canonicalSerializeLifecycleValue(contract.evidence),
     );
-    expectDenied(contract, "audit-verdict");
+    expectDenied(contract, "type");
   });
 
   it("makes repeated effects and transitions idempotent while rejecting key collisions", () => {
@@ -1579,6 +1632,7 @@ describe("spts.delivery-authority", () => {
     };
     const first = evaluateDeliveryTransition(contract, request);
     contract.workflow.audit.push(first.audit);
+    updateDecisionHead(contract, first.audit.authentication);
     contract.workflow.state = first.nextState;
     rehash(contract);
     expect(evaluateDeliveryTransition(contract, request)).toMatchObject({
@@ -1598,6 +1652,7 @@ describe("spts.delivery-authority", () => {
     };
     const effect = authorizeDeliveryEffect(contract, effectRequest);
     contract.effectAudit.push(effect.audit);
+    updateDecisionHead(contract, effect.audit.authentication);
     rehash(contract);
     expect(authorizeDeliveryEffect(contract, effectRequest)).toMatchObject({
       allowed: false,
@@ -1625,6 +1680,7 @@ describe("spts.delivery-authority", () => {
       publicationRequest,
     );
     contract.workflow.audit.push(publication.audit);
+    updateDecisionHead(contract, publication.audit.authentication);
     contract.workflow.state = publication.nextState;
     contract.workflow.observations.ci = "passed";
     recordPassingCiEvidence(contract, publication.audit.eventId);
@@ -1649,6 +1705,7 @@ describe("spts.delivery-authority", () => {
     };
     const merge = evaluateDeliveryTransition(contract, mergeRequest);
     contract.workflow.audit.push(merge.audit);
+    updateDecisionHead(contract, merge.audit.authentication);
     contract.workflow.state = merge.nextState;
     rehash(contract);
 
@@ -1666,16 +1723,25 @@ describe("spts.delivery-authority", () => {
     contract.workflow.observations.ci = "pending";
     setState(contract, "ready", "blocked");
     for (const kind of ADMINISTRATIVE_RECOVERY_KINDS) {
-      expect(
-        evaluateAdministrativeRecovery(contract, {
-          recoveryId: `recovery-${kind}`,
-          kind,
-          idempotencyKey: `recovery-key-${kind}`,
-          identityRevalidated: true,
-          targetGate: "administrative",
-          ...recoveryIdentity(contract),
-        }),
-      ).toMatchObject({ allowed: true, code: "accepted" });
+      const decision = evaluateAdministrativeRecovery(contract, {
+        recoveryId: `recovery-${kind}`,
+        kind,
+        idempotencyKey: `recovery-key-${kind}`,
+        identityRevalidated: true,
+        targetGate: "administrative",
+        ...recoveryIdentity(contract),
+      });
+      if (
+        kind === "repair-receipt-sequencing" ||
+        kind === "canonical-digest-refetch" ||
+        kind === "disappeared-agent-clean-worktree"
+      )
+        expect(decision).toMatchObject({ allowed: true, code: "accepted" });
+      else
+        expect(decision).toMatchObject({
+          allowed: false,
+          code: "recovery-gate-denied",
+        });
     }
     const wrongPhase = clone();
     expect(
@@ -1712,7 +1778,7 @@ describe("spts.delivery-authority", () => {
 
     const request = {
       recoveryId: "recovery-repeat",
-      kind: "interrupted-ci-polling" as const,
+      kind: "canonical-digest-refetch" as const,
       idempotencyKey: "recovery-repeat-key",
       identityRevalidated: true,
       targetGate: "administrative" as const,
@@ -1720,6 +1786,7 @@ describe("spts.delivery-authority", () => {
     };
     const first = evaluateAdministrativeRecovery(contract, request);
     contract.administrativeRecoveries.push(first.audit);
+    updateDecisionHead(contract, first.audit.authentication);
     rehash(contract);
     expect(evaluateAdministrativeRecovery(contract, request)).toMatchObject({
       allowed: false,
@@ -1729,7 +1796,7 @@ describe("spts.delivery-authority", () => {
     expect(
       evaluateAdministrativeRecovery(contract, {
         ...request,
-        kind: "canonical-digest-refetch",
+        recoveryId: "recovery-repeat-changed",
       }),
     ).toMatchObject({ allowed: false, code: "idempotency-conflict" });
   });
@@ -1746,12 +1813,14 @@ describe("spts.delivery-authority", () => {
       targetTree: completed.workflow.candidate.tree,
       idempotencyKey: "grant-completed-effect-test",
     });
-    setState(completed, "pr-ci-monitoring", "merge-gate");
-    recordPassingCiEvidence(
+    setState(completed, "publication-authorized", "pr-ci-monitoring");
+    recordPassingCiEvidence(completed, completed.workflow.audit[0]!.eventId);
+    const mergeGateEvent = advanceFlow(
       completed,
-      completed.workflow.checkpoint.checkpointId,
+      "merge-gate",
+      "event-completed-effect-merge-gate",
     );
-    recordMergeObservation(completed, completed.workflow.audit[0]!.eventId);
+    recordMergeObservation(completed, mergeGateEvent);
     rehash(completed);
     const completion = evaluateDeliveryTransition(completed, {
       eventId: "event-completed-effect-test",
@@ -1763,6 +1832,7 @@ describe("spts.delivery-authority", () => {
       candidateTree: completed.workflow.candidate.tree,
     });
     completed.workflow.audit.push(completion.audit);
+    updateDecisionHead(completed, completion.audit.authentication);
     completed.workflow.state = completion.nextState;
     completed.activeRole = "principal-developer";
     rehash(completed);
@@ -1790,12 +1860,9 @@ describe("spts.delivery-authority", () => {
     ).toMatchObject({ allowed: false, code: "publication-denied" });
 
     const exhausted = clone();
-    setState(exhausted, "ready", "implementation");
     exhausted.autonomy.usage.implementationAttempts =
       exhausted.autonomy.limits.implementationAttempts;
-    exhausted.workflow.checkpoint.attemptUsage.implementationAttempts =
-      exhausted.autonomy.limits.implementationAttempts - 1;
-    rehash(exhausted);
+    setState(exhausted, "ready", "implementation");
     expect(
       authorizeDeliveryEffect(exhausted, {
         effect: "edit",
@@ -1874,8 +1941,11 @@ describe("spts.delivery-authority", () => {
     rewrittenUsage.meteringObservedAt = rewrittenUsageRequest.observedAt;
     rewrittenUsage.meteringDigest =
       computeDeliveryMeteringDigest(rewrittenUsage);
+    rewrittenUsage.controllerStateDigest =
+      computeDeliveryControllerStateDigest(rewrittenUsage);
     const exhaustedAuthority = rewrittenUsage.authorityDigest;
     const exhaustedMetering = rewrittenUsage.meteringDigest;
+    const exhaustedControllerState = rewrittenUsage.controllerStateDigest;
     expect(validateDeliveryAuthorityContract(rewrittenUsage).valid).toBe(true);
     expect(
       authorizeDeliveryEffectWithAnchor(
@@ -1883,6 +1953,7 @@ describe("spts.delivery-authority", () => {
         rewrittenUsageRequest,
         exhaustedAuthority,
         exhaustedMetering,
+        exhaustedControllerState,
       ),
     ).toMatchObject({ allowed: true, code: "accepted" });
     rewrittenUsage.autonomy.usage.ciRepairAttempts = 0;
@@ -1892,18 +1963,17 @@ describe("spts.delivery-authority", () => {
         rewrittenUsageRequest,
         exhaustedAuthority,
         exhaustedMetering,
+        exhaustedControllerState,
       ),
     ).toMatchObject({ allowed: false, code: "contract-invalid" });
 
     const truncatedCiRepair = clone();
-    truncatedCiRepair.workflow.observations.ci = "not-started";
+    truncatedCiRepair.workflow.observations.ci = "failed";
     truncatedCiRepair.autonomy.usage.ciRepairAttempts =
       truncatedCiRepair.autonomy.limits.ciRepairAttempts;
     truncatedCiRepair.autonomy.usage.verificationRepairAttempts = 0;
     setState(truncatedCiRepair, "repair-required", "implementation");
-    truncatedCiRepair.workflow.checkpoint.activeRepairBudget = "ci";
-    truncatedCiRepair.workflow.checkpoint.attemptUsage.ciRepairAttempts =
-      truncatedCiRepair.autonomy.usage.ciRepairAttempts - 1;
+    truncatedCiRepair.workflow.observations.ci = "not-started";
     rehash(truncatedCiRepair);
     expect(
       authorizeDeliveryEffect(truncatedCiRepair, {
@@ -1953,6 +2023,7 @@ describe("spts.delivery-authority", () => {
     );
     const meteredAuthority = metered.authorityDigest;
     const meteredState = metered.meteringDigest;
+    const meteredControllerState = metered.controllerStateDigest;
     metered.autonomy.usage.elapsedMinutes = 0;
     metered.meteringDigest = computeDeliveryMeteringDigest(metered);
     expect(computeDeliveryAuthorityDigest(metered)).toBe(meteredAuthority);
@@ -1970,6 +2041,7 @@ describe("spts.delivery-authority", () => {
         },
         meteredAuthority,
         meteredState,
+        meteredControllerState,
       ),
     ).toMatchObject({ allowed: false, code: "contract-invalid" });
 
@@ -1986,6 +2058,7 @@ describe("spts.delivery-authority", () => {
     );
     const cancelledAuthority = cancelled.authorityDigest;
     const cancelledState = cancelled.meteringDigest;
+    const cancelledControllerState = cancelled.controllerStateDigest;
     cancelled.autonomy.usage.cancelled = false;
     cancelled.meteringDigest = computeDeliveryMeteringDigest(cancelled);
     expect(computeDeliveryAuthorityDigest(cancelled)).toBe(cancelledAuthority);
@@ -2005,6 +2078,7 @@ describe("spts.delivery-authority", () => {
         },
         cancelledAuthority,
         cancelledState,
+        cancelledControllerState,
       ),
     ).toMatchObject({ accepted: false, code: "contract-invalid" });
   });
@@ -2114,10 +2188,12 @@ describe("spts.delivery-authority", () => {
   it("uses one idempotency namespace across transitions, effects, recoveries, grants, and evidence", () => {
     const contract = clone();
     contract.administrativeRecoveries.push({
+      authentication: null,
       recoveryId: "cross-domain-recovery",
       kind: "canonical-digest-refetch",
       idempotencyKey: contract.workflow.audit[0]!.idempotencyKey,
       requestDigest: "a".repeat(64),
+      details: recoveryDetails(contract, "canonical-digest-refetch"),
       identityRevalidated: true,
       targetGate: "administrative",
       ...recoveryIdentity(contract),
@@ -2128,7 +2204,7 @@ describe("spts.delivery-authority", () => {
       observedAt: "2026-08-25T23:00:00.000Z",
     });
     rehash(contract);
-    expectDenied(contract, "idempotency-conflict");
+    expectDenied(contract, "type");
   });
 
   it("rejects contradictory persisted decisions for one idempotency key", () => {
@@ -2156,9 +2232,15 @@ describe("spts.delivery-authority", () => {
       contract.activeEscalations = [reason];
       rehash(contract);
       expectDenied(contract, "mandatory-escalation");
+      contract.activeEscalations = [];
       setState(contract, "ready", "escalated");
+      contract.activeEscalations = [reason];
       rehash(contract);
-      expect(validateDeliveryAuthorityContract(contract).valid).toBe(true);
+      const validation = validateDeliveryAuthorityContract(contract);
+      expect(
+        validation.valid,
+        validation.valid ? "valid" : JSON.stringify(validation.errors),
+      ).toBe(true);
     },
   );
 
@@ -2228,10 +2310,12 @@ describe("spts.delivery-authority", () => {
           break;
         case "recovery-security-bypass":
           contract.administrativeRecoveries.push({
+            authentication: null,
             recoveryId: "recovery-security-bypass",
             kind: "canonical-digest-refetch",
             idempotencyKey: "recovery-security-bypass-key",
             requestDigest: "a".repeat(64),
+            details: recoveryDetails(contract, "canonical-digest-refetch"),
             identityRevalidated: true,
             targetGate: "security",
             ...recoveryIdentity(contract),

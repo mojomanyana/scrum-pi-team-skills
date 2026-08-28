@@ -13,6 +13,16 @@ import deliveryAuthoritySchema from "./schemas/delivery-authority.schema.json" w
 export const DELIVERY_AUTHORITY_CONTRACT_ID =
   "spts.delivery-authority" as const;
 export const DELIVERY_AUTHORITY_CONTRACT_VERSION = "1.0.0" as const;
+export const DELIVERY_CONTROLLER_STATE_DIGEST_DOMAIN =
+  "spts.delivery-authority/controller-state/1.0.0" as const;
+export const DELIVERY_DECISION_CHECKPOINT_DIGEST_DOMAIN =
+  "spts.delivery-authority/decision-checkpoint/1.0.0" as const;
+export const DELIVERY_DECISION_CONTEXT_DIGEST_DOMAIN =
+  "spts.delivery-authority/decision-context/1.0.0" as const;
+export const DELIVERY_DECISION_RESULT_DIGEST_DOMAIN =
+  "spts.delivery-authority/decision-result/1.0.0" as const;
+export const DELIVERY_DECISION_CHAIN_DIGEST_DOMAIN =
+  "spts.delivery-authority/decision-chain/1.0.0" as const;
 
 const freeze = <const T extends readonly string[]>(values: T): T =>
   Object.freeze(values);
@@ -187,6 +197,7 @@ export type DeliveryEffectDecisionCode =
   | "stale-observation"
   | "escalation-required"
   | "publication-denied"
+  | "effect-state-denied"
   | "role-authority-denied"
   | "distinct-grant-required";
 
@@ -198,7 +209,43 @@ export type AdministrativeRecoveryDecisionCode =
   | "stale-observation"
   | "recovery-gate-denied";
 
+export type DeliveryDecisionNamespace = "transition" | "effect" | "recovery";
+
+export interface DeliveryDecisionContext {
+  contractId: typeof DELIVERY_AUTHORITY_CONTRACT_ID;
+  contractVersion: typeof DELIVERY_AUTHORITY_CONTRACT_VERSION;
+  controllerStateDigest: string;
+  authorityDigest: string;
+  meteringDigest: string;
+  meteringObservedAt: string;
+  activeRole: DeliveryRole;
+  governance: DeliveryAuthorityContract["governance"];
+  task: DeliveryAuthorityContract["task"];
+  roles: DeliveryAuthorityContract["roles"];
+  workflowCheckpoint: DeliveryAuthorityContract["workflow"]["checkpoint"];
+  workflowState: DeliveryWorkflowState;
+  activeRepairBudget: "implementation" | "verification" | "ci";
+  observations: DeliveryAuthorityContract["workflow"]["observations"];
+  candidate: DeliveryCandidate;
+  evidence: DeliveryEvidence[];
+  autonomy: DeliveryAuthorityContract["autonomy"];
+  effectGrants: DeliveryEffectGrant[];
+  requestedEffects: DistinctGrantEffect[];
+  activeEscalations: MandatoryEscalationReason[];
+}
+
+export interface DeliveryDecisionAuthentication {
+  sequence: number;
+  previousChainDigest: string;
+  controllerStateDigest: string;
+  historicalContext: DeliveryDecisionContext;
+  historicalContextDigest: string;
+  resultingStateDigest: string;
+  resultingChainDigest: string;
+}
+
 export interface DeliveryTransitionAuditRecord {
+  authentication: DeliveryDecisionAuthentication | null;
   eventId: string;
   idempotencyKey: string;
   requestDigest: string;
@@ -274,11 +321,38 @@ export interface DeliveryEffectGrant {
   idempotencyKey: string;
 }
 
+export type AdministrativeRecoveryDetails =
+  | {
+      fromProfile: "lean" | "standard" | "critical";
+      toProfile: "lean" | "standard";
+    }
+  | { branch: string; headCommit: string; targetTree: string }
+  | { priorDecisionSequence: number; priorDecisionChainDigest: string }
+  | { evidenceId: string; freshThroughEventId: string }
+  | {
+      authorityDigest: string;
+      meteringDigest: string;
+      controllerStateDigest: string;
+    }
+  | { agentExecutionId: string; agentWorkspaceId: string }
+  | {
+      candidateTree: string;
+      candidateCommit: string;
+      pullRequestNumber: number;
+      priorEffectSequence: number;
+      originalIdempotencyKey: string;
+      originalRequestDigest: string;
+      priorOutcome: "authorization-issued-outcome-unknown";
+    }
+  | { ciRunId: string; ciCheckId: string };
+
 export interface AdministrativeRecoveryRecord {
+  authentication: DeliveryDecisionAuthentication | null;
   recoveryId: string;
   kind: AdministrativeRecoveryKind;
   idempotencyKey: string;
   requestDigest: string;
+  details: AdministrativeRecoveryDetails;
   actorRole: DeliveryRole;
   actorId: string;
   executionId: string;
@@ -299,6 +373,7 @@ export interface AdministrativeRecoveryRecord {
 }
 
 export interface DeliveryEffectAuditRecord {
+  authentication: DeliveryDecisionAuthentication | null;
   idempotencyKey: string;
   requestDigest: string;
   effect: string;
@@ -317,6 +392,7 @@ export interface DeliveryAuthorityContract {
   contractId: typeof DELIVERY_AUTHORITY_CONTRACT_ID;
   contractVersion: typeof DELIVERY_AUTHORITY_CONTRACT_VERSION;
   authorityDigest: string;
+  controllerStateDigest: string;
   meteringDigest: string;
   meteringObservedAt: string;
   activeRole: DeliveryRole;
@@ -353,6 +429,8 @@ export interface DeliveryAuthorityContract {
     state: DeliveryWorkflowState;
     checkpoint: {
       checkpointId: string;
+      decisionSequence: number;
+      decisionChainDigest: string;
       state: DeliveryWorkflowState;
       candidateTree: string;
       activeRepairBudget: "implementation" | "verification" | "ci";
@@ -362,6 +440,10 @@ export interface DeliveryAuthorityContract {
         ciRepairAttempts: number;
       };
       observedAt: string;
+    };
+    decisionChain: {
+      sequence: number;
+      digest: string;
     };
     observations: {
       worktree: "clean" | "dirty-unexpected";
@@ -539,7 +621,6 @@ function authorityIdentity(contract: DeliveryAuthorityContract): unknown {
   return {
     contractId: contract.contractId,
     contractVersion: contract.contractVersion,
-    activeRole: contract.activeRole,
     governance: contract.governance,
     task: contract.task,
     roles: contract.roles,
@@ -572,6 +653,83 @@ export function computeDeliveryMeteringDigest(
     concurrentAgents: contract.autonomy.usage.concurrentAgents,
     worktrees: contract.autonomy.usage.worktrees,
     cancelled: contract.autonomy.usage.cancelled,
+  });
+}
+
+/**
+ * Canonical digest claim for the complete evolving controller state. This
+ * value is not a trust anchor by itself: decision boundaries compare it with
+ * a separately supplied digest from the trusted controller.
+ */
+export function computeDeliveryControllerStateDigest(
+  contract: DeliveryAuthorityContract,
+): string {
+  const state = { ...contract } as Record<string, unknown>;
+  delete state.controllerStateDigest;
+  return sha256({
+    domain: DELIVERY_CONTROLLER_STATE_DIGEST_DOMAIN,
+    state,
+  });
+}
+
+export function computeDeliveryDecisionCheckpointDigest(
+  contract: DeliveryAuthorityContract,
+): string {
+  const checkpoint = { ...contract.workflow.checkpoint } as Record<
+    string,
+    unknown
+  >;
+  delete checkpoint.decisionChainDigest;
+  return sha256({
+    domain: DELIVERY_DECISION_CHECKPOINT_DIGEST_DOMAIN,
+    contractId: contract.contractId,
+    contractVersion: contract.contractVersion,
+    projectId: contract.task.paca.projectId,
+    taskId: contract.task.paca.taskId,
+    repositoryId: contract.task.repository.repositoryId,
+    checkpoint,
+  });
+}
+
+export function computeDeliveryDecisionContextDigest(
+  context: DeliveryDecisionContext,
+): string {
+  return sha256({
+    domain: DELIVERY_DECISION_CONTEXT_DIGEST_DOMAIN,
+    context,
+  });
+}
+
+export function computeDeliveryDecisionResultDigest(
+  context: DeliveryDecisionContext,
+): string {
+  return sha256({
+    domain: DELIVERY_DECISION_RESULT_DIGEST_DOMAIN,
+    context,
+  });
+}
+
+export function computeDeliveryDecisionChainDigest(
+  namespace: DeliveryDecisionNamespace,
+  record:
+    | DeliveryTransitionAuditRecord
+    | DeliveryEffectAuditRecord
+    | AdministrativeRecoveryRecord,
+): string {
+  const unsigned = { ...record } as Record<string, unknown>;
+  const authentication = record.authentication;
+  if (authentication !== null) {
+    const unsignedAuthentication = { ...authentication } as Record<
+      string,
+      unknown
+    >;
+    delete unsignedAuthentication.resultingChainDigest;
+    unsigned.authentication = unsignedAuthentication;
+  }
+  return sha256({
+    domain: DELIVERY_DECISION_CHAIN_DIGEST_DOMAIN,
+    namespace,
+    record: unsigned,
   });
 }
 
@@ -767,6 +925,94 @@ function activeRepairBudget(
   return contract.workflow.checkpoint.activeRepairBudget;
 }
 
+function createDeliveryDecisionContext(
+  contract: DeliveryAuthorityContract,
+  trustedControllerStateDigest: string,
+): DeliveryDecisionContext {
+  const context = canonicalSnapshot<DeliveryDecisionContext>({
+    contractId: contract.contractId,
+    contractVersion: contract.contractVersion,
+    controllerStateDigest: trustedControllerStateDigest,
+    authorityDigest: contract.authorityDigest,
+    meteringDigest: contract.meteringDigest,
+    meteringObservedAt: contract.meteringObservedAt,
+    activeRole: contract.activeRole,
+    governance: contract.governance,
+    task: contract.task,
+    roles: contract.roles,
+    workflowCheckpoint: contract.workflow.checkpoint,
+    workflowState: contract.workflow.state,
+    activeRepairBudget: activeRepairBudget(contract),
+    observations: contract.workflow.observations,
+    candidate: contract.workflow.candidate,
+    evidence: contract.evidence,
+    autonomy: contract.autonomy,
+    effectGrants: contract.effectGrants,
+    requestedEffects: contract.requestedEffects,
+    activeEscalations: contract.activeEscalations,
+  });
+  if (context === null)
+    throw new TypeError("validated controller state could not be snapshotted");
+  return context;
+}
+
+function transitionResultContext(
+  context: DeliveryDecisionContext,
+  from: DeliveryWorkflowState,
+  to: DeliveryWorkflowState,
+  accepted: boolean,
+): DeliveryDecisionContext {
+  const result = canonicalSnapshot<DeliveryDecisionContext>(context);
+  if (result === null)
+    throw new TypeError("validated decision context could not be snapshotted");
+  if (!accepted) return result;
+  result.workflowState = to;
+  if (to === "repair-required")
+    result.activeRepairBudget =
+      from === "pr-ci-monitoring" ? "ci" : "verification";
+  if (to === "implementation") {
+    if (from === "ready") result.autonomy.usage.implementationAttempts += 1;
+    else if (from === "repair-required") {
+      if (result.activeRepairBudget === "ci")
+        result.autonomy.usage.ciRepairAttempts += 1;
+      else if (result.activeRepairBudget === "verification")
+        result.autonomy.usage.verificationRepairAttempts += 1;
+    }
+  }
+  return result;
+}
+
+function authenticateDecisionRecord(
+  contract: DeliveryAuthorityContract,
+  trustedControllerStateDigest: string,
+  namespace: DeliveryDecisionNamespace,
+  record:
+    | DeliveryTransitionAuditRecord
+    | DeliveryEffectAuditRecord
+    | AdministrativeRecoveryRecord,
+  resultingContext: DeliveryDecisionContext,
+): void {
+  const historicalContext = createDeliveryDecisionContext(
+    contract,
+    trustedControllerStateDigest,
+  );
+  const authentication: DeliveryDecisionAuthentication = {
+    sequence: contract.workflow.decisionChain.sequence + 1,
+    previousChainDigest: contract.workflow.decisionChain.digest,
+    controllerStateDigest: trustedControllerStateDigest,
+    historicalContext,
+    historicalContextDigest:
+      computeDeliveryDecisionContextDigest(historicalContext),
+    resultingStateDigest: computeDeliveryDecisionResultDigest(resultingContext),
+    resultingChainDigest: "0".repeat(64),
+  };
+  record.authentication = authentication;
+  authentication.resultingChainDigest = computeDeliveryDecisionChainDigest(
+    namespace,
+    record,
+  );
+}
+
 function latestAcceptedBoundary(
   contract: DeliveryAuthorityContract,
   state: DeliveryWorkflowState,
@@ -791,6 +1037,11 @@ function transitionBudgetExhausted(
   to: DeliveryWorkflowState,
 ): boolean {
   if (to !== "implementation") return false;
+  if (
+    contract.autonomy.usage.elapsedMinutes >=
+    contract.autonomy.limits.durationMinutes
+  )
+    return true;
   if (from === "ready")
     return (
       contract.autonomy.usage.implementationAttempts >=
@@ -834,7 +1085,8 @@ function mergeObservationIsFresh(contract: DeliveryAuthorityContract): boolean {
     gateBoundary !== null &&
     gateBoundary.eventId === merge.freshThroughEventId &&
     gateBoundary.candidateTree === merge.targetTree &&
-    gateBoundary.observedAt <= merge.observedAt
+    gateBoundary.observedAt <= merge.observedAt &&
+    merge.observedAt <= contract.meteringObservedAt
   );
 }
 
@@ -892,21 +1144,22 @@ function hasGrant(
   );
 }
 
-function hasApprovalEvidenceForTree(
+function hasCurrentApprovalEvidence(
   contract: DeliveryAuthorityContract,
-  tree: string,
 ): boolean {
-  const verifier = contract.roles["independent-verifier"];
+  const candidate = contract.workflow.candidate;
   return contract.evidence.some(
     (evidence) =>
       evidence.verification.verdict === "APPROVE" &&
-      evidence.verification.approvalId !== null &&
-      evidence.verification.reviewedTree === tree &&
-      evidence.repository.tree === tree &&
-      evidence.actor.role === "independent-verifier" &&
-      evidence.actor.actorId === verifier.actorId &&
-      evidence.actor.executionId === verifier.executionId &&
-      evidence.actor.workspaceId === verifier.workspaceId,
+      evidence.verification.approvalId === candidate.verification.approvalId &&
+      evidence.verification.reviewedTree === candidate.tree &&
+      evidence.repository.commit === candidate.headCommit &&
+      evidence.repository.tree === candidate.tree &&
+      evidence.pullRequest.number === candidate.pullRequest.number &&
+      evidence.pullRequest.baseBranch === candidate.pullRequest.baseBranch &&
+      evidence.pullRequest.headBranch === candidate.pullRequest.headBranch &&
+      evidence.pullRequest.headCommit === candidate.headCommit &&
+      evidence.observedAt === candidate.verification.observedAt,
   );
 }
 
@@ -967,10 +1220,524 @@ function expectedAttemptUsage(contract: DeliveryAuthorityContract): {
   return usage;
 }
 
+interface AuthenticatedDecisionEntry {
+  namespace: DeliveryDecisionNamespace;
+  record:
+    | DeliveryTransitionAuditRecord
+    | DeliveryEffectAuditRecord
+    | AdministrativeRecoveryRecord;
+  authentication: DeliveryDecisionAuthentication;
+}
+
+function decisionContextAsContract(
+  context: DeliveryDecisionContext,
+  transitionsBefore: DeliveryTransitionAuditRecord[] = [],
+  effectsBefore: DeliveryEffectAuditRecord[] = [],
+  recoveriesBefore: AdministrativeRecoveryRecord[] = [],
+): DeliveryAuthorityContract {
+  return {
+    contractId: context.contractId,
+    contractVersion: context.contractVersion,
+    authorityDigest: context.authorityDigest,
+    controllerStateDigest: context.controllerStateDigest,
+    meteringDigest: context.meteringDigest,
+    meteringObservedAt: context.meteringObservedAt,
+    activeRole: context.activeRole,
+    governance: context.governance,
+    task: context.task,
+    roles: context.roles,
+    automaticActions: [...AUTOMATIC_DELIVERY_ACTIONS],
+    humanGatedActions: [...HUMAN_GATED_DELIVERY_ACTIONS],
+    workflow: {
+      state: context.workflowState,
+      checkpoint: context.workflowCheckpoint,
+      decisionChain: {
+        sequence: context.workflowCheckpoint.decisionSequence,
+        digest: context.workflowCheckpoint.decisionChainDigest,
+      },
+      observations: context.observations,
+      candidate: context.candidate,
+      audit: transitionsBefore,
+    },
+    evidence: context.evidence,
+    autonomy: context.autonomy,
+    effectGrants: context.effectGrants,
+    requestedEffects: context.requestedEffects,
+    administrativeRecoveries: recoveriesBefore,
+    activeEscalations: context.activeEscalations,
+    effectAudit: effectsBefore,
+  };
+}
+
+function historicalDecisionContextIsBound(
+  context: DeliveryDecisionContext,
+  current: DeliveryAuthorityContract,
+  transitionsBefore: DeliveryTransitionAuditRecord[],
+): boolean {
+  if (
+    sha256(context.governance) !== sha256(current.governance) ||
+    sha256(context.task) !== sha256(current.task) ||
+    sha256(context.roles) !== sha256(current.roles) ||
+    sha256(context.autonomy.limits) !== sha256(current.autonomy.limits)
+  )
+    return false;
+  const bindings = DELIVERY_ROLES.map((role) => context.roles[role]);
+  for (const role of DELIVERY_ROLES) {
+    const binding = context.roles[role];
+    if (binding.role !== role || binding.access !== roleAccess[role])
+      return false;
+  }
+  for (const property of ["actorId", "executionId", "workspaceId"] as const)
+    if (
+      new Set(bindings.map((binding) => binding[property])).size !==
+      bindings.length
+    )
+      return false;
+  if (
+    context.activeEscalations.length > 0 &&
+    context.workflowState !== "blocked" &&
+    context.workflowState !== "escalated"
+  )
+    return false;
+  const candidateVerifier = context.roles["independent-verifier"];
+  if (
+    !isCanonicalLifecycleTimestamp(context.candidate.verification.observedAt) ||
+    context.candidate.verification.observedAt > context.meteringObservedAt ||
+    context.candidate.verification.executionId !==
+      candidateVerifier.executionId ||
+    context.candidate.verification.workspaceId !== candidateVerifier.workspaceId
+  )
+    return false;
+  const transitionEvents = new Map(
+    transitionsBefore.map((transition) => [transition.eventId, transition]),
+  );
+  for (const evidence of context.evidence) {
+    if (
+      !isCanonicalLifecycleTimestamp(evidence.observedAt) ||
+      evidence.observedAt > context.meteringObservedAt
+    )
+      return false;
+    const binding = context.roles[evidence.actor.role];
+    if (
+      evidence.task.projectId !== context.task.paca.projectId ||
+      evidence.task.taskId !== context.task.paca.taskId ||
+      evidence.repository.repositoryId !==
+        context.task.repository.repositoryId ||
+      evidence.repository.branch !== context.task.repository.featureBranch ||
+      evidence.actor.actorId !== binding.actorId ||
+      evidence.actor.executionId !== binding.executionId ||
+      evidence.actor.workspaceId !== binding.workspaceId ||
+      evidence.assurance.runId !== context.task.assurance.runId ||
+      evidence.assurance.profile !== context.task.assurance.profile
+    )
+      return false;
+    const event = transitionEvents.get(evidence.freshThroughEventId);
+    const checkpointFresh =
+      evidence.freshThroughEventId ===
+        context.workflowCheckpoint.checkpointId &&
+      context.workflowCheckpoint.candidateTree === evidence.repository.tree &&
+      context.workflowCheckpoint.observedAt <= evidence.observedAt;
+    const eventFresh =
+      event !== undefined &&
+      event.candidateTree === evidence.repository.tree &&
+      event.observedAt <= evidence.observedAt;
+    if (!checkpointFresh && !eventFresh) return false;
+    const hasVerification = evidence.verification.verdict !== null;
+    if (
+      hasVerification &&
+      (evidence.actor.role !== "independent-verifier" ||
+        evidence.verification.reviewedTree !== evidence.repository.tree ||
+        evidence.pullRequest.number === null ||
+        evidence.pullRequest.baseBranch !==
+          context.task.repository.baseBranch ||
+        evidence.pullRequest.headBranch !==
+          context.task.repository.featureBranch ||
+        evidence.pullRequest.headCommit !== evidence.repository.commit ||
+        (evidence.verification.verdict === "APPROVE") !==
+          (evidence.verification.approvalId !== null))
+    )
+      return false;
+    if (
+      !hasVerification &&
+      (evidence.verification.reviewedTree !== null ||
+        evidence.verification.approvalId !== null)
+    )
+      return false;
+    if (
+      evidence.ci.verdict === null
+        ? (evidence.ci.runId === null) !== (evidence.ci.checkId === null)
+        : evidence.ci.runId === null || evidence.ci.checkId === null
+    )
+      return false;
+  }
+  const mergeObservedAt = context.observations.merge.observedAt;
+  if (
+    mergeObservedAt !== null &&
+    (!isCanonicalLifecycleTimestamp(mergeObservedAt) ||
+      mergeObservedAt > context.meteringObservedAt)
+  )
+    return false;
+  for (const [usage, limit] of [
+    ["implementationAttempts", "implementationAttempts"],
+    ["verificationRepairAttempts", "verificationRepairAttempts"],
+    ["ciRepairAttempts", "ciRepairAttempts"],
+    ["elapsedMinutes", "durationMinutes"],
+    ["concurrentAgents", "concurrentAgents"],
+    ["worktrees", "worktrees"],
+    ["evidenceBytes", "evidenceBytes"],
+  ] as const)
+    if (context.autonomy.usage[usage] > context.autonomy.limits[limit])
+      return false;
+  return true;
+}
+
+function authenticatedDecisionEntries(
+  contract: DeliveryAuthorityContract,
+  errors: DeliveryContractError[],
+): AuthenticatedDecisionEntry[] {
+  const groups: Array<{
+    namespace: DeliveryDecisionNamespace;
+    records: Array<
+      | DeliveryTransitionAuditRecord
+      | DeliveryEffectAuditRecord
+      | AdministrativeRecoveryRecord
+    >;
+  }> = [
+    { namespace: "transition", records: contract.workflow.audit },
+    { namespace: "effect", records: contract.effectAudit },
+    { namespace: "recovery", records: contract.administrativeRecoveries },
+  ];
+  const entries: AuthenticatedDecisionEntry[] = [];
+  for (const group of groups) {
+    let priorSequence = -1;
+    for (const record of group.records) {
+      const authentication = record.authentication;
+      if (authentication === null) {
+        errors.push(
+          fixedError(
+            "/",
+            "decision-authentication",
+            "persisted decisions require authenticated controller context",
+          ),
+        );
+        continue;
+      }
+      if (authentication.sequence <= priorSequence)
+        errors.push(
+          fixedError(
+            "/",
+            "decision-order",
+            "decision records must retain increasing authenticated sequence order",
+          ),
+        );
+      priorSequence = authentication.sequence;
+      entries.push({ namespace: group.namespace, record, authentication });
+    }
+  }
+  entries.sort(
+    (left, right) =>
+      left.authentication.sequence - right.authentication.sequence,
+  );
+  let expectedSequence = contract.workflow.checkpoint.decisionSequence + 1;
+  let previousChainDigest = contract.workflow.checkpoint.decisionChainDigest;
+  let previousTimestamp = contract.workflow.checkpoint.observedAt;
+  const sequenceSeen = new Set<number>();
+  const transitionsBefore: DeliveryTransitionAuditRecord[] = [];
+  const effectsBefore: DeliveryEffectAuditRecord[] = [];
+  const recoveriesBefore: AdministrativeRecoveryRecord[] = [];
+  for (const entry of entries) {
+    const { authentication, namespace, record } = entry;
+    if (
+      sequenceSeen.has(authentication.sequence) ||
+      authentication.sequence !== expectedSequence
+    )
+      errors.push(
+        fixedError(
+          "/",
+          "decision-sequence",
+          "authenticated decision sequences must be unique and contiguous",
+        ),
+      );
+    sequenceSeen.add(authentication.sequence);
+    expectedSequence += 1;
+    if (authentication.previousChainDigest !== previousChainDigest)
+      errors.push(
+        fixedError(
+          "/",
+          "decision-chain",
+          "authenticated decisions must retain exact previous-chain continuity",
+        ),
+      );
+    if (record.observedAt <= previousTimestamp)
+      errors.push(
+        fixedError(
+          "/",
+          "decision-time-order",
+          "authenticated decision timestamps must increase monotonically",
+        ),
+      );
+    previousTimestamp = record.observedAt;
+    const context = authentication.historicalContext;
+    if (
+      authentication.controllerStateDigest !== context.controllerStateDigest ||
+      authentication.historicalContextDigest !==
+        computeDeliveryDecisionContextDigest(context)
+    )
+      errors.push(
+        fixedError(
+          "/",
+          "decision-context-digest",
+          "historical decision context must match its authenticated digest",
+        ),
+      );
+    const contextContract = decisionContextAsContract(context);
+    if (
+      context.authorityDigest !==
+        computeDeliveryAuthorityDigest(contextContract) ||
+      context.meteringDigest !== computeDeliveryMeteringDigest(contextContract)
+    )
+      errors.push(
+        fixedError(
+          "/",
+          "decision-context-authority",
+          "historical decision context must retain canonical authority and metering digests",
+        ),
+      );
+    if (
+      context.workflowCheckpoint.decisionChainDigest !==
+        computeDeliveryDecisionCheckpointDigest(contextContract) ||
+      sha256(context.workflowCheckpoint) !==
+        sha256(contract.workflow.checkpoint)
+    )
+      errors.push(
+        fixedError(
+          "/",
+          "decision-checkpoint",
+          "historical decisions must descend from the frozen decision checkpoint",
+        ),
+      );
+    const contextEvidenceBytes = Buffer.byteLength(
+      canonicalSerializeLifecycleValue(context.evidence),
+      "utf8",
+    );
+    if (
+      context.autonomy.usage.evidenceBytes !== contextEvidenceBytes ||
+      context.evidence.some(
+        (evidence) =>
+          evidence.evidenceDigest !== computeDeliveryEvidenceDigest(evidence),
+      ) ||
+      !historicalDecisionContextIsBound(context, contract, transitionsBefore)
+    )
+      errors.push(
+        fixedError(
+          "/",
+          "decision-context-evidence",
+          "historical context must retain canonical role, evidence, time, and capacity bindings",
+        ),
+      );
+    if (
+      context.meteringObservedAt !== record.observedAt ||
+      record.observedAt > contract.meteringObservedAt
+    )
+      errors.push(
+        fixedError(
+          "/",
+          "decision-time-authority",
+          "historical decision time must equal its trusted metering context and not exceed current controller time",
+        ),
+      );
+    let resultingContext = canonicalSnapshot<DeliveryDecisionContext>(context);
+    if (resultingContext === null) resultingContext = context;
+    if (namespace === "transition") {
+      const transition = record as DeliveryTransitionAuditRecord;
+      const transitionRequest: DeliveryTransitionRequest = {
+        eventId: transition.eventId,
+        idempotencyKey: transition.idempotencyKey,
+        from: transition.from,
+        to: transition.to,
+        actorRole: transition.actorRole,
+        actorId: transition.actorId,
+        executionId: transition.executionId,
+        workspaceId: transition.workspaceId,
+        candidateTree: transition.candidateTree,
+        observedAt: transition.observedAt,
+      };
+      const historicalContract = decisionContextAsContract(
+        context,
+        transitionsBefore,
+      );
+      const expectedUsage = expectedAttemptUsage(historicalContract);
+      if (
+        context.activeRepairBudget !== activeRepairBudget(historicalContract) ||
+        context.autonomy.usage.implementationAttempts !==
+          expectedUsage.implementationAttempts ||
+        context.autonomy.usage.verificationRepairAttempts !==
+          expectedUsage.verificationRepairAttempts ||
+        context.autonomy.usage.ciRepairAttempts !==
+          expectedUsage.ciRepairAttempts
+      )
+        errors.push(
+          fixedError(
+            "/",
+            "decision-attempt-provenance",
+            "historical attempt usage must follow the authenticated transition prefix",
+          ),
+        );
+      const expectedCode = deliveryTransitionPolicyCode(
+        historicalContract,
+        transitionRequest,
+      );
+      if (
+        transition.requestDigest !== sha256(transitionRequest) ||
+        transition.code !== expectedCode ||
+        transition.accepted !== (expectedCode === "accepted")
+      )
+        errors.push(
+          fixedError(
+            "/workflow/audit",
+            "historical-transition-authority",
+            "transition receipt must match its authenticated historical policy decision",
+          ),
+        );
+      resultingContext = transitionResultContext(
+        context,
+        transition.from,
+        transition.to,
+        transition.accepted,
+      );
+      transitionsBefore.push(transition);
+    } else if (namespace === "effect") {
+      const effect = record as DeliveryEffectAuditRecord;
+      const effectRequest: DeliveryEffectRequest = {
+        effect: effect.effect as DeliveryEffect,
+        idempotencyKey: effect.idempotencyKey,
+        actorRole: effect.actorRole,
+        actorId: effect.actorId,
+        executionId: effect.executionId,
+        workspaceId: effect.workspaceId,
+        targetTree: effect.targetTree,
+        observedAt: effect.observedAt,
+      };
+      const historicalContract = decisionContextAsContract(
+        context,
+        transitionsBefore,
+        effectsBefore,
+        recoveriesBefore,
+      );
+      const expectedCode = deliveryEffectPolicyCode(
+        historicalContract,
+        effectRequest,
+      );
+      if (
+        effect.workflowState !== context.workflowState ||
+        effect.requestDigest !== sha256(effectRequest) ||
+        effect.code !== expectedCode ||
+        effect.allowed !== (expectedCode === "accepted")
+      )
+        errors.push(
+          fixedError(
+            "/effectAudit",
+            "historical-effect-authority",
+            "effect receipt must match its authenticated historical policy decision",
+          ),
+        );
+      effectsBefore.push(effect);
+    } else {
+      const recovery = record as AdministrativeRecoveryRecord;
+      const recoveryRequest = {
+        recoveryId: recovery.recoveryId,
+        kind: recovery.kind,
+        idempotencyKey: recovery.idempotencyKey,
+        actorRole: recovery.actorRole,
+        actorId: recovery.actorId,
+        executionId: recovery.executionId,
+        workspaceId: recovery.workspaceId,
+        identityRevalidated: recovery.identityRevalidated,
+        targetGate: recovery.targetGate,
+        details: recovery.details,
+        observedAt: recovery.observedAt,
+      } as AdministrativeRecoveryRequest;
+      const historicalContract = decisionContextAsContract(
+        context,
+        transitionsBefore,
+        effectsBefore,
+        recoveriesBefore,
+      );
+      const expectedCode = deliveryRecoveryPolicyCode(
+        historicalContract,
+        recoveryRequest,
+      );
+      if (
+        recovery.workflowState !== context.workflowState ||
+        recovery.ciStatus !== context.observations.ci ||
+        recovery.requestDigest !== sha256(recoveryRequest) ||
+        recovery.code !== expectedCode ||
+        recovery.accepted !== (expectedCode === "accepted")
+      )
+        errors.push(
+          fixedError(
+            "/administrativeRecoveries",
+            "historical-recovery-authority",
+            "recovery receipt must match its authenticated kind-specific historical policy decision",
+          ),
+        );
+      recoveriesBefore.push(recovery);
+    }
+    if (
+      authentication.resultingStateDigest !==
+      computeDeliveryDecisionResultDigest(resultingContext)
+    )
+      errors.push(
+        fixedError(
+          "/",
+          "decision-result-digest",
+          "decision result must match its authenticated resulting state digest",
+        ),
+      );
+    if (
+      authentication.resultingChainDigest !==
+      computeDeliveryDecisionChainDigest(namespace, record)
+    )
+      errors.push(
+        fixedError(
+          "/",
+          "decision-chain-digest",
+          "decision receipt must match its authenticated chain digest",
+        ),
+      );
+    previousChainDigest = authentication.resultingChainDigest;
+  }
+  const expectedHeadSequence = expectedSequence - 1;
+  if (
+    contract.workflow.checkpoint.decisionChainDigest !==
+    computeDeliveryDecisionCheckpointDigest(contract)
+  )
+    errors.push(
+      fixedError(
+        "/workflow/checkpoint/decisionChainDigest",
+        "decision-checkpoint",
+        "decision checkpoint must match its canonical domain-separated digest",
+      ),
+    );
+  if (
+    contract.workflow.decisionChain.sequence !== expectedHeadSequence ||
+    contract.workflow.decisionChain.digest !== previousChainDigest
+  )
+    errors.push(
+      fixedError(
+        "/workflow/decisionChain",
+        "decision-chain-head",
+        "decision chain head must equal the complete authenticated history",
+      ),
+    );
+  return entries;
+}
+
 function semanticErrors(
   contract: DeliveryAuthorityContract,
 ): DeliveryContractError[] {
   const errors: DeliveryContractError[] = [];
+  authenticatedDecisionEntries(contract, errors);
   const observations = contract.workflow.observations;
   const requiredEscalations: Array<
     readonly [boolean, MandatoryEscalationReason]
@@ -1073,6 +1840,17 @@ function semanticErrors(
         "/meteringDigest",
         "metering-digest",
         "must match the canonical monotonic metering state digest",
+      ),
+    );
+  if (
+    contract.controllerStateDigest !==
+    computeDeliveryControllerStateDigest(contract)
+  )
+    errors.push(
+      fixedError(
+        "/controllerStateDigest",
+        "controller-state-digest",
+        "must match the canonical complete controller state digest",
       ),
     );
 
@@ -1191,7 +1969,7 @@ function semanticErrors(
 
   for (const recovery of contract.administrativeRecoveries) {
     const recoveryBinding = contract.roles[recovery.actorRole];
-    const reconstructedRecovery: AdministrativeRecoveryRequest = {
+    const reconstructedRecovery = {
       recoveryId: recovery.recoveryId,
       kind: recovery.kind,
       idempotencyKey: recovery.idempotencyKey,
@@ -1201,8 +1979,17 @@ function semanticErrors(
       workspaceId: recovery.workspaceId,
       identityRevalidated: recovery.identityRevalidated,
       targetGate: recovery.targetGate,
+      details: recovery.details,
       observedAt: recovery.observedAt,
-    };
+    } as AdministrativeRecoveryRequest;
+    if (!isAdministrativeRecoveryDetails(recovery.kind, recovery.details))
+      errors.push(
+        fixedError(
+          "/administrativeRecoveries",
+          "recovery-details",
+          "recovery details must match the selected canonical recovery kind",
+        ),
+      );
     if (recovery.requestDigest !== sha256(reconstructedRecovery))
       errors.push(
         fixedError(
@@ -1474,73 +2261,6 @@ function semanticErrors(
           "effect audit request digest must match its immutable request fields",
         ),
       );
-    const protectedEffect = protectedGrantFor(effect);
-    const publicationEffect =
-      effect === "publication" ||
-      effect === "feature-push" ||
-      effect === "pr-create-update";
-    const automaticEffect = (
-      AUTOMATIC_DELIVERY_ACTIONS as readonly string[]
-    ).includes(effect)
-      ? (effect as AutomaticDeliveryAction)
-      : null;
-    const automaticOrPublicationEffect =
-      automaticEffect !== null || effect === "publication";
-    const auditSafetyGatesHold =
-      audit.observedAt <= contract.meteringObservedAt &&
-      contract.activeEscalations.length === 0 &&
-      !contract.autonomy.usage.cancelled &&
-      (!automaticOrPublicationEffect ||
-        contract.autonomy.usage.elapsedMinutes <
-          contract.autonomy.limits.durationMinutes) &&
-      (automaticEffect === null ||
-        !effectBudgetExhausted(contract, automaticEffect)) &&
-      (automaticEffect !== "ci-repair" ||
-        contract.workflow.observations.ci === "failed") &&
-      (automaticEffect !== "ci-monitor" ||
-        contract.workflow.observations.ci === "pending" ||
-        contract.workflow.observations.ci === "failed");
-    const validAllowedEffect =
-      (auditSafetyGatesHold &&
-        (AUTOMATIC_DELIVERY_ACTIONS as readonly string[]).includes(effect) &&
-        roleMayPerformAutomatic(
-          audit.actorRole,
-          effect as AutomaticDeliveryAction,
-        ) &&
-        effectAllowedInState(
-          effect as AutomaticDeliveryAction,
-          audit.workflowState,
-        ) &&
-        !publicationEffect) ||
-      (publicationEffect &&
-        publicationEffectStates.has(audit.workflowState) &&
-        hasApprovalEvidenceForTree(contract, audit.targetTree) &&
-        ((effect === "publication" && audit.actorRole === "flow") ||
-          (effect !== "publication" &&
-            roleMayPerformAutomatic(
-              audit.actorRole,
-              effect as AutomaticDeliveryAction,
-            )))) ||
-      (protectedEffect !== null &&
-        audit.actorRole === "flow" &&
-        protectedEffectAllowedInState(effect, audit.workflowState) &&
-        hasGrant(contract, protectedEffect, audit.targetTree));
-    if (
-      (audit.allowed &&
-        (audit.code !== "accepted" ||
-          !validAllowedEffect ||
-          contract.roles[audit.actorRole].actorId !== audit.actorId ||
-          contract.roles[audit.actorRole].executionId !== audit.executionId ||
-          contract.roles[audit.actorRole].workspaceId !== audit.workspaceId)) ||
-      (!audit.allowed && audit.code === "accepted")
-    )
-      errors.push(
-        fixedError(
-          "/effectAudit",
-          "audit-verdict",
-          "accepted and rejected effects must retain an enforceable fixed verdict",
-        ),
-      );
     if (!isCanonicalLifecycleTimestamp(audit.observedAt))
       errors.push(
         fixedError(
@@ -1679,7 +2399,8 @@ function semanticErrors(
       checkpoint.observedAt <= evidence.observedAt;
     if (
       (freshEvent === undefined ||
-        freshEvent.candidateTree !== evidence.repository.tree) &&
+        freshEvent.candidateTree !== evidence.repository.tree ||
+        freshEvent.observedAt > evidence.observedAt) &&
       !freshCheckpoint
     )
       errors.push(
@@ -1781,28 +2502,56 @@ export function validateFrozenDeliveryAuthorityContract(
   value: unknown,
   expectedAuthorityDigest: unknown,
   expectedMeteringDigest: unknown,
+  expectedControllerStateDigest: unknown,
 ): DeliveryAuthorityValidationResult {
   const validation = validateDeliveryAuthorityContract(value);
   if (!validation.valid) return validation;
   if (
-    typeof expectedAuthorityDigest === "string" &&
-    /^[0-9a-f]{64}$/.test(expectedAuthorityDigest) &&
-    validation.value.authorityDigest === expectedAuthorityDigest &&
-    typeof expectedMeteringDigest === "string" &&
-    /^[0-9a-f]{64}$/.test(expectedMeteringDigest) &&
-    validation.value.meteringDigest === expectedMeteringDigest
+    typeof expectedAuthorityDigest !== "string" ||
+    !/^[0-9a-f]{64}$/.test(expectedAuthorityDigest) ||
+    validation.value.authorityDigest !== expectedAuthorityDigest
   )
-    return validation;
-  return {
-    valid: false,
-    errors: [
-      fixedError(
-        "/authorityDigest",
-        "frozen-authority",
-        "must match the trusted frozen authority and monotonic metering digests",
-      ),
-    ],
-  };
+    return {
+      valid: false,
+      errors: [
+        fixedError(
+          "/authorityDigest",
+          "frozen-authority",
+          "must match the separately trusted static authority digest",
+        ),
+      ],
+    };
+  if (
+    typeof expectedMeteringDigest !== "string" ||
+    !/^[0-9a-f]{64}$/.test(expectedMeteringDigest) ||
+    validation.value.meteringDigest !== expectedMeteringDigest
+  )
+    return {
+      valid: false,
+      errors: [
+        fixedError(
+          "/meteringDigest",
+          "frozen-metering",
+          "must match the separately trusted monotonic metering digest",
+        ),
+      ],
+    };
+  if (
+    typeof expectedControllerStateDigest !== "string" ||
+    !/^[0-9a-f]{64}$/.test(expectedControllerStateDigest) ||
+    validation.value.controllerStateDigest !== expectedControllerStateDigest
+  )
+    return {
+      valid: false,
+      errors: [
+        fixedError(
+          "/controllerStateDigest",
+          "frozen-controller-state",
+          "must match the separately trusted complete controller state digest",
+        ),
+      ],
+    };
+  return validation;
 }
 
 export function isDeliveryAuthorityContract(
@@ -1929,6 +2678,9 @@ function latestRecordedTimestamp(contract: DeliveryAuthorityContract): string {
     ...contract.effectAudit.map((record) => record.observedAt),
     ...contract.administrativeRecoveries.map((record) => record.observedAt),
     ...contract.evidence.map((record) => record.observedAt),
+    ...(contract.workflow.observations.merge.observedAt === null
+      ? []
+      : [contract.workflow.observations.merge.observedAt]),
   ];
   return timestamps.reduce((latest, value) =>
     value > latest ? value : latest,
@@ -1951,12 +2703,15 @@ function idempotencyKeyExists(
 }
 
 function decisionAudit(
+  contract: DeliveryAuthorityContract | null,
+  trustedControllerStateDigest: string | null,
   request: DeliveryTransitionRequest,
   requestDigest: string,
   accepted: boolean,
   code: DeliveryTransitionDecisionCode,
 ): DeliveryTransitionAuditRecord {
-  return {
+  const record: DeliveryTransitionAuditRecord = {
+    authentication: null,
     eventId: request.eventId,
     idempotencyKey: request.idempotencyKey,
     requestDigest,
@@ -1971,6 +2726,74 @@ function decisionAudit(
     to: request.to,
     observedAt: request.observedAt,
   };
+  if (contract !== null && trustedControllerStateDigest !== null) {
+    const historicalContext = createDeliveryDecisionContext(
+      contract,
+      trustedControllerStateDigest,
+    );
+    authenticateDecisionRecord(
+      contract,
+      trustedControllerStateDigest,
+      "transition",
+      record,
+      transitionResultContext(
+        historicalContext,
+        request.from,
+        request.to,
+        accepted,
+      ),
+    );
+  }
+  return record;
+}
+
+function deliveryTransitionPolicyCode(
+  contract: DeliveryAuthorityContract,
+  request: DeliveryTransitionRequest,
+): DeliveryTransitionDecisionCode {
+  const binding = contract.roles[request.actorRole];
+  if (request.actorRole !== contract.activeRole) return "identity-drift";
+  if (containsCredentialShapedContent(request.actorId)) return "request-denied";
+  if (
+    request.observedAt !== contract.meteringObservedAt ||
+    request.observedAt <= latestRecordedTimestamp(contract)
+  )
+    return "stale-observation";
+  if (
+    request.from !== contract.workflow.state ||
+    request.candidateTree !== contract.workflow.candidate.tree ||
+    binding.actorId !== request.actorId ||
+    binding.executionId !== request.executionId ||
+    binding.workspaceId !== request.workspaceId
+  )
+    return "identity-drift";
+  if (
+    !transitions[request.from].includes(request.to) ||
+    !roleMayTransition(request.actorRole, request.from, request.to) ||
+    contract.autonomy.usage.cancelled ||
+    (contract.activeEscalations.length > 0 && request.to === "ready")
+  )
+    return "transition-denied";
+  if (transitionBudgetExhausted(contract, request.from, request.to))
+    return "autonomy-exhausted";
+  if (
+    request.to === "publication-authorized" &&
+    (!publicationIsFresh(contract) || !hasCurrentApprovalEvidence(contract))
+  )
+    return "publication-denied";
+  if (
+    (request.to === "merge-gate" || request.to === "completed") &&
+    !hasFreshPassingCiEvidence(contract)
+  )
+    return "ci-evidence-required";
+  if (
+    (request.to === "merge-gate" || request.to === "completed") &&
+    !hasGrant(contract, "merge")
+  )
+    return "merge-grant-required";
+  if (request.to === "completed" && !mergeObservationIsFresh(contract))
+    return "merge-observation-required";
+  return "accepted";
 }
 
 export function evaluateDeliveryTransition(
@@ -1978,11 +2801,13 @@ export function evaluateDeliveryTransition(
   requestValue: unknown,
   expectedAuthorityDigest: unknown,
   expectedMeteringDigest: unknown,
+  expectedControllerStateDigest: unknown,
 ): DeliveryTransitionDecision {
   const validation = validateFrozenDeliveryAuthorityContract(
     value,
     expectedAuthorityDigest,
     expectedMeteringDigest,
+    expectedControllerStateDigest,
   );
   const requestSnapshot = canonicalSnapshot<unknown>(requestValue);
   const request = isDeliveryTransitionRequest(requestSnapshot)
@@ -2010,6 +2835,8 @@ export function evaluateDeliveryTransition(
       code: "contract-invalid",
       nextState: fallbackState,
       audit: decisionAudit(
+        null,
+        null,
         fallback,
         sha256(fallback),
         false,
@@ -2019,15 +2846,6 @@ export function evaluateDeliveryTransition(
   }
   const contract = validation.value;
   const requestDigest = sha256(request);
-  if (request.actorRole !== contract.activeRole) {
-    return {
-      accepted: false,
-      idempotent: false,
-      code: "identity-drift",
-      nextState: contract.workflow.state,
-      audit: decisionAudit(request, requestDigest, false, "identity-drift"),
-    };
-  }
   const prior = contract.workflow.audit.find(
     (record) => record.idempotencyKey === request.idempotencyKey,
   );
@@ -2040,7 +2858,14 @@ export function evaluateDeliveryTransition(
       nextState: contract.workflow.state,
       audit: same
         ? prior
-        : decisionAudit(request, requestDigest, false, "idempotency-conflict"),
+        : decisionAudit(
+            contract,
+            expectedControllerStateDigest as string,
+            request,
+            requestDigest,
+            false,
+            "idempotency-conflict",
+          ),
     };
   }
   if (
@@ -2053,6 +2878,8 @@ export function evaluateDeliveryTransition(
       code: "idempotency-conflict",
       nextState: contract.workflow.state,
       audit: decisionAudit(
+        contract,
+        expectedControllerStateDigest as string,
         request,
         requestDigest,
         false,
@@ -2060,54 +2887,21 @@ export function evaluateDeliveryTransition(
       ),
     };
 
-  let code: DeliveryTransitionDecisionCode = "accepted";
-  const binding = contract.roles[request.actorRole];
-  if (containsCredentialShapedContent(request.actorId)) code = "request-denied";
-  else if (
-    request.observedAt !== contract.meteringObservedAt ||
-    request.observedAt <= latestRecordedTimestamp(contract)
-  )
-    code = "stale-observation";
-  else if (
-    request.from !== contract.workflow.state ||
-    request.candidateTree !== contract.workflow.candidate.tree ||
-    binding.actorId !== request.actorId ||
-    binding.executionId !== request.executionId ||
-    binding.workspaceId !== request.workspaceId
-  )
-    code = "identity-drift";
-  else if (
-    !transitions[request.from].includes(request.to) ||
-    !roleMayTransition(request.actorRole, request.from, request.to) ||
-    contract.autonomy.usage.cancelled ||
-    (contract.activeEscalations.length > 0 && request.to === "ready")
-  )
-    code = "transition-denied";
-  else if (transitionBudgetExhausted(contract, request.from, request.to))
-    code = "autonomy-exhausted";
-  else if (
-    request.to === "publication-authorized" &&
-    !publicationIsFresh(contract)
-  )
-    code = "publication-denied";
-  else if (
-    (request.to === "merge-gate" || request.to === "completed") &&
-    !hasFreshPassingCiEvidence(contract)
-  )
-    code = "ci-evidence-required";
-  else if (request.to === "merge-gate" && !hasGrant(contract, "merge"))
-    code = "merge-grant-required";
-  else if (request.to === "completed" && !hasGrant(contract, "merge"))
-    code = "merge-grant-required";
-  else if (request.to === "completed" && !mergeObservationIsFresh(contract))
-    code = "merge-observation-required";
+  const code = deliveryTransitionPolicyCode(contract, request);
   const accepted = code === "accepted";
   return {
     accepted,
     idempotent: false,
     code,
     nextState: accepted ? request.to : contract.workflow.state,
-    audit: decisionAudit(request, requestDigest, accepted, code),
+    audit: decisionAudit(
+      contract,
+      expectedControllerStateDigest as string,
+      request,
+      requestDigest,
+      accepted,
+      code,
+    ),
   };
 }
 
@@ -2175,7 +2969,25 @@ function protectedEffectAllowedInState(
   state: DeliveryWorkflowState,
 ): boolean {
   if (effect === "merge") return state === "merge-gate";
-  return true;
+  if (
+    effect === "release" ||
+    effect === "tag" ||
+    effect === "artifact-publication" ||
+    effect === "production" ||
+    effect === "production-access" ||
+    effect === "deployment"
+  )
+    return state === "completed";
+  if (
+    effect === "destructive-git" ||
+    effect === "force-push" ||
+    effect === "history-rewrite" ||
+    effect === "branch-delete"
+  )
+    return state === "blocked";
+  if (effect === "real-pi" || effect === "real-pi-execution")
+    return state === "ready" || state === "implementation";
+  return false;
 }
 
 function protectedGrantFor(effect: DeliveryEffect): DistinctGrantEffect | null {
@@ -2203,16 +3015,117 @@ function protectedGrantFor(effect: DeliveryEffect): DistinctGrantEffect | null {
   return null;
 }
 
+function deliveryEffectPolicyCode(
+  contract: DeliveryAuthorityContract,
+  request: DeliveryEffectRequest,
+): DeliveryEffectDecisionCode {
+  if (request.actorRole !== contract.activeRole) return "role-authority-denied";
+  const binding = contract.roles[request.actorRole];
+  if (
+    binding.actorId !== request.actorId ||
+    binding.executionId !== request.executionId ||
+    binding.workspaceId !== request.workspaceId ||
+    request.targetTree !== contract.workflow.candidate.tree ||
+    containsCredentialShapedContent(request.actorId)
+  )
+    return "identity-drift";
+  if (
+    request.observedAt !== contract.meteringObservedAt ||
+    request.observedAt <= latestRecordedTimestamp(contract)
+  )
+    return "stale-observation";
+  if (
+    contract.activeEscalations.length > 0 ||
+    contract.autonomy.usage.cancelled ||
+    contract.autonomy.usage.elapsedMinutes >=
+      contract.autonomy.limits.durationMinutes
+  )
+    return "escalation-required";
+
+  if (
+    request.effect === "feature-push" ||
+    request.effect === "pr-create-update"
+  )
+    return publicationEffectStates.has(contract.workflow.state) &&
+      publicationIsFresh(contract) &&
+      hasCurrentApprovalEvidence(contract) &&
+      roleMayPerformAutomatic(
+        request.actorRole,
+        request.effect as AutomaticDeliveryAction,
+      )
+      ? "accepted"
+      : "publication-denied";
+
+  if (
+    (AUTOMATIC_DELIVERY_ACTIONS as readonly string[]).includes(request.effect)
+  ) {
+    const automaticEffect = request.effect as AutomaticDeliveryAction;
+    if (automaticEffect === "administrative-recovery")
+      return "role-authority-denied";
+    if (effectBudgetExhausted(contract, automaticEffect))
+      return "escalation-required";
+    if (
+      (automaticEffect === "ci-repair" &&
+        contract.workflow.observations.ci !== "failed") ||
+      (automaticEffect === "ci-monitor" &&
+        contract.workflow.observations.ci !== "pending" &&
+        contract.workflow.observations.ci !== "failed")
+    )
+      return "role-authority-denied";
+    return roleMayPerformAutomatic(request.actorRole, automaticEffect) &&
+      effectAllowedInState(automaticEffect, contract.workflow.state)
+      ? "accepted"
+      : "role-authority-denied";
+  }
+
+  if (request.effect === "publication")
+    return publicationEffectStates.has(contract.workflow.state) &&
+      publicationIsFresh(contract) &&
+      hasCurrentApprovalEvidence(contract) &&
+      request.actorRole === "flow"
+      ? "accepted"
+      : "publication-denied";
+
+  const protectedEffect = protectedGrantFor(request.effect);
+  if (protectedEffect === null) return "distinct-grant-required";
+  if (request.actorRole !== "flow") return "role-authority-denied";
+  if (
+    !contract.requestedEffects.includes(protectedEffect) ||
+    !hasGrant(contract, protectedEffect, request.targetTree)
+  )
+    return "distinct-grant-required";
+  if (!protectedEffectAllowedInState(request.effect, contract.workflow.state))
+    return "effect-state-denied";
+  if (
+    protectedEffect === "real-pi" &&
+    contract.autonomy.usage.concurrentAgents >=
+      contract.autonomy.limits.concurrentAgents
+  )
+    return "escalation-required";
+  if (
+    (protectedEffect === "merge" ||
+      protectedEffect === "release" ||
+      protectedEffect === "production") &&
+    (!hasFreshPassingCiEvidence(contract) ||
+      (contract.workflow.state === "completed" &&
+        !mergeObservationIsFresh(contract)))
+  )
+    return "publication-denied";
+  return "accepted";
+}
+
 export function authorizeDeliveryEffect(
   value: unknown,
   requestValue: unknown,
   expectedAuthorityDigest: unknown,
   expectedMeteringDigest: unknown,
+  expectedControllerStateDigest: unknown,
 ): DeliveryEffectDecision {
   const validation = validateFrozenDeliveryAuthorityContract(
     value,
     expectedAuthorityDigest,
     expectedMeteringDigest,
+    expectedControllerStateDigest,
   );
   const requestSnapshot = canonicalSnapshot<unknown>(requestValue);
   const request = isDeliveryEffectRequest(requestSnapshot)
@@ -2234,11 +3147,9 @@ export function authorizeDeliveryEffect(
     allowed: boolean,
     idempotent: boolean,
     code: DeliveryEffectDecisionCode,
-  ): DeliveryEffectDecision => ({
-    allowed,
-    idempotent,
-    code,
-    audit: {
+  ): DeliveryEffectDecision => {
+    const audit: DeliveryEffectAuditRecord = {
+      authentication: null,
       idempotencyKey: fallbackRequest.idempotencyKey,
       requestDigest,
       effect: fallbackRequest.effect,
@@ -2253,13 +3164,29 @@ export function authorizeDeliveryEffect(
       allowed,
       code,
       observedAt,
-    },
-  });
+    };
+    if (
+      validation.valid &&
+      request !== null &&
+      typeof expectedControllerStateDigest === "string"
+    ) {
+      const context = createDeliveryDecisionContext(
+        validation.value,
+        expectedControllerStateDigest,
+      );
+      authenticateDecisionRecord(
+        validation.value,
+        expectedControllerStateDigest,
+        "effect",
+        audit,
+        context,
+      );
+    }
+    return { allowed, idempotent, code, audit };
+  };
   if (!validation.valid || request === null)
     return make(false, false, "contract-invalid");
   const contract = validation.value;
-  if (request.actorRole !== contract.activeRole)
-    return make(false, false, "role-authority-denied");
   const prior = contract.effectAudit.find(
     (record) => record.idempotencyKey === request.idempotencyKey,
   );
@@ -2274,90 +3201,12 @@ export function authorizeDeliveryEffect(
       : make(false, false, "idempotency-conflict");
   if (idempotencyKeyExists(contract, request.idempotencyKey))
     return make(false, false, "idempotency-conflict");
-  if (
-    contract.roles[request.actorRole].actorId !== request.actorId ||
-    contract.roles[request.actorRole].executionId !== request.executionId ||
-    contract.roles[request.actorRole].workspaceId !== request.workspaceId ||
-    request.targetTree !== contract.workflow.candidate.tree ||
-    containsCredentialShapedContent(request.actorId)
-  )
-    return make(false, false, "identity-drift");
-  if (
-    request.observedAt !== contract.meteringObservedAt ||
-    request.observedAt <= latestRecordedTimestamp(contract)
-  )
-    return make(false, false, "stale-observation");
-  if (
-    contract.activeEscalations.length > 0 ||
-    contract.autonomy.usage.cancelled
-  )
-    return make(false, false, "escalation-required");
-  if (
-    ((AUTOMATIC_DELIVERY_ACTIONS as readonly string[]).includes(
-      request.effect,
-    ) ||
-      request.effect === "publication") &&
-    contract.autonomy.usage.elapsedMinutes >=
-      contract.autonomy.limits.durationMinutes
-  )
-    return make(false, false, "escalation-required");
-  if (
-    request.effect === "feature-push" ||
-    request.effect === "pr-create-update"
-  )
-    return publicationEffectStates.has(contract.workflow.state) &&
-      publicationIsFresh(contract) &&
-      roleMayPerformAutomatic(
-        request.actorRole,
-        request.effect as AutomaticDeliveryAction,
-      )
-      ? make(true, false, "accepted")
-      : make(false, false, "publication-denied");
-  if (
-    (AUTOMATIC_DELIVERY_ACTIONS as readonly string[]).includes(request.effect)
-  ) {
-    const automaticEffect = request.effect as AutomaticDeliveryAction;
-    if (effectBudgetExhausted(contract, automaticEffect))
-      return make(false, false, "escalation-required");
-    if (
-      (automaticEffect === "ci-repair" &&
-        contract.workflow.observations.ci !== "failed") ||
-      (automaticEffect === "ci-monitor" &&
-        contract.workflow.observations.ci !== "pending" &&
-        contract.workflow.observations.ci !== "failed")
-    )
-      return make(false, false, "role-authority-denied");
-    return roleMayPerformAutomatic(request.actorRole, automaticEffect) &&
-      effectAllowedInState(automaticEffect, contract.workflow.state)
-      ? make(true, false, "accepted")
-      : make(false, false, "role-authority-denied");
-  }
-  if (request.effect === "publication")
-    return publicationEffectStates.has(contract.workflow.state) &&
-      publicationIsFresh(contract) &&
-      request.actorRole === "flow"
-      ? make(true, false, "accepted")
-      : make(false, false, "publication-denied");
-  const protectedEffect = protectedGrantFor(request.effect);
-  if (
-    protectedEffect !== null &&
-    hasGrant(contract, protectedEffect, request.targetTree)
-  ) {
-    if (request.actorRole !== "flow")
-      return make(false, false, "role-authority-denied");
-    return protectedEffectAllowedInState(
-      request.effect,
-      contract.workflow.state,
-    )
-      ? make(true, false, "accepted")
-      : make(false, false, "publication-denied");
-  }
-  return make(false, false, "distinct-grant-required");
+  const code = deliveryEffectPolicyCode(contract, request);
+  return make(code === "accepted", false, code);
 }
 
-export interface AdministrativeRecoveryRequest {
+interface AdministrativeRecoveryRequestBase {
   recoveryId: string;
-  kind: AdministrativeRecoveryKind;
   idempotencyKey: string;
   actorRole: DeliveryRole;
   actorId: string;
@@ -2367,6 +3216,57 @@ export interface AdministrativeRecoveryRequest {
   targetGate: AdministrativeRecoveryRecord["targetGate"];
   observedAt: string;
 }
+
+export type AdministrativeRecoveryRequest = AdministrativeRecoveryRequestBase &
+  (
+    | {
+        kind: "redundant-profile-downgrade";
+        details: Extract<
+          AdministrativeRecoveryDetails,
+          { fromProfile: string }
+        >;
+      }
+    | {
+        kind: "missing-keep-branch-finish";
+        details: Extract<AdministrativeRecoveryDetails, { branch: string }>;
+      }
+    | {
+        kind: "repair-receipt-sequencing";
+        details: Extract<
+          AdministrativeRecoveryDetails,
+          { priorDecisionSequence: number }
+        >;
+      }
+    | {
+        kind: "stale-evidence-after-controller-event";
+        details: Extract<AdministrativeRecoveryDetails, { evidenceId: string }>;
+      }
+    | {
+        kind: "canonical-digest-refetch";
+        details: Extract<
+          AdministrativeRecoveryDetails,
+          { authorityDigest: string }
+        >;
+      }
+    | {
+        kind: "disappeared-agent-clean-worktree";
+        details: Extract<
+          AdministrativeRecoveryDetails,
+          { agentExecutionId: string }
+        >;
+      }
+    | {
+        kind: "idempotent-push-pr-reconciliation";
+        details: Extract<
+          AdministrativeRecoveryDetails,
+          { priorEffectSequence: number }
+        >;
+      }
+    | {
+        kind: "interrupted-ci-polling";
+        details: Extract<AdministrativeRecoveryDetails, { ciRunId: string }>;
+      }
+  );
 
 export interface AdministrativeRecoveryDecision {
   allowed: boolean;
@@ -2384,6 +3284,94 @@ const recoveryTargets = new Set<AdministrativeRecoveryRecord["targetGate"]>([
   "production",
 ]);
 
+function isSha1(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isAdministrativeRecoveryDetails(
+  kind: AdministrativeRecoveryKind,
+  value: unknown,
+): value is AdministrativeRecoveryDetails {
+  if (typeof value !== "object" || value === null) return false;
+  const details = value as Record<string, unknown>;
+  if (kind === "redundant-profile-downgrade")
+    return (
+      hasExactKeys(value, ["fromProfile", "toProfile"]) &&
+      ["lean", "standard", "critical"].includes(String(details.fromProfile)) &&
+      ["lean", "standard"].includes(String(details.toProfile))
+    );
+  if (kind === "missing-keep-branch-finish")
+    return (
+      hasExactKeys(value, ["branch", "headCommit", "targetTree"]) &&
+      typeof details.branch === "string" &&
+      isSha1(details.headCommit) &&
+      isSha1(details.targetTree)
+    );
+  if (kind === "repair-receipt-sequencing")
+    return (
+      hasExactKeys(value, [
+        "priorDecisionSequence",
+        "priorDecisionChainDigest",
+      ]) &&
+      Number.isInteger(details.priorDecisionSequence) &&
+      Number(details.priorDecisionSequence) >= 0 &&
+      isSha256(details.priorDecisionChainDigest)
+    );
+  if (kind === "stale-evidence-after-controller-event")
+    return (
+      hasExactKeys(value, ["evidenceId", "freshThroughEventId"]) &&
+      isSafeRequestId(details.evidenceId) &&
+      isSafeRequestId(details.freshThroughEventId)
+    );
+  if (kind === "canonical-digest-refetch")
+    return (
+      hasExactKeys(value, [
+        "authorityDigest",
+        "meteringDigest",
+        "controllerStateDigest",
+      ]) &&
+      isSha256(details.authorityDigest) &&
+      isSha256(details.meteringDigest) &&
+      isSha256(details.controllerStateDigest)
+    );
+  if (kind === "disappeared-agent-clean-worktree")
+    return (
+      hasExactKeys(value, ["agentExecutionId", "agentWorkspaceId"]) &&
+      isSafeRequestId(details.agentExecutionId) &&
+      isSafeRequestId(details.agentWorkspaceId)
+    );
+  if (kind === "idempotent-push-pr-reconciliation")
+    return (
+      hasExactKeys(value, [
+        "candidateTree",
+        "candidateCommit",
+        "pullRequestNumber",
+        "priorEffectSequence",
+        "originalIdempotencyKey",
+        "originalRequestDigest",
+        "priorOutcome",
+      ]) &&
+      isSha1(details.candidateTree) &&
+      isSha1(details.candidateCommit) &&
+      Number.isInteger(details.pullRequestNumber) &&
+      Number(details.pullRequestNumber) >= 1 &&
+      Number.isInteger(details.priorEffectSequence) &&
+      Number(details.priorEffectSequence) >= 1 &&
+      isSafeRequestId(details.originalIdempotencyKey) &&
+      isSha256(details.originalRequestDigest) &&
+      details.priorOutcome === "authorization-issued-outcome-unknown"
+    );
+  return (
+    hasExactKeys(value, ["ciRunId", "ciCheckId"]) &&
+    isSafeRequestId(details.ciRunId) &&
+    isSafeRequestId(details.ciCheckId)
+  );
+}
+
 function isAdministrativeRecoveryRequest(
   value: unknown,
 ): value is AdministrativeRecoveryRequest {
@@ -2400,6 +3388,7 @@ function isAdministrativeRecoveryRequest(
       "workspaceId",
       "identityRevalidated",
       "targetGate",
+      "details",
       "observedAt",
     ])
   )
@@ -2419,9 +3408,201 @@ function isAdministrativeRecoveryRequest(
     recoveryTargets.has(
       request.targetGate as AdministrativeRecoveryRecord["targetGate"],
     ) &&
+    isAdministrativeRecoveryDetails(
+      request.kind as AdministrativeRecoveryKind,
+      request.details,
+    ) &&
     typeof request.observedAt === "string" &&
     isCanonicalLifecycleTimestamp(request.observedAt)
   );
+}
+
+function roleMayPerformRecovery(
+  role: DeliveryRole,
+  kind: AdministrativeRecoveryKind,
+): boolean {
+  if (role === "flow") return true;
+  if (role === "product")
+    return new Set<AdministrativeRecoveryKind>([
+      "redundant-profile-downgrade",
+      "missing-keep-branch-finish",
+      "stale-evidence-after-controller-event",
+      "canonical-digest-refetch",
+    ]).has(kind);
+  if (role === "principal-developer")
+    return new Set<AdministrativeRecoveryKind>([
+      "repair-receipt-sequencing",
+      "canonical-digest-refetch",
+      "disappeared-agent-clean-worktree",
+      "interrupted-ci-polling",
+    ]).has(kind);
+  if (role === "independent-verifier")
+    return (
+      kind === "stale-evidence-after-controller-event" ||
+      kind === "canonical-digest-refetch"
+    );
+  return kind === "canonical-digest-refetch";
+}
+
+function deliveryRecoveryPolicyCode(
+  contract: DeliveryAuthorityContract,
+  request: AdministrativeRecoveryRequest,
+): AdministrativeRecoveryDecisionCode {
+  const binding = contract.roles[request.actorRole];
+  if (
+    !request.identityRevalidated ||
+    request.actorRole !== contract.activeRole ||
+    request.actorId !== binding.actorId ||
+    request.executionId !== binding.executionId ||
+    request.workspaceId !== binding.workspaceId
+  )
+    return "identity-not-revalidated";
+  if (
+    request.observedAt !== contract.meteringObservedAt ||
+    request.observedAt <= latestRecordedTimestamp(contract)
+  )
+    return "stale-observation";
+  if (
+    request.targetGate !== "administrative" ||
+    (contract.workflow.state !== "blocked" &&
+      contract.workflow.state !== "escalated") ||
+    !roleMayPerformRecovery(request.actorRole, request.kind)
+  )
+    return "recovery-gate-denied";
+
+  if (request.kind === "redundant-profile-downgrade") {
+    const details = request.details as Extract<
+      AdministrativeRecoveryDetails,
+      { fromProfile: string }
+    >;
+    const ranks = { lean: 0, standard: 1, critical: 2 } as const;
+    return details.fromProfile === contract.task.assurance.profile &&
+      ranks[details.toProfile] < ranks[details.fromProfile]
+      ? "accepted"
+      : "recovery-gate-denied";
+  }
+  if (request.kind === "missing-keep-branch-finish") {
+    const details = request.details as Extract<
+      AdministrativeRecoveryDetails,
+      { branch: string }
+    >;
+    return details.branch === contract.task.repository.featureBranch &&
+      details.headCommit === contract.workflow.candidate.headCommit &&
+      details.targetTree === contract.workflow.candidate.tree
+      ? "accepted"
+      : "recovery-gate-denied";
+  }
+  if (request.kind === "repair-receipt-sequencing") {
+    const details = request.details as Extract<
+      AdministrativeRecoveryDetails,
+      { priorDecisionSequence: number }
+    >;
+    const records = [
+      ...contract.workflow.audit,
+      ...contract.effectAudit,
+      ...contract.administrativeRecoveries,
+    ];
+    return records.some((record) => {
+      const authentication = record.authentication;
+      return (
+        authentication !== null &&
+        authentication.sequence === details.priorDecisionSequence &&
+        authentication.resultingChainDigest === details.priorDecisionChainDigest
+      );
+    })
+      ? "accepted"
+      : "recovery-gate-denied";
+  }
+  if (request.kind === "stale-evidence-after-controller-event") {
+    const details = request.details as Extract<
+      AdministrativeRecoveryDetails,
+      { evidenceId: string }
+    >;
+    return contract.evidence.some(
+      (evidence) =>
+        evidence.evidenceId === details.evidenceId &&
+        evidence.freshThroughEventId === details.freshThroughEventId,
+    )
+      ? "accepted"
+      : "recovery-gate-denied";
+  }
+  if (request.kind === "canonical-digest-refetch") {
+    const details = request.details as Extract<
+      AdministrativeRecoveryDetails,
+      { authorityDigest: string }
+    >;
+    return details.authorityDigest === contract.authorityDigest &&
+      details.meteringDigest === contract.meteringDigest &&
+      details.controllerStateDigest === contract.controllerStateDigest
+      ? "accepted"
+      : "recovery-gate-denied";
+  }
+  if (request.kind === "disappeared-agent-clean-worktree") {
+    const details = request.details as Extract<
+      AdministrativeRecoveryDetails,
+      { agentExecutionId: string }
+    >;
+    return Object.values(contract.roles).some(
+      (role) =>
+        role.executionId === details.agentExecutionId &&
+        role.workspaceId === details.agentWorkspaceId,
+    )
+      ? "accepted"
+      : "recovery-gate-denied";
+  }
+  if (request.kind === "interrupted-ci-polling") {
+    const details = request.details as Extract<
+      AdministrativeRecoveryDetails,
+      { ciRunId: string }
+    >;
+    return (contract.workflow.observations.ci === "pending" ||
+      contract.workflow.observations.ci === "failed") &&
+      contract.evidence.some(
+        (evidence) =>
+          evidence.ci.runId === details.ciRunId &&
+          evidence.ci.checkId === details.ciCheckId,
+      )
+      ? "accepted"
+      : "recovery-gate-denied";
+  }
+
+  if (contract.autonomy.usage.cancelled) return "recovery-gate-denied";
+  const details = request.details as Extract<
+    AdministrativeRecoveryDetails,
+    { priorEffectSequence: number }
+  >;
+  const candidate = contract.workflow.candidate;
+  const prior = contract.effectAudit.find(
+    (effect) =>
+      effect.authentication?.sequence === details.priorEffectSequence &&
+      effect.idempotencyKey === details.originalIdempotencyKey &&
+      effect.requestDigest === details.originalRequestDigest,
+  );
+  if (
+    request.actorRole !== "flow" ||
+    details.candidateTree !== candidate.tree ||
+    details.candidateCommit !== candidate.headCommit ||
+    details.pullRequestNumber !== candidate.pullRequest.number ||
+    !publicationIsFresh(contract) ||
+    !hasCurrentApprovalEvidence(contract) ||
+    prior === undefined ||
+    !prior.allowed ||
+    prior.code !== "accepted" ||
+    prior.targetTree !== details.candidateTree ||
+    (prior.effect !== "feature-push" && prior.effect !== "pr-create-update") ||
+    prior.authentication === null ||
+    !publicationEffectStates.has(
+      prior.authentication.historicalContext.workflowState,
+    )
+  )
+    return "recovery-gate-denied";
+  const priorContext = decisionContextAsContract(
+    prior.authentication.historicalContext,
+  );
+  return publicationIsFresh(priorContext) &&
+    hasCurrentApprovalEvidence(priorContext)
+    ? "accepted"
+    : "recovery-gate-denied";
 }
 
 export function evaluateAdministrativeRecovery(
@@ -2429,11 +3610,13 @@ export function evaluateAdministrativeRecovery(
   requestValue: unknown,
   expectedAuthorityDigest: unknown,
   expectedMeteringDigest: unknown,
+  expectedControllerStateDigest: unknown,
 ): AdministrativeRecoveryDecision {
   const validation = validateFrozenDeliveryAuthorityContract(
     value,
     expectedAuthorityDigest,
     expectedMeteringDigest,
+    expectedControllerStateDigest,
   );
   const requestSnapshot = canonicalSnapshot<unknown>(requestValue);
   const request = isAdministrativeRecoveryRequest(requestSnapshot)
@@ -2450,17 +3633,20 @@ export function evaluateAdministrativeRecovery(
     workspaceId: "rejected-workspace",
     identityRevalidated: false,
     targetGate: "identity",
+    details: {
+      authorityDigest: "0".repeat(64),
+      meteringDigest: "0".repeat(64),
+      controllerStateDigest: "0".repeat(64),
+    },
     observedAt: "1970-01-01T00:00:00.000Z",
   };
   const make = (
     allowed: boolean,
     idempotent: boolean,
     code: AdministrativeRecoveryDecisionCode,
-  ): AdministrativeRecoveryDecision => ({
-    allowed,
-    idempotent,
-    code,
-    audit: {
+  ): AdministrativeRecoveryDecision => {
+    const audit: AdministrativeRecoveryRecord = {
+      authentication: null,
       ...fallback,
       requestDigest: sha256(fallback),
       workflowState: validation.valid
@@ -2472,38 +3658,35 @@ export function evaluateAdministrativeRecovery(
       accepted: allowed,
       code,
       observedAt,
-    },
-  });
+    };
+    if (
+      validation.valid &&
+      request !== null &&
+      typeof expectedControllerStateDigest === "string"
+    ) {
+      const context = createDeliveryDecisionContext(
+        validation.value,
+        expectedControllerStateDigest,
+      );
+      authenticateDecisionRecord(
+        validation.value,
+        expectedControllerStateDigest,
+        "recovery",
+        audit,
+        context,
+      );
+    }
+    return { allowed, idempotent, code, audit };
+  };
   if (!validation.valid || request === null)
     return make(false, false, "contract-invalid");
   const contract = validation.value;
-  const binding = contract.roles[request.actorRole];
-  if (
-    !request.identityRevalidated ||
-    request.actorRole !== contract.activeRole ||
-    request.actorId !== binding.actorId ||
-    request.executionId !== binding.executionId ||
-    request.workspaceId !== binding.workspaceId
-  )
-    return make(false, false, "identity-not-revalidated");
   const prior = contract.administrativeRecoveries.find(
     (record) => record.idempotencyKey === request.idempotencyKey,
   );
   const requestDigest = sha256(request);
   if (prior) {
-    const priorDigest = sha256({
-      recoveryId: prior.recoveryId,
-      kind: prior.kind,
-      idempotencyKey: prior.idempotencyKey,
-      actorRole: prior.actorRole,
-      actorId: prior.actorId,
-      executionId: prior.executionId,
-      workspaceId: prior.workspaceId,
-      identityRevalidated: prior.identityRevalidated,
-      targetGate: prior.targetGate,
-      observedAt: prior.observedAt,
-    });
-    return priorDigest === requestDigest
+    return prior.requestDigest === requestDigest
       ? {
           allowed: false,
           idempotent: true,
@@ -2514,19 +3697,6 @@ export function evaluateAdministrativeRecovery(
   }
   if (idempotencyKeyExists(contract, request.idempotencyKey))
     return make(false, false, "idempotency-conflict");
-  if (
-    request.observedAt !== contract.meteringObservedAt ||
-    request.observedAt <= latestRecordedTimestamp(contract)
-  )
-    return make(false, false, "stale-observation");
-  if (
-    request.targetGate !== "administrative" ||
-    (contract.workflow.state !== "blocked" &&
-      contract.workflow.state !== "escalated") ||
-    (request.kind === "interrupted-ci-polling" &&
-      contract.workflow.observations.ci !== "pending" &&
-      contract.workflow.observations.ci !== "failed")
-  )
-    return make(false, false, "recovery-gate-denied");
-  return make(true, false, "accepted");
+  const code = deliveryRecoveryPolicyCode(contract, request);
+  return make(code === "accepted", false, code);
 }

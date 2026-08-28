@@ -3,13 +3,14 @@
   "$id": "https://github.com/mojomanyana/scrum-pi-team-skills/schemas/spts.delivery-authority/1.0.0",
   "title": "spts.delivery-authority structural envelope",
   "description": "Portable structural schema for a task-scoped delivery authority contract; structural success does not authorize any delivery action or effect.",
-  "$comment": "NON-AUTHORIZING ARTIFACT: use validateDeliveryAuthorityContract for credential scanning, canonical identity, evidence, role-separation, workflow, publication, grant, recovery, and bounded-autonomy invariants.",
+  "$comment": "NON-AUTHORIZING ARTIFACT: validateDeliveryAuthorityContract proves canonical internal consistency only. Effects require validateFrozenDeliveryAuthorityContract with separately trusted static-authority, metering, and complete controller-state digests.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "contractId",
     "contractVersion",
     "authorityDigest",
+    "controllerStateDigest",
     "meteringDigest",
     "meteringObservedAt",
     "activeRole",
@@ -31,6 +32,7 @@
     "contractId": { "const": "spts.delivery-authority" },
     "contractVersion": { "const": "1.0.0" },
     "authorityDigest": { "$ref": "#/definitions/sha256" },
+    "controllerStateDigest": { "$ref": "#/definitions/sha256" },
     "meteringDigest": { "$ref": "#/definitions/sha256" },
     "meteringObservedAt": { "$ref": "#/definitions/timestamp" },
     "activeRole": { "$ref": "#/definitions/role" },
@@ -164,7 +166,14 @@
     "workflow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["state", "checkpoint", "observations", "candidate", "audit"],
+      "required": [
+        "state",
+        "checkpoint",
+        "decisionChain",
+        "observations",
+        "candidate",
+        "audit"
+      ],
       "properties": {
         "state": { "$ref": "#/definitions/workflowState" },
         "checkpoint": {
@@ -172,6 +181,8 @@
           "additionalProperties": false,
           "required": [
             "checkpointId",
+            "decisionSequence",
+            "decisionChainDigest",
             "state",
             "candidateTree",
             "activeRepairBudget",
@@ -180,6 +191,8 @@
           ],
           "properties": {
             "checkpointId": { "$ref": "#/definitions/safeId" },
+            "decisionSequence": { "$ref": "#/definitions/nonnegative" },
+            "decisionChainDigest": { "$ref": "#/definitions/sha256" },
             "state": { "$ref": "#/definitions/workflowState" },
             "candidateTree": { "$ref": "#/definitions/sha1" },
             "activeRepairBudget": {
@@ -206,6 +219,15 @@
               }
             },
             "observedAt": { "$ref": "#/definitions/timestamp" }
+          }
+        },
+        "decisionChain": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sequence", "digest"],
+          "properties": {
+            "sequence": { "$ref": "#/definitions/nonnegative" },
+            "digest": { "$ref": "#/definitions/sha256" }
           }
         },
         "observations": {
@@ -581,10 +603,89 @@
         "escalated"
       ]
     },
+    "decisionContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractId",
+        "contractVersion",
+        "controllerStateDigest",
+        "authorityDigest",
+        "meteringDigest",
+        "meteringObservedAt",
+        "activeRole",
+        "governance",
+        "task",
+        "roles",
+        "workflowCheckpoint",
+        "workflowState",
+        "activeRepairBudget",
+        "observations",
+        "candidate",
+        "evidence",
+        "autonomy",
+        "effectGrants",
+        "requestedEffects",
+        "activeEscalations"
+      ],
+      "properties": {
+        "contractId": { "const": "spts.delivery-authority" },
+        "contractVersion": { "const": "1.0.0" },
+        "controllerStateDigest": { "$ref": "#/definitions/sha256" },
+        "authorityDigest": { "$ref": "#/definitions/sha256" },
+        "meteringDigest": { "$ref": "#/definitions/sha256" },
+        "meteringObservedAt": { "$ref": "#/definitions/timestamp" },
+        "activeRole": { "$ref": "#/definitions/role" },
+        "governance": { "$ref": "#/properties/governance" },
+        "task": { "$ref": "#/properties/task" },
+        "roles": { "$ref": "#/properties/roles" },
+        "workflowCheckpoint": {
+          "$ref": "#/properties/workflow/properties/checkpoint"
+        },
+        "workflowState": { "$ref": "#/definitions/workflowState" },
+        "activeRepairBudget": {
+          "enum": ["implementation", "verification", "ci"]
+        },
+        "observations": {
+          "$ref": "#/properties/workflow/properties/observations"
+        },
+        "candidate": {
+          "$ref": "#/properties/workflow/properties/candidate"
+        },
+        "evidence": { "$ref": "#/properties/evidence" },
+        "autonomy": { "$ref": "#/properties/autonomy" },
+        "effectGrants": { "$ref": "#/properties/effectGrants" },
+        "requestedEffects": { "$ref": "#/properties/requestedEffects" },
+        "activeEscalations": { "$ref": "#/properties/activeEscalations" }
+      }
+    },
+    "decisionAuthentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "previousChainDigest",
+        "controllerStateDigest",
+        "historicalContext",
+        "historicalContextDigest",
+        "resultingStateDigest",
+        "resultingChainDigest"
+      ],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "previousChainDigest": { "$ref": "#/definitions/sha256" },
+        "controllerStateDigest": { "$ref": "#/definitions/sha256" },
+        "historicalContext": { "$ref": "#/definitions/decisionContext" },
+        "historicalContextDigest": { "$ref": "#/definitions/sha256" },
+        "resultingStateDigest": { "$ref": "#/definitions/sha256" },
+        "resultingChainDigest": { "$ref": "#/definitions/sha256" }
+      }
+    },
     "auditRecord": {
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "authentication",
         "eventId",
         "idempotencyKey",
         "requestDigest",
@@ -600,6 +701,7 @@
         "candidateTree"
       ],
       "properties": {
+        "authentication": { "$ref": "#/definitions/decisionAuthentication" },
         "eventId": { "$ref": "#/definitions/safeId" },
         "idempotencyKey": { "$ref": "#/definitions/safeId" },
         "requestDigest": { "$ref": "#/definitions/sha256" },
@@ -804,14 +906,113 @@
         "interrupted-ci-polling"
       ]
     },
+    "recoveryDetails": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fromProfile", "toProfile"],
+          "properties": {
+            "fromProfile": { "enum": ["lean", "standard", "critical"] },
+            "toProfile": { "enum": ["lean", "standard"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["branch", "headCommit", "targetTree"],
+          "properties": {
+            "branch": { "$ref": "#/definitions/gitBranch" },
+            "headCommit": { "$ref": "#/definitions/sha1" },
+            "targetTree": { "$ref": "#/definitions/sha1" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["priorDecisionSequence", "priorDecisionChainDigest"],
+          "properties": {
+            "priorDecisionSequence": { "$ref": "#/definitions/nonnegative" },
+            "priorDecisionChainDigest": { "$ref": "#/definitions/sha256" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidenceId", "freshThroughEventId"],
+          "properties": {
+            "evidenceId": { "$ref": "#/definitions/safeId" },
+            "freshThroughEventId": { "$ref": "#/definitions/safeId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "authorityDigest",
+            "meteringDigest",
+            "controllerStateDigest"
+          ],
+          "properties": {
+            "authorityDigest": { "$ref": "#/definitions/sha256" },
+            "meteringDigest": { "$ref": "#/definitions/sha256" },
+            "controllerStateDigest": { "$ref": "#/definitions/sha256" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agentExecutionId", "agentWorkspaceId"],
+          "properties": {
+            "agentExecutionId": { "$ref": "#/definitions/safeId" },
+            "agentWorkspaceId": { "$ref": "#/definitions/safeId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "candidateTree",
+            "candidateCommit",
+            "pullRequestNumber",
+            "priorEffectSequence",
+            "originalIdempotencyKey",
+            "originalRequestDigest",
+            "priorOutcome"
+          ],
+          "properties": {
+            "candidateTree": { "$ref": "#/definitions/sha1" },
+            "candidateCommit": { "$ref": "#/definitions/sha1" },
+            "pullRequestNumber": { "type": "integer", "minimum": 1 },
+            "priorEffectSequence": { "type": "integer", "minimum": 1 },
+            "originalIdempotencyKey": { "$ref": "#/definitions/safeId" },
+            "originalRequestDigest": { "$ref": "#/definitions/sha256" },
+            "priorOutcome": {
+              "const": "authorization-issued-outcome-unknown"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ciRunId", "ciCheckId"],
+          "properties": {
+            "ciRunId": { "$ref": "#/definitions/safeId" },
+            "ciCheckId": { "$ref": "#/definitions/safeId" }
+          }
+        }
+      ]
+    },
     "recoveryRecord": {
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "authentication",
         "recoveryId",
         "kind",
         "idempotencyKey",
         "requestDigest",
+        "details",
         "actorRole",
         "actorId",
         "executionId",
@@ -825,10 +1026,12 @@
         "observedAt"
       ],
       "properties": {
+        "authentication": { "$ref": "#/definitions/decisionAuthentication" },
         "recoveryId": { "$ref": "#/definitions/safeId" },
         "kind": { "$ref": "#/definitions/recoveryKind" },
         "idempotencyKey": { "$ref": "#/definitions/safeId" },
         "requestDigest": { "$ref": "#/definitions/sha256" },
+        "details": { "$ref": "#/definitions/recoveryDetails" },
         "actorRole": { "$ref": "#/definitions/role" },
         "actorId": { "$ref": "#/definitions/safeId" },
         "executionId": { "$ref": "#/definitions/safeId" },
@@ -878,6 +1081,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "authentication",
         "idempotencyKey",
         "requestDigest",
         "effect",
@@ -892,6 +1096,7 @@
         "workflowState"
       ],
       "properties": {
+        "authentication": { "$ref": "#/definitions/decisionAuthentication" },
         "idempotencyKey": { "$ref": "#/definitions/safeId" },
         "requestDigest": { "$ref": "#/definitions/sha256" },
         "effect": { "type": "string", "minLength": 1, "maxLength": 64 },
@@ -911,6 +1116,7 @@
             "stale-observation",
             "escalation-required",
             "publication-denied",
+            "effect-state-denied",
             "role-authority-denied",
             "distinct-grant-required"
           ]
