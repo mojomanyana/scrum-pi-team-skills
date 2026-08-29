@@ -5,21 +5,45 @@
   "description": "Closed, non-authorizing bootstrap envelope for exact numeric-loopback reads.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contractId","contractVersion","projectId","taskId","authorityAnchor","origin","taskPath","anchorPath","notBefore","expiresAt"],
+  "required": [
+    "contractId",
+    "contractVersion",
+    "projectId",
+    "taskId",
+    "authorityAnchor",
+    "origin",
+    "taskPath",
+    "anchorPath",
+    "notBefore",
+    "expiresAt"
+  ],
   "properties": {
     "contractId": { "const": "spts.delivery-authority-bootstrap" },
     "contractVersion": { "const": "1.0.0" },
     "projectId": { "$ref": "#/definitions/id" },
     "taskId": { "$ref": "#/definitions/id" },
     "authorityAnchor": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "origin": { "type": "string", "pattern": "^http://(?:127(?:\\.[0-9]{1,3}){3}|\\[0*:0*1\\]):[1-9][0-9]{0,4}$" },
+    "origin": {
+      "type": "string",
+      "pattern": "^http://(?:127(?:\\.[0-9]{1,3}){3}|\\[0*:0*1\\]):[1-9][0-9]{0,4}$"
+    },
     "taskPath": { "$ref": "#/definitions/path" },
     "anchorPath": { "$ref": "#/definitions/path" },
     "notBefore": { "type": "string", "format": "date-time" },
     "expiresAt": { "type": "string", "format": "date-time" }
   },
   "definitions": {
-    "id": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$" },
-    "path": { "type": "string", "minLength": 2, "maxLength": 512, "pattern": "^/(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*%2[eEfF]|%5[cC])[A-Za-z0-9._~!$&'()*+,;=:@%/-]+$" }
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 512,
+      "pattern": "^/(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*%2[eEfF]|%5[cC])[A-Za-z0-9._~!$&'()*+,;=:@%/-]+$"
+    }
   }
 }

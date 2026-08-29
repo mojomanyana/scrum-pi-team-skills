@@ -23,11 +23,21 @@ describe("delivery authority bootstrap", () => {
     const valid = validateDeliveryAuthorityBootstrap(bootstrap);
     expect(valid.valid).toBe(true);
     if (!valid.valid) return;
-    expect(computeDeliveryAuthorityBootstrapDigest(valid.value)).toMatch(/^[a-f0-9]{64}$/);
-    expect(authorizeBootstrapRead(valid.value, {
-      method: "GET", url: "http://127.0.0.1:4815/api/tasks/SPTS-10",
-      redirect: false,
-    }, computeDeliveryAuthorityBootstrapDigest(valid.value), "2026-08-29T00:30:00.000Z")).toEqual({ allowed: true, code: "accepted" });
+    expect(computeDeliveryAuthorityBootstrapDigest(valid.value)).toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+    expect(
+      authorizeBootstrapRead(
+        valid.value,
+        {
+          method: "GET",
+          url: "http://127.0.0.1:4815/api/tasks/SPTS-10",
+          redirect: false,
+        },
+        computeDeliveryAuthorityBootstrapDigest(valid.value),
+        "2026-08-29T00:30:00.000Z",
+      ),
+    ).toEqual({ allowed: true, code: "accepted" });
   });
 
   it.each([
@@ -41,7 +51,14 @@ describe("delivery authority bootstrap", () => {
     const valid = validateDeliveryAuthorityBootstrap(bootstrap);
     expect(valid.valid).toBe(true);
     if (!valid.valid) return;
-    expect(authorizeBootstrapRead(valid.value, { method: "GET", url, redirect: false }, computeDeliveryAuthorityBootstrapDigest(valid.value), "2026-08-29T00:30:00.000Z").allowed).toBe(false);
+    expect(
+      authorizeBootstrapRead(
+        valid.value,
+        { method: "GET", url, redirect: false },
+        computeDeliveryAuthorityBootstrapDigest(valid.value),
+        "2026-08-29T00:30:00.000Z",
+      ).allowed,
+    ).toBe(false);
   });
 
   it("rejects mutation, redirects, wrong time, self-claimed digest, and hostile objects", () => {
@@ -50,12 +67,51 @@ describe("delivery authority bootstrap", () => {
     if (!valid.valid) return;
     const digest = computeDeliveryAuthorityBootstrapDigest(valid.value);
     for (const request of [
-      { method: "POST", url: `${bootstrap.origin}${bootstrap.taskPath}`, redirect: false },
-      { method: "GET", url: `${bootstrap.origin}${bootstrap.taskPath}`, redirect: true },
-    ]) expect(authorizeBootstrapRead(valid.value, request, digest, "2026-08-29T00:30:00.000Z").allowed).toBe(false);
-    expect(authorizeBootstrapRead(valid.value, { method: "GET", url: `${bootstrap.origin}${bootstrap.taskPath}`, redirect: false }, "b".repeat(64), "2026-08-29T00:30:00.000Z").allowed).toBe(false);
-    expect(authorizeBootstrapRead(valid.value, { method: "GET", url: `${bootstrap.origin}${bootstrap.taskPath}`, redirect: false }, digest, "2027-01-01T00:00:00.000Z").allowed).toBe(false);
-    const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
+      {
+        method: "POST",
+        url: `${bootstrap.origin}${bootstrap.taskPath}`,
+        redirect: false,
+      },
+      {
+        method: "GET",
+        url: `${bootstrap.origin}${bootstrap.taskPath}`,
+        redirect: true,
+      },
+    ])
+      expect(
+        authorizeBootstrapRead(
+          valid.value,
+          request,
+          digest,
+          "2026-08-29T00:30:00.000Z",
+        ).allowed,
+      ).toBe(false);
+    expect(
+      authorizeBootstrapRead(
+        valid.value,
+        {
+          method: "GET",
+          url: `${bootstrap.origin}${bootstrap.taskPath}`,
+          redirect: false,
+        },
+        "b".repeat(64),
+        "2026-08-29T00:30:00.000Z",
+      ).allowed,
+    ).toBe(false);
+    expect(
+      authorizeBootstrapRead(
+        valid.value,
+        {
+          method: "GET",
+          url: `${bootstrap.origin}${bootstrap.taskPath}`,
+          redirect: false,
+        },
+        digest,
+        "2027-01-01T00:00:00.000Z",
+      ).allowed,
+    ).toBe(false);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
     expect(validateDeliveryAuthorityBootstrap(cyclic).valid).toBe(false);
   });
 });

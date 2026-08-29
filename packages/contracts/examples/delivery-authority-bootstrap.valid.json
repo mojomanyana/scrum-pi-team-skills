@@ -1,0 +1,12 @@
+{
+  "contractId": "spts.delivery-authority-bootstrap",
+  "contractVersion": "1.0.0",
+  "projectId": "SPTS",
+  "taskId": "SPTS-10",
+  "authorityAnchor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "origin": "http://127.0.0.1:4815",
+  "taskPath": "/api/tasks/SPTS-10",
+  "anchorPath": "/api/tasks/SPTS-10/authority-anchor",
+  "notBefore": "2026-08-29T00:00:00.000Z",
+  "expiresAt": "2026-08-29T01:00:00.000Z"
+}

@@ -54,6 +54,12 @@ npm ci
 | `npm run quality`      | Run all checks used by CI.                    |
 | `npm run clean`        | Remove TypeScript build outputs.              |
 
+## Flow delivery contracts v2 (SPTS-10 Slice 1)
+
+Slice 1 adds the closed `spts.delivery-authority/2.0.0` contract beside unchanged v1 and the `spts.delivery-authority-bootstrap/1.0.0` numeric-loopback read boundary. These APIs validate hostile input and make pure, fail-closed transition, evidence, effect, recovery, idempotency, reconciliation, and cancellation decisions. A v2 execution boundary rejects v1 and unknown versions without upgrade or fallback.
+
+This contract-only slice does not launch Pi or Herdr, call Paca, GitHub, or CI, execute adapters, publish, merge, or grant later-slice authority. Production Paca and real-Pi execution remain disabled pending their separately approved protocols and confinement gates. Candidate publication requires verifier-owned specification and quality approvals for one exact tree and exact trusted CI evidence; completion still requires later stakeholder merge authority. Every candidate tree requires a fresh independent Critical review.
+
 ## Governed autonomous delivery authority (SPTS-9)
 
 `packages/contracts/src/schemas/delivery-authority.schema.json` defines the unpublished `spts.delivery-authority/1.0.0` envelope. The contract binds one Paca task, repository/base/feature branch, separated Product/Flow/Principal Developer/independent Verifier/stakeholder identities, bounded autonomy, workflow, grants, recoveries, decisions, and evidence. Paca remains the system of record; all agents remain local Pi processes governed by pi-daddy and supervised through Herdr.
