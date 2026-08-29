@@ -6,6 +6,7 @@ import { containsCredentialShapedContent } from "./credential-shape.js";
 
 export { containsCredentialShapedContent } from "./credential-shape.js";
 export * from "./delivery-authority.js";
+export * from "./delivery-authority-bootstrap.js";
 export * from "./lifecycle-receipt.js";
 export * from "./lifecycle-receipt-anchor.js";
 
