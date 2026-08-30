@@ -137,6 +137,47 @@ describe("delivery identity and history binding", () => {
     expect(evaluateDeliveryEffectV2(contract, request, mt, []).allowed).toBe(
       true,
     );
+    for (const mergeMethod of ["octopus", "", 1, null])
+      expect(
+        evaluateDeliveryEffectV2(
+          contract,
+          { ...request, mergeMethod } as never,
+          { ...mt, mergeGrant: { ...grant, mergeMethod } } as never,
+          [],
+        ),
+      ).toMatchObject({ allowed: false, executable: false });
+    for (const observedAt of [
+      "not-a-time",
+      1,
+      "2026-08-28T23:59:59.999Z",
+      "2026-08-29T02:00:00.000Z",
+      "2026-08-29T02:00:00.001Z",
+      "2026-08-29T01:00:00.001Z",
+    ])
+      expect(
+        evaluateDeliveryEffectV2(
+          contract,
+          { ...request, observedAt } as never,
+          mt,
+          [],
+        ),
+      ).toMatchObject({ allowed: false, executable: false });
+    expect(
+      evaluateDeliveryEffectV2(
+        contract,
+        { ...request, observedAt: "2026-08-29T00:00:00.000Z" },
+        mt,
+        [],
+      ).allowed,
+    ).toBe(true);
+    expect(
+      evaluateDeliveryEffectV2(
+        contract,
+        { ...request, observedAt: "2026-08-29T01:59:59.999Z" },
+        { ...mt, trustedNow: "2026-08-29T01:59:59.999Z" },
+        [],
+      ).allowed,
+    ).toBe(true);
     for (const field of [
       "projectId",
       "taskId",

@@ -292,10 +292,22 @@ export function evaluateDeliveryEffectV2(
       ) ||
       !isCanonicalLifecycleTimestamp(grant.notBefore) ||
       !isCanonicalLifecycleTimestamp(grant.expiresAt) ||
+      grant.notBefore >= grant.expiresAt ||
+      !(["merge", "squash", "rebase"] as unknown[]).includes(
+        request.mergeMethod,
+      ) ||
+      !(["merge", "squash", "rebase"] as unknown[]).includes(
+        grant.mergeMethod,
+      ) ||
+      typeof request.observedAt !== "string" ||
+      !isCanonicalLifecycleTimestamp(request.observedAt) ||
+      request.observedAt < grant.notBefore ||
+      request.observedAt >= grant.expiresAt ||
       typeof trusted.trustedNow !== "string" ||
       !isCanonicalLifecycleTimestamp(trusted.trustedNow) ||
       trusted.trustedNow < grant.notBefore ||
       trusted.trustedNow >= grant.expiresAt ||
+      request.observedAt > trusted.trustedNow ||
       request.projectId !== c.identity.projectId ||
       request.taskId !== c.identity.taskId ||
       request.repositoryId !== c.identity.repositoryId ||

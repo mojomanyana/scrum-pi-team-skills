@@ -61,6 +61,63 @@ describe("delivery authority bootstrap", () => {
     ).toBe(false);
   });
 
+  it("rejects a non-closed or incorrectly typed bootstrap read request", () => {
+    const valid = validateDeliveryAuthorityBootstrap(bootstrap);
+    expect(valid.valid).toBe(true);
+    if (!valid.valid) return;
+    const digest = computeDeliveryAuthorityBootstrapDigest(valid.value);
+    const exact = {
+      method: "GET",
+      url: `${bootstrap.origin}${bootstrap.taskPath}`,
+      redirect: false,
+    };
+    const inherited = Object.create({ method: "GET" }) as Record<
+      string,
+      unknown
+    >;
+    inherited.url = exact.url;
+    inherited.redirect = false;
+    let getterCalled = false;
+    const getter = { method: "GET", redirect: false } as Record<
+      string,
+      unknown
+    >;
+    Object.defineProperty(getter, "url", {
+      enumerable: true,
+      get: () => {
+        getterCalled = true;
+        return exact.url;
+      },
+    });
+    const { proxy, revoke } = Proxy.revocable(exact, {});
+    revoke();
+    for (const request of [
+      { ...exact, bootstrapExtra: true },
+      { method: "GET", url: exact.url, redirect: "false" },
+      { method: "GET", url: exact.url, redirect: 0 },
+      { method: "GET", url: exact.url, redirect: 1 },
+      { method: "GET", url: exact.url, redirect: null },
+      { method: "GET", url: exact.url },
+      { method: "GET", redirect: false },
+      { url: exact.url, redirect: false },
+      { method: 1, url: exact.url, redirect: false },
+      { method: "GET", url: 1, redirect: false },
+      { ...exact, [Symbol("authority")]: true },
+      inherited,
+      getter,
+      proxy,
+    ])
+      expect(
+        authorizeBootstrapRead(
+          valid.value,
+          request as never,
+          digest,
+          "2026-08-29T00:30:00.000Z",
+        ),
+      ).toEqual({ allowed: false, code: "request-denied" });
+    expect(getterCalled).toBe(false);
+  });
+
   it("rejects mutation, redirects, wrong time, self-claimed digest, and hostile objects", () => {
     const valid = validateDeliveryAuthorityBootstrap(bootstrap);
     expect(valid.valid).toBe(true);

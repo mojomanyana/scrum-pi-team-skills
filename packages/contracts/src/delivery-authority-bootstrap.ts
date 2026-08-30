@@ -5,7 +5,10 @@ import {
   isCanonicalLifecycleTimestamp,
 } from "./lifecycle-receipt.js";
 import schema from "./schemas/delivery-authority-bootstrap.schema.json" with { type: "json" };
-import { snapshotDeliveryV2Input } from "./delivery-authority-v2-input.js";
+import {
+  hasExactDeliveryV2Keys,
+  snapshotDeliveryV2Input,
+} from "./delivery-authority-v2-input.js";
 
 export const DELIVERY_AUTHORITY_BOOTSTRAP_ID =
   "spts.delivery-authority-bootstrap" as const;
@@ -112,9 +115,19 @@ export function authorizeBootstrapRead(
   trustedDigestInput: string,
   trustedNowInput: string,
 ): BootstrapReadDecision {
+  const requestSnapshot = snapshotDeliveryV2Input(requestInput);
+  if (!requestSnapshot.ok) return { allowed: false, code: "request-denied" };
+  const requestValue = requestSnapshot.value as Record<string, unknown>;
+  if (
+    !hasExactDeliveryV2Keys(requestValue, ["method", "url", "redirect"]) ||
+    typeof requestValue.method !== "string" ||
+    typeof requestValue.url !== "string" ||
+    typeof requestValue.redirect !== "boolean"
+  )
+    return { allowed: false, code: "request-denied" };
   const inputs = snapshotDeliveryV2Input({
     bootstrap: bootstrapInput,
-    request: requestInput,
+    request: requestValue,
     trustedDigest: trustedDigestInput,
     trustedNow: trustedNowInput,
   });
