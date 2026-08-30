@@ -72,6 +72,7 @@ interface PriorEffect {
   requestDigest: string;
   outcome: "accepted" | "rejected" | "unknown";
   postcondition: "applied" | "not-applied" | "unknown";
+  grantId?: string;
 }
 const effectPolicy: Record<
   string,
@@ -266,23 +267,33 @@ export function evaluateDeliveryEffectV2(
   if (request.kind === "merge" && !isValidMergeGrantV2(trusted.mergeGrant))
     return denied("merge-grant-required");
   if (!Array.isArray(history)) return denied("history-invalid");
-  for (const entry of history)
+  for (const entry of history) {
+    const hasGrantId =
+      typeof entry === "object" &&
+      entry !== null &&
+      Object.hasOwn(entry, "grantId");
+    const keys = [
+      "namespace",
+      "idempotencyKey",
+      "requestDigest",
+      "outcome",
+      "postcondition",
+      ...(hasGrantId ? ["grantId"] : []),
+    ];
     if (
-      !hasExactDeliveryV2Keys(entry, [
-        "namespace",
-        "idempotencyKey",
-        "requestDigest",
-        "outcome",
-        "postcondition",
-      ]) ||
+      !hasExactDeliveryV2Keys(entry, keys) ||
       typeof entry.namespace !== "string" ||
       entry.namespace.length === 0 ||
       typeof entry.idempotencyKey !== "string" ||
       !isSha256DeliveryV2(entry.requestDigest) ||
       !["accepted", "rejected", "unknown"].includes(entry.outcome) ||
-      !["applied", "not-applied", "unknown"].includes(entry.postcondition)
+      !["applied", "not-applied", "unknown"].includes(entry.postcondition) ||
+      (hasGrantId &&
+        (typeof entry.grantId !== "string" ||
+          entry.grantId.trim().length === 0))
     )
       return denied("history-invalid");
+  }
   const matches = history.filter(
     (x) =>
       x.namespace === "effect" && x.idempotencyKey === request.idempotencyKey,
@@ -300,6 +311,28 @@ export function evaluateDeliveryEffectV2(
       executable: false as const,
       priorResult: prior,
     };
+  }
+  if (request.kind === "merge") {
+    const grantMatches = history.filter(
+      (entry) =>
+        entry.namespace === "effect" &&
+        entry.grantId === trusted.mergeGrant!.grantId,
+    );
+    if (grantMatches.length > 1) return denied("history-ambiguous");
+    const priorGrant = grantMatches[0];
+    if (priorGrant) {
+      if (
+        priorGrant.outcome === "unknown" ||
+        priorGrant.postcondition === "unknown"
+      )
+        return denied("reconciliation-required");
+      return {
+        allowed: false as const,
+        code: "idempotent-replay" as const,
+        executable: false as const,
+        priorResult: priorGrant,
+      };
+    }
   }
   const policy = effectPolicy[request.kind];
   if (!policy) return denied("effect-denied");
@@ -377,6 +410,9 @@ export function evaluateDeliveryEffectV2(
     code: "accepted" as const,
     executable: true as const,
     intent: request,
+    ...(request.kind === "merge"
+      ? { grantId: trusted.mergeGrant!.grantId }
+      : {}),
   };
 }
 interface RecoveryRequest {

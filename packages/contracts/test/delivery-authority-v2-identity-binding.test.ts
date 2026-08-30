@@ -242,6 +242,38 @@ describe("delivery identity and history binding", () => {
         },
       ]).code,
     ).toBe("idempotent-replay");
+    for (const [prior, code] of [
+      [
+        {
+          namespace: "effect",
+          idempotencyKey: "original-effect-key",
+          requestDigest: request.requestDigest,
+          outcome: "accepted" as const,
+          postcondition: "applied" as const,
+          grantId: grant.grantId,
+        },
+        "idempotent-replay",
+      ],
+      [
+        {
+          namespace: "effect",
+          idempotencyKey: "original-effect-key",
+          requestDigest: "b".repeat(64),
+          outcome: "unknown" as const,
+          postcondition: "unknown" as const,
+          grantId: grant.grantId,
+        },
+        "reconciliation-required",
+      ],
+    ] as const)
+      expect(
+        evaluateDeliveryEffectV2(
+          contract,
+          { ...request, idempotencyKey: "fresh-effect-key" },
+          mt,
+          [prior],
+        ),
+      ).toMatchObject({ allowed: false, code, executable: false });
     expect(
       evaluateDeliveryEffectV2(
         contract,
