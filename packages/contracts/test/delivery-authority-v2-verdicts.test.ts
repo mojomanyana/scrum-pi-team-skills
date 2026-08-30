@@ -23,7 +23,25 @@ const identity = {
   workspaceId: "fresh-check",
   access: "read-only",
 } satisfies DeliveryIdentityV2;
+const delivery = {
+  ...identity,
+  role: "flow",
+  access: "orchestrate",
+  actorId: "flow",
+  executionId: "flow-exec",
+  workspaceId: "flow-work",
+} satisfies DeliveryIdentityV2;
+const controller = {
+  ...identity,
+  role: "controller",
+  access: "controller",
+  actorId: "controller",
+  executionId: "controller-exec",
+  workspaceId: "controller-work",
+} satisfies DeliveryIdentityV2;
+const currentIdentity = { delivery, controller };
 const trustedVerifier = {
+  currentIdentity,
   identity,
   candidate,
   controllerRevision: 3,
@@ -34,6 +52,7 @@ const trustedVerifier = {
 const make = (axis: "specification" | "quality") => ({
   axis,
   verdict: "APPROVE" as const,
+  currentIdentity,
   identity,
   candidate,
   controllerRevision: 3,
@@ -46,6 +65,7 @@ const verdicts = {
   quality: make("quality"),
 };
 const ci = {
+  currentIdentity,
   projectId: "SPTS",
   taskId: "SPTS-10",
   repositoryId: "repo",

@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { isProxy } from "node:util/types";
 import { containsCredentialShapedContent } from "./credential-shape.js";
 import { canonicalSerializeLifecycleValue } from "./lifecycle-receipt.js";
 
@@ -28,7 +29,14 @@ export function snapshotDeliveryV2Input(root: unknown): SafeSnapshot {
           throw new TypeError();
         return value;
       }
-      if (ancestors.has(value)) throw new TypeError();
+      if (isProxy(value) || ancestors.has(value)) throw new TypeError();
+      const prototype = Object.getPrototypeOf(value);
+      if (
+        Array.isArray(value)
+          ? prototype !== Array.prototype
+          : prototype !== Object.prototype && prototype !== null
+      )
+        throw new TypeError();
       ancestors.add(value);
       try {
         const isArray = Array.isArray(value);
@@ -40,7 +48,8 @@ export function snapshotDeliveryV2Input(root: unknown): SafeSnapshot {
           throw new TypeError();
         const out: unknown[] | Record<string, unknown> = isArray ? [] : {};
         for (const key of keys) {
-          if (typeof key !== "string" || key === "length") continue;
+          if (typeof key !== "string") throw new TypeError();
+          if (key === "length") continue;
           const descriptor = Object.getOwnPropertyDescriptor(value, key);
           if (!descriptor || !("value" in descriptor) || !descriptor.enumerable)
             throw new TypeError();
@@ -71,6 +80,24 @@ export function snapshotDeliveryV2Input(root: unknown): SafeSnapshot {
           : "input-introspection",
     };
   }
+}
+export function hasExactDeliveryV2Keys(
+  value: unknown,
+  keys: readonly string[],
+): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  try {
+    return sameDeliveryV2Value(Object.keys(value).sort(), [...keys].sort());
+  } catch {
+    return false;
+  }
+}
+export function isSha1DeliveryV2(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
+}
+export function isSha256DeliveryV2(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 export function sameDeliveryV2Value(left: unknown, right: unknown): boolean {
   const a = snapshotDeliveryV2Input(left),

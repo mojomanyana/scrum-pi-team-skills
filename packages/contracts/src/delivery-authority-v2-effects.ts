@@ -1,8 +1,13 @@
 import {
+  hasExactDeliveryV2Keys,
+  isSha1DeliveryV2,
+  isSha256DeliveryV2,
   sameDeliveryV2Value,
   snapshotDeliveryV2Input,
 } from "./delivery-authority-v2-input.js";
+import { isCanonicalLifecycleTimestamp } from "./lifecycle-receipt.js";
 import {
+  isDeliveryIdentityV2,
   validateFrozenDeliveryAuthorityContractV2,
   type DeliveryAuthorityContractV2,
   type DeliveryIdentityV2,
@@ -48,6 +53,13 @@ interface EffectRequest {
   preconditionDigest: string;
   postconditionDigest: string;
   remainingBudget: number;
+  repositoryId?: string;
+  pullRequest?: number;
+  headBranch?: string;
+  candidateCommit?: string;
+  candidateTree?: string;
+  mergeMethod?: "merge" | "squash" | "rebase";
+  observedAt?: string;
 }
 interface PriorEffect {
   idempotencyKey: string;
@@ -158,11 +170,63 @@ export function evaluateDeliveryEffectV2(
   );
   if (!valid.valid) return denied("contract-invalid");
   const c = valid.value;
-  if (c.cancelled || c.state === "cancelling" || c.state === "cancelled")
+  const baseKeys = [
+    "kind",
+    "identity",
+    "idempotencyKey",
+    "requestDigest",
+    "preconditionDigest",
+    "postconditionDigest",
+    "remainingBudget",
+  ];
+  const requestKeys =
+    request.kind === "merge"
+      ? [
+          ...baseKeys,
+          "repositoryId",
+          "pullRequest",
+          "headBranch",
+          "candidateCommit",
+          "candidateTree",
+          "mergeMethod",
+          "observedAt",
+        ]
+      : baseKeys;
+  if (
+    !hasExactDeliveryV2Keys(request, requestKeys) ||
+    !isDeliveryIdentityV2(request.identity) ||
+    typeof request.idempotencyKey !== "string" ||
+    request.idempotencyKey.length === 0 ||
+    ![
+      request.requestDigest,
+      request.preconditionDigest,
+      request.postconditionDigest,
+    ].every(isSha256DeliveryV2) ||
+    !Number.isSafeInteger(request.remainingBudget)
+  )
+    return denied("request-invalid");
+  if (
+    (c.cancelled || c.state === "cancelling" || c.state === "cancelled") &&
+    !(c.state === "cancelling" && request.kind === "cleanup")
+  )
     return denied("cancelled");
   if (!sameDeliveryV2Value(request.identity, c.identity))
     return denied("identity-drift");
   if (!Array.isArray(history)) return denied("history-invalid");
+  for (const entry of history)
+    if (
+      !hasExactDeliveryV2Keys(entry, [
+        "idempotencyKey",
+        "requestDigest",
+        "outcome",
+        "postcondition",
+      ]) ||
+      typeof entry.idempotencyKey !== "string" ||
+      !isSha256DeliveryV2(entry.requestDigest) ||
+      !["accepted", "rejected", "unknown"].includes(entry.outcome) ||
+      !["applied", "not-applied", "unknown"].includes(entry.postcondition)
+    )
+      return denied("history-invalid");
   const prior = history.find(
     (x) => x.idempotencyKey === request.idempotencyKey,
   );
@@ -183,6 +247,44 @@ export function evaluateDeliveryEffectV2(
   if (!policy.roles.includes(request.identity.role))
     return denied("role-authority-denied");
   if (!policy.states.includes(c.state)) return denied("effect-state-denied");
+  if (request.kind === "merge") {
+    const grant = trusted.mergeGrant;
+    if (
+      !grant ||
+      !hasExactDeliveryV2Keys(grant, [
+        "grantId",
+        "repositoryId",
+        "pullRequest",
+        "headBranch",
+        "candidateCommit",
+        "candidateTree",
+        "mergeMethod",
+        "stakeholderIdentity",
+        "notBefore",
+        "expiresAt",
+        "consumed",
+      ]) ||
+      grant.consumed ||
+      !isDeliveryIdentityV2(grant.stakeholderIdentity) ||
+      grant.stakeholderIdentity.role !== "stakeholder" ||
+      !sameDeliveryV2Value(grant.stakeholderIdentity, request.identity) ||
+      !isCanonicalLifecycleTimestamp(grant.notBefore) ||
+      !isCanonicalLifecycleTimestamp(grant.expiresAt) ||
+      typeof trusted.trustedNow !== "string" ||
+      !isCanonicalLifecycleTimestamp(trusted.trustedNow) ||
+      trusted.trustedNow < grant.notBefore ||
+      trusted.trustedNow >= grant.expiresAt ||
+      grant.repositoryId !== request.repositoryId ||
+      grant.pullRequest !== request.pullRequest ||
+      grant.headBranch !== request.headBranch ||
+      grant.candidateCommit !== request.candidateCommit ||
+      grant.candidateTree !== request.candidateTree ||
+      grant.mergeMethod !== request.mergeMethod ||
+      !isSha1DeliveryV2(request.candidateCommit) ||
+      !isSha1DeliveryV2(request.candidateTree)
+    )
+      return denied("merge-grant-required");
+  }
   if (
     !Number.isSafeInteger(request.remainingBudget) ||
     request.remainingBudget <= 0
@@ -199,12 +301,10 @@ export function evaluateDeliveryEffectV2(
 }
 interface RecoveryRequest {
   kind: string;
-  suspendedState: DeliveryAuthorityV2State;
   identity: DeliveryIdentityV2;
   idempotencyKey: string;
   boundaryId: string;
   boundaryConsumed: boolean;
-  authenticatedBoundary: boolean;
   identityRevalidated: boolean;
   immutableIdentity: DeliveryIdentityV2;
   worktreeClean: boolean;
@@ -470,37 +570,68 @@ export function evaluateDeliveryRecoveryV2(
   const valid = validateFrozenDeliveryAuthorityContractV2(contractInput, t);
   if (!valid.valid) return denied("contract-invalid");
   const c = valid.value,
-    p = recoveryPolicy[r.kind];
+    b = t.recoveryBoundary;
+  const requestKeys = [
+    "kind",
+    "identity",
+    "idempotencyKey",
+    "boundaryId",
+    "boundaryConsumed",
+    "identityRevalidated",
+    "immutableIdentity",
+    "worktreeClean",
+    "evidenceIds",
+    "staleEvidenceIds",
+    "remainingAttempts",
+    "requestedResumeState",
+  ];
   if (
-    !p ||
-    r.suspendedState !== c.state ||
-    !p.states.includes(c.state) ||
-    r.identity.role !== "controller" ||
-    r.identity.access !== "controller" ||
-    r.boundaryConsumed ||
-    !r.authenticatedBoundary ||
-    !t.recoveryBoundary ||
-    !sameDeliveryV2Value(t.recoveryBoundary, {
-      boundaryId: r.boundaryId,
-      idempotencyKey: r.idempotencyKey,
-      kind: r.kind,
-      suspendedState: r.suspendedState,
-      consumed: false,
-      identity: r.immutableIdentity,
-    }) ||
-    !r.identityRevalidated ||
+    !hasExactDeliveryV2Keys(r, requestKeys) ||
+    c.state !== "blocked" ||
+    !b ||
+    !hasExactDeliveryV2Keys(b, [
+      "boundaryId",
+      "idempotencyKey",
+      "kind",
+      "suspendedState",
+      "candidate",
+      "controllerRevision",
+      "consumed",
+      "identity",
+      "controllerIdentity",
+    ]) ||
+    !isDeliveryIdentityV2(r.identity) ||
+    !isDeliveryIdentityV2(r.immutableIdentity) ||
+    !isDeliveryIdentityV2(b.controllerIdentity) ||
+    !sameDeliveryV2Value(r.identity, b.controllerIdentity) ||
+    !sameDeliveryV2Value(r.immutableIdentity, b.identity) ||
     !sameDeliveryV2Value(r.immutableIdentity, t.identity) ||
+    !sameDeliveryV2Value(b.candidate, t.currentCandidate) ||
+    b.controllerRevision !== t.controllerRevision ||
+    b.boundaryId !== r.boundaryId ||
+    b.idempotencyKey !== r.idempotencyKey ||
+    b.kind !== r.kind ||
+    b.consumed ||
+    r.boundaryConsumed ||
+    !r.identityRevalidated ||
     !r.worktreeClean ||
     !Array.isArray(r.evidenceIds) ||
-    r.evidenceIds.length < p.required ||
-    !(DELIVERY_RECOVERY_EVIDENCE_V2[r.kind] ?? []).every((item) =>
-      r.evidenceIds.includes(item),
-    ) ||
+    !Array.isArray(r.staleEvidenceIds) ||
     !Number.isSafeInteger(r.remainingAttempts) ||
     r.remainingAttempts <= 0
   )
     return denied("recovery-denied");
-  const resume = p.resume(c.state);
+  const p = recoveryPolicy[b.kind];
+  if (
+    !p ||
+    !p.states.includes(b.suspendedState) ||
+    r.evidenceIds.length < p.required ||
+    !(DELIVERY_RECOVERY_EVIDENCE_V2[b.kind] ?? []).every((item) =>
+      r.evidenceIds.includes(item),
+    )
+  )
+    return denied("recovery-denied");
+  const resume = p.resume(b.suspendedState);
   if (r.requestedResumeState !== resume) return denied("phase-skip-denied");
   return {
     allowed: true as const,

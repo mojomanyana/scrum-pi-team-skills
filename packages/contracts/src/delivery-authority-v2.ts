@@ -1,5 +1,8 @@
 import { Ajv } from "ajv";
 import {
+  hasExactDeliveryV2Keys,
+  isSha1DeliveryV2,
+  isSha256DeliveryV2,
   sameDeliveryV2Value,
   snapshotDeliveryV2Input,
 } from "./delivery-authority-v2-input.js";
@@ -85,6 +88,19 @@ export interface DeliveryAuthorityContractV2 {
   usage: DeliveryUsageV2;
   cancelled: boolean;
 }
+export interface TrustedMergeGrantV2 {
+  grantId: string;
+  repositoryId: string;
+  pullRequest: number;
+  headBranch: string;
+  candidateCommit: string;
+  candidateTree: string;
+  mergeMethod: "merge" | "squash" | "rebase";
+  stakeholderIdentity: DeliveryIdentityV2;
+  notBefore: string;
+  expiresAt: string;
+  consumed: boolean;
+}
 export interface TrustedDeliveryInputsV2 {
   authorityDigest: string;
   meteringDigest: string;
@@ -95,9 +111,16 @@ export interface TrustedDeliveryInputsV2 {
     idempotencyKey: string;
     kind: string;
     suspendedState: DeliveryAuthorityV2State;
+    candidate: { commit: string; tree: string };
+    controllerRevision: number;
     consumed: boolean;
     identity: DeliveryIdentityV2;
+    controllerIdentity: DeliveryIdentityV2;
   };
+  currentCandidate?: { commit: string; tree: string };
+  controllerRevision?: number;
+  trustedNow?: string;
+  mergeGrant?: TrustedMergeGrantV2;
 }
 export type DeliveryV2Error = { path: string; code: string; message: string };
 export type DeliveryV2Validation<T = DeliveryAuthorityContractV2> =
@@ -137,11 +160,63 @@ export function validateDeliveryAuthorityContractV2(
     ["worktrees", "worktrees"],
     ["evidenceBytes", "evidenceBytes"],
   ];
+  if (!isDeliveryIdentityV2(c.identity)) return bad("identity-invalid");
   if (pairs.some(([u, l]) => c.usage[u] > c.limits[l]))
     return bad("autonomy-exhausted");
   return { valid: true, value: c };
 }
 const same = sameDeliveryV2Value;
+const roleAccess: Record<
+  DeliveryIdentityV2["role"],
+  DeliveryIdentityV2["access"]
+> = {
+  product: "product-control",
+  flow: "orchestrate",
+  "principal-developer": "read-write",
+  "independent-verifier": "read-only",
+  stakeholder: "authorize-merge",
+  controller: "controller",
+};
+export function isDeliveryIdentityV2(
+  value: unknown,
+): value is DeliveryIdentityV2 {
+  const keys = [
+    "projectId",
+    "taskId",
+    "repositoryId",
+    "runId",
+    "baseBranch",
+    "baseCommit",
+    "baseTree",
+    "headBranch",
+    "candidateCommit",
+    "candidateTree",
+    "role",
+    "actorId",
+    "executionId",
+    "workspaceId",
+    "access",
+  ];
+  if (!hasExactDeliveryV2Keys(value, keys)) return false;
+  const i = value as DeliveryIdentityV2;
+  return (
+    roleAccess[i.role] === i.access &&
+    [
+      i.projectId,
+      i.taskId,
+      i.repositoryId,
+      i.runId,
+      i.baseBranch,
+      i.headBranch,
+      i.actorId,
+      i.executionId,
+      i.workspaceId,
+    ].every((x) => typeof x === "string" && x.length > 0) &&
+    [i.baseCommit, i.baseTree, i.candidateCommit, i.candidateTree].every(
+      isSha1DeliveryV2,
+    )
+  );
+}
 export function validateFrozenDeliveryAuthorityContractV2(
   value: unknown,
   trustedInput: unknown,
@@ -149,6 +224,27 @@ export function validateFrozenDeliveryAuthorityContractV2(
   const trustedSnapshot = snapshotDeliveryV2Input(trustedInput);
   if (!trustedSnapshot.ok) return bad(trustedSnapshot.code);
   const trusted = trustedSnapshot.value as TrustedDeliveryInputsV2;
+  const baseKeys = [
+    "authorityDigest",
+    "meteringDigest",
+    "controllerStateDigest",
+    "identity",
+  ];
+  const optional = [
+    "recoveryBoundary",
+    "currentCandidate",
+    "controllerRevision",
+    "trustedNow",
+    "mergeGrant",
+  ].filter((k) => Object.hasOwn(trusted, k));
+  if (
+    !hasExactDeliveryV2Keys(trusted, [...baseKeys, ...optional]) ||
+    !isSha256DeliveryV2(trusted.authorityDigest) ||
+    !isSha256DeliveryV2(trusted.meteringDigest) ||
+    !isSha256DeliveryV2(trusted.controllerStateDigest) ||
+    !isDeliveryIdentityV2(trusted.identity)
+  )
+    return bad("trusted-input-invalid");
   const result = validateDeliveryAuthorityContractV2(value);
   if (!result.valid) return result;
   const c = result.value;
@@ -221,12 +317,37 @@ export function evaluateDeliveryTransitionV2(
       code: "contract-invalid" as const,
       nextState: "blocked" as const,
     };
+  if (
+    !hasExactDeliveryV2Keys(rs.value, [
+      "from",
+      "to",
+      "identity",
+      "idempotencyKey",
+    ])
+  )
+    return {
+      accepted: false,
+      code: "request-invalid" as const,
+      nextState: "blocked" as const,
+    };
   const request = rs.value as {
     from: DeliveryAuthorityV2State;
     to: DeliveryAuthorityV2State;
     identity: DeliveryIdentityV2;
     idempotencyKey: string;
   };
+  if (
+    !DELIVERY_AUTHORITY_V2_STATES.includes(request.from) ||
+    !DELIVERY_AUTHORITY_V2_STATES.includes(request.to) ||
+    !isDeliveryIdentityV2(request.identity) ||
+    typeof request.idempotencyKey !== "string" ||
+    request.idempotencyKey.length === 0
+  )
+    return {
+      accepted: false,
+      code: "request-invalid" as const,
+      nextState: "blocked" as const,
+    };
   const trusted = ts.value as TrustedDeliveryInputsV2;
   const valid = validateFrozenDeliveryAuthorityContractV2(contract, trusted);
   if (!valid.valid)

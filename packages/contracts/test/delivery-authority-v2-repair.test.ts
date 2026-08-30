@@ -22,6 +22,15 @@ const candidate = {
   commit: identity.candidateCommit,
   tree: identity.candidateTree,
 };
+const currentController = {
+  ...identity,
+  role: "controller",
+  access: "controller",
+  actorId: "controller",
+  executionId: "controller-exec",
+  workspaceId: "controller-work",
+} satisfies DeliveryIdentityV2;
+const currentIdentity = { delivery: identity, controller: currentController };
 const verifierIdentity = {
   ...identity,
   role: "independent-verifier",
@@ -31,6 +40,7 @@ const verifierIdentity = {
   workspaceId: "verify-work",
 } satisfies DeliveryIdentityV2;
 const trustedVerifier = {
+  currentIdentity,
   identity: verifierIdentity,
   candidate,
   controllerRevision: 4,
@@ -41,6 +51,7 @@ const trustedVerifier = {
 const verdict = (axis: "specification" | "quality") => ({
   axis,
   verdict: "APPROVE",
+  currentIdentity,
   identity: verifierIdentity,
   candidate,
   controllerRevision: 4,
@@ -53,6 +64,7 @@ const verdicts = {
   quality: verdict("quality"),
 };
 const ci = {
+  currentIdentity,
   repositoryId: "repo",
   projectId: "SPTS",
   taskId: "SPTS-10",
@@ -85,14 +97,7 @@ const effect = {
   postconditionDigest: "c".repeat(64),
   remainingBudget: 1,
 };
-const controller = {
-  ...identity,
-  role: "controller",
-  access: "controller",
-  actorId: "controller",
-  executionId: "controller-exec",
-  workspaceId: "controller-work",
-} satisfies DeliveryIdentityV2;
+const controller = currentController;
 
 describe("review repair boundaries", () => {
   it("requires separately trusted verifier identity and rejects mismatch or self assertion", () => {
@@ -252,15 +257,13 @@ describe("review repair boundaries", () => {
     ).toBe("autonomy-exhausted");
   });
   it("enforces per-kind recovery state, identity, boundary, resume and replay", () => {
-    const contract = { ...v2, state: "independent-verification" as const };
+    const contract = { ...v2, state: "blocked" as const };
     const request = {
       kind: "disappeared-verifier",
-      suspendedState: "independent-verification",
       identity: controller,
       idempotencyKey: "recover",
       boundaryId: "boundary",
       boundaryConsumed: false,
-      authenticatedBoundary: true,
       identityRevalidated: true,
       immutableIdentity: identity,
       worktreeClean: true,
@@ -273,16 +276,22 @@ describe("review repair boundaries", () => {
       remainingAttempts: 1,
       requestedResumeState: "independent-verification",
     };
+    const recoveryBoundary = {
+      boundaryId: request.boundaryId,
+      idempotencyKey: request.idempotencyKey,
+      kind: request.kind,
+      suspendedState: "independent-verification" as const,
+      candidate,
+      controllerRevision: 4,
+      consumed: false,
+      identity: request.immutableIdentity,
+      controllerIdentity: controller,
+    };
     const recoveryTrusted = {
       ...trustedContract,
-      recoveryBoundary: {
-        boundaryId: request.boundaryId,
-        idempotencyKey: request.idempotencyKey,
-        kind: request.kind,
-        suspendedState: request.suspendedState,
-        consumed: false,
-        identity: request.immutableIdentity,
-      },
+      recoveryBoundary,
+      currentCandidate: candidate,
+      controllerRevision: 4,
     };
     expect(
       evaluateDeliveryRecoveryV2(contract, request, recoveryTrusted),
@@ -291,13 +300,6 @@ describe("review repair boundaries", () => {
       resumeState: "independent-verification",
       clearVerifierApproval: true,
     });
-    expect(
-      evaluateDeliveryRecoveryV2(
-        contract,
-        { ...request, suspendedState: "blocked" },
-        recoveryTrusted,
-      ).allowed,
-    ).toBe(false);
     expect(
       evaluateDeliveryRecoveryV2(
         contract,
