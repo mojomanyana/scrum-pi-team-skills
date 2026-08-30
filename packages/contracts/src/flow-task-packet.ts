@@ -481,8 +481,51 @@ export function validateFlowTaskPacket(
   }
   return { valid: true, value: deepFreeze(p) };
 }
-export function canonicalizeFlowTaskPacket(input: unknown) {
-  return validateFlowTaskPacket(input);
+function canonicalObject(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalObject);
+  if (!isObject(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort(utf16OrdinalCompare))
+    out[key] = canonicalObject(value[key]);
+  return out;
+}
+
+/** Producer boundary: accepts either an unsigned packet or a canonically signed packet. */
+export function canonicalizeFlowTaskPacket(
+  input: unknown,
+): ValidationResult<FlowTaskPacketV2> {
+  const q = snapshot(input);
+  if (!q.valid) return q as ValidationResult<FlowTaskPacketV2>;
+  const x = q.value as Record<string, unknown>;
+  const supplied = x.packetDigest;
+  if (
+    supplied !== undefined &&
+    (typeof supplied !== "string" || supplied !== sha256(x, "packetDigest"))
+  )
+    return failure("digest-mismatch", "/packetDigest");
+  const work = x.work;
+  if (isObject(work) && isObject(work.resources)) {
+    const sets = [
+      work.acceptanceCriteria,
+      work.allowedPaths,
+      work.outOfScope,
+      work.resources.skills,
+      work.resources.promptTemplates,
+    ];
+    for (const set of sets) {
+      if (Array.isArray(set) && new Set(set).size !== set.length)
+        return failure("schema");
+      if (Array.isArray(set))
+        set.sort((a, b) =>
+          typeof a === "string" && typeof b === "string"
+            ? utf16OrdinalCompare(a, b)
+            : 0,
+        );
+    }
+  }
+  x.packetDigest = sha256(x, "packetDigest");
+  const ordered = canonicalObject(x);
+  return validateFlowTaskPacket(ordered);
 }
 export function digestFlowTaskPacket(input: unknown): ValidationResult<string> {
   const q = snapshot(input);

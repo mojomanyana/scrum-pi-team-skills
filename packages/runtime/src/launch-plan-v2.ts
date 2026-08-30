@@ -483,50 +483,270 @@ export function createTrustedLaunchPolicyV2(
   return { valid: true, value: deepFreeze(p) };
 }
 
+const manifestKeys = [
+  "contractId",
+  "schemaVersion",
+  "manifestId",
+  "manifestDigest",
+  "packet",
+  "role",
+  "actorId",
+  "executionId",
+  "workspaceId",
+  "access",
+  "resources",
+  "toolProfileId",
+  "workspaceProfileId",
+  "tools",
+  "resultProtocol",
+] as const;
+const policyKeys = [
+  "policyId",
+  "piExecutable",
+  "extensions",
+  "skills",
+  "promptTemplates",
+  "systemPrompt",
+  "appendSystemPrompt",
+  "packetInstruction",
+  "roles",
+] as const;
+const strings = (x: unknown): x is string => typeof x === "string";
+const stringArray = (x: unknown): x is string[] =>
+  Array.isArray(x) && x.every(strings);
+const closed = (
+  x: unknown,
+  keys: readonly string[],
+): x is Record<string, unknown> =>
+  isObject(x) && exact(x as Record<string, unknown>, keys);
+
+/* Stage 1 deliberately checks only closed shape and primitive kinds.  Keeping it
+ * separate prevents a semantic error in one source from hiding malformed later
+ * authority. */
+function manifestStage1(x: unknown): boolean {
+  if (!closed(x, manifestKeys)) return false;
+  const m = x as Record<string, unknown>,
+    p = m.packet;
+  if (
+    !closed(m.resources, ["skills", "promptTemplates"]) ||
+    !stringArray((m.resources as Record<string, unknown>).skills) ||
+    !stringArray((m.resources as Record<string, unknown>).promptTemplates) ||
+    !stringArray(m.tools) ||
+    !closed(m.resultProtocol, [
+      "toolName",
+      "contractId",
+      "schemaVersion",
+      "minimum",
+      "maximum",
+    ]) ||
+    !closed(p, [
+      "contractId",
+      "schemaVersion",
+      "packetId",
+      "packetDigest",
+      "issuedAt",
+      "task",
+      "repository",
+      "run",
+      "subject",
+      "assurance",
+      "authorityDigest",
+      "controllerStateDigest",
+      "work",
+    ])
+  )
+    return false;
+  const packet = p as Record<string, unknown>;
+  const rows: [unknown, readonly string[]][] = [
+    [packet.task, ["projectId", "taskId", "sliceId"]],
+    [
+      packet.repository,
+      [
+        "repositoryId",
+        "rootId",
+        "baseBranch",
+        "headBranch",
+        "baseCommit",
+        "baseTree",
+        "candidateCommit",
+        "candidateTree",
+      ],
+    ],
+    [packet.run, ["runId"]],
+    [
+      packet.subject,
+      ["role", "actorId", "executionId", "workspaceId", "access"],
+    ],
+    [packet.assurance, ["profile", "phase"]],
+    [
+      packet.work,
+      [
+        "objective",
+        "acceptanceCriteria",
+        "allowedPaths",
+        "outOfScope",
+        "resources",
+      ],
+    ],
+  ];
+  if (!rows.every(([v, k]) => closed(v, k))) return false;
+  const work = packet.work as Record<string, unknown>;
+  return (
+    closed(work.resources, ["skills", "promptTemplates"]) &&
+    [
+      work.acceptanceCriteria,
+      work.allowedPaths,
+      work.outOfScope,
+      (work.resources as Record<string, unknown>).skills,
+      (work.resources as Record<string, unknown>).promptTemplates,
+    ].every(stringArray) &&
+    Object.entries(m)
+      .filter(
+        ([k]) =>
+          !["packet", "resources", "tools", "resultProtocol"].includes(k),
+      )
+      .every(([, v]) => strings(v)) &&
+    Object.entries(packet)
+      .filter(
+        ([k]) =>
+          ![
+            "task",
+            "repository",
+            "run",
+            "subject",
+            "assurance",
+            "work",
+          ].includes(k),
+      )
+      .every(([, v]) => strings(v)) &&
+    rows
+      .slice(0, 5)
+      .every(([v]) =>
+        Object.values(v as Record<string, unknown>).every(strings),
+      ) &&
+    strings(work.objective) &&
+    ["toolName", "contractId", "schemaVersion"].every((k) =>
+      strings((m.resultProtocol as Record<string, unknown>)[k]),
+    ) &&
+    typeof (m.resultProtocol as Record<string, unknown>).minimum === "number" &&
+    typeof (m.resultProtocol as Record<string, unknown>).maximum === "number"
+  );
+}
+function decisionStage1(x: unknown): boolean {
+  if (!closed(x, decisionKeys)) return false;
+  const d = x as Record<string, unknown>;
+  return (
+    closed(d.effect, [
+      "kind",
+      "slice1EffectKind",
+      "requestDigest",
+      "outcome",
+    ]) &&
+    closed(d.identity, identityKeys) &&
+    closed(d.grantReference, ["kind", "referenceId", "referenceDigest"]) &&
+    Object.values(d.effect as Record<string, unknown>).every(strings) &&
+    Object.values(d.identity as Record<string, unknown>).every(strings) &&
+    Object.values(d.grantReference as Record<string, unknown>).every(strings) &&
+    Object.entries(d)
+      .filter(
+        ([k]) =>
+          ![
+            "effect",
+            "identity",
+            "grantReference",
+            "controllerRevision",
+            "attempt",
+          ].includes(k),
+      )
+      .every(([, v]) => strings(v)) &&
+    typeof d.controllerRevision === "number" &&
+    typeof d.attempt === "number"
+  );
+}
+function trustedStage1(x: unknown): boolean {
+  if (!closed(x, trustedKeys)) return false;
+  const t = x as Record<string, unknown>;
+  return (
+    closed(t.expectedCurrentDeliveryIdentity, identityKeys) &&
+    Object.values(
+      t.expectedCurrentDeliveryIdentity as Record<string, unknown>,
+    ).every(strings) &&
+    Object.entries(t)
+      .filter(([k]) => k !== "expectedCurrentDeliveryIdentity")
+      .every(([, v]) => strings(v))
+  );
+}
+function policyStage1(x: unknown): boolean {
+  if (!closed(x, policyKeys)) return false;
+  const p = x as Record<string, unknown>;
+  if (
+    !Array.isArray(p.extensions) ||
+    !closed(p.skills, Object.keys(p.skills as object)) ||
+    !closed(p.promptTemplates, Object.keys(p.promptTemplates as object)) ||
+    !closed(p.roles, roles)
+  )
+    return false;
+  return (
+    p.extensions.every(
+      (e) =>
+        closed(e, ["identity", "path", "digest"]) &&
+        Object.values(e).every(strings),
+    ) &&
+    Object.values(p.skills as Record<string, unknown>).every(strings) &&
+    Object.values(p.promptTemplates as Record<string, unknown>).every(
+      strings,
+    ) &&
+    Object.entries(p)
+      .filter(
+        ([k]) =>
+          !["extensions", "skills", "promptTemplates", "roles"].includes(k),
+      )
+      .every(([, v]) => strings(v)) &&
+    Object.values(p.roles as Record<string, unknown>).every((r) => {
+      if (
+        !closed(r, [
+          "toolProfileId",
+          "workspaceProfileId",
+          "tools",
+          "profileDigest",
+        ])
+      )
+        return false;
+      return (
+        stringArray(r.tools) &&
+        [r.toolProfileId, r.workspaceProfileId, r.profileDigest].every(strings)
+      );
+    })
+  );
+}
+function stage1(
+  inputs: readonly unknown[],
+): ValidationResult<readonly unknown[]> {
+  const values: unknown[] = [];
+  for (const input of inputs) {
+    const q = snapshot(input);
+    if (!q.valid) return q as ValidationResult<readonly unknown[]>;
+    values.push(q.value);
+  }
+  if (inputs.length !== 4) return failure("schema");
+  const validators = [
+    manifestStage1,
+    decisionStage1,
+    trustedStage1,
+    policyStage1,
+  ];
+  for (let i = 0; i < validators.length; i++)
+    if (!validators[i]!(values[i])) return failure("schema");
+  return { valid: true, value: values };
+}
+
 export function createPiLaunchPlanV2(
   ...inputs: unknown[]
 ): ValidationResult<never> {
-  const snapshots: Record<string, unknown>[] = [];
-  for (const input of inputs) {
-    const q = snapshot(input);
-    if (!q.valid) return q as ValidationResult<never>;
-    snapshots.push(q.value as Record<string, unknown>);
-  }
-  if (
-    inputs.length !== 4 ||
-    !exact(snapshots[0]!, [
-      "contractId",
-      "schemaVersion",
-      "manifestId",
-      "manifestDigest",
-      "packet",
-      "role",
-      "actorId",
-      "executionId",
-      "workspaceId",
-      "access",
-      "resources",
-      "toolProfileId",
-      "workspaceProfileId",
-      "tools",
-      "resultProtocol",
-    ]) ||
-    !exact(snapshots[1]!, decisionKeys) ||
-    !exact(snapshots[2]!, trustedKeys) ||
-    !exact(snapshots[3]!, [
-      "policyId",
-      "piExecutable",
-      "extensions",
-      "skills",
-      "promptTemplates",
-      "systemPrompt",
-      "appendSystemPrompt",
-      "packetInstruction",
-      "roles",
-    ])
-  )
-    return failure("schema");
-  return failure("production-authorization-unavailable");
+  const shaped = stage1(inputs);
+  return shaped.valid
+    ? failure("production-authorization-unavailable")
+    : (shaped as ValidationResult<never>);
 }
 
 export function __testOnlyCreateLaunchPlanV2Preview(
@@ -539,23 +759,22 @@ export function __testOnlyCreateLaunchPlanV2Preview(
   correlation: Readonly<Record<string, string>>;
   digests: Readonly<Record<string, string>>;
 }> {
-  /* Snapshot every source first: malformed sources cannot be hidden by an earlier semantic error. */
-  for (const source of [
+  const shaped = stage1([
     manifestInput,
     decisionInput,
     trustedInput,
     policyInput,
-  ]) {
-    const s = snapshot(source);
-    if (!s.valid) return s as ValidationResult<never>;
-  }
-  const m = canonicalizeAgentExecutionManifestV2(manifestInput);
+  ]);
+  if (!shaped.valid) return shaped as ValidationResult<never>;
+  /* Only after every source passes stage 1 may semantic validators run, in
+   * source order. */
+  const m = canonicalizeAgentExecutionManifestV2(shaped.value[0]);
   if (!m.valid) return m as ValidationResult<never>;
-  const dc = canonicalizeTrustedConcreteLaunchDecisionV2(decisionInput);
+  const dc = canonicalizeTrustedConcreteLaunchDecisionV2(shaped.value[1]);
   if (!dc.valid) return dc as ValidationResult<never>;
-  const ti = canonicalizeTrustedInputs(trustedInput);
+  const ti = canonicalizeTrustedInputs(shaped.value[2]);
   if (!ti.valid) return ti as ValidationResult<never>;
-  const pr = createTrustedLaunchPolicyV2(policyInput);
+  const pr = createTrustedLaunchPolicyV2(shaped.value[3]);
   if (!pr.valid) return pr as ValidationResult<never>;
   const policyDigest = sha256(pr.value, "__none__");
   if (

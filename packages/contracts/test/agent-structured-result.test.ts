@@ -10,6 +10,7 @@ import p3 from "../examples/flow-task-packet.independent-verifier.json" with { t
 import r3 from "../examples/agent-structured-result.independent-verifier.json" with { type: "json" };
 import {
   acceptStructuredResultSubmission,
+  canonicalizeAgentStructuredResult,
   digestAgentStructuredResult,
   digestFlowTaskPacket,
   validateAgentStructuredResult,
@@ -68,6 +69,32 @@ describe("agent structured result v2", () => {
     expect(validateAgentStructuredResult(signed).valid).toBe(true);
     signed.payload.taskDefinitions[0].allowedPaths.reverse();
     expect(validateAgentStructuredResult(signed).valid).toBe(false);
+  });
+  it("canonicalizes producer set arrays while strict wire validation stays ordered", () => {
+    const [p, fixture] = fixtures[0]!;
+    const ordered: any = structuredClone(fixture);
+    ordered.payload.taskDefinitions[0].allowedPaths = ["a/", "z/"];
+    const wire: any = signResult(ordered, p);
+    wire.payload.taskDefinitions[0].allowedPaths.reverse();
+    expect(validateAgentStructuredResult(wire).valid).toBe(false);
+
+    const unsigned = structuredClone(wire);
+    delete unsigned.resultDigest;
+    const result = canonicalizeAgentStructuredResult(unsigned);
+    expect(result.valid).toBe(true);
+    if (!result.valid) return;
+    const paths = (result.value.payload.taskDefinitions as any[])[0]
+      .allowedPaths;
+    expect(paths).toEqual(["a/", "z/"]);
+    expect(Object.isFrozen(paths)).toBe(true);
+    const { resultDigest, ...canonicalUnsigned } = result.value;
+    expect(digestAgentStructuredResult(canonicalUnsigned)).toEqual({
+      valid: true,
+      value: resultDigest,
+    });
+
+    unsigned.payload.taskDefinitions[0].allowedPaths = ["a/", "a/"];
+    expect(canonicalizeAgentStructuredResult(unsigned).valid).toBe(false);
   });
   it.each([
     "",

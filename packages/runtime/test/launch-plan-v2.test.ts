@@ -290,6 +290,59 @@ describe("launch plan v2", () => {
       ).valid,
     ).toBe(false),
   );
+  it.each([
+    [
+      "decision",
+      Object.fromEntries(
+        Object.entries(decision).filter(([key]) => key !== "effect"),
+      ),
+      trusted,
+      policy,
+    ],
+    [
+      "trusted inputs",
+      decision,
+      Object.fromEntries(
+        Object.entries(trusted).filter(([key]) => key !== "source"),
+      ),
+      policy,
+    ],
+    [
+      "policy",
+      decision,
+      trusted,
+      {
+        ...policy,
+        roles: {
+          ...policy.roles,
+          product: { ...policy.roles.product, tools: {} },
+        },
+      },
+    ],
+  ])(
+    "checks every %s shape before an earlier manifest digest error",
+    (_name, badDecision, badTrusted, badPolicy) => {
+      expect(
+        __testOnlyCreateLaunchPlanV2Preview(
+          { ...manifest, manifestDigest: "f".repeat(64) },
+          badDecision,
+          badTrusted as any,
+          badPolicy,
+        ),
+      ).toMatchObject({ valid: false, errors: [{ code: "schema" }] });
+    },
+  );
+  it("rejects malformed nested production inputs before fixed denial", () => {
+    expect(
+      createPiLaunchPlanV2(manifest, decision, trusted, {
+        ...policy,
+        extensions: [
+          { ...policy.extensions[0], path: 42 },
+          policy.extensions[1],
+        ],
+      }),
+    ).toMatchObject({ valid: false, errors: [{ code: "schema" }] });
+  });
   it("always denies structurally valid production requests and reveals no argv", () =>
     expect(createPiLaunchPlanV2(manifest, decision, trusted, policy)).toEqual({
       valid: false,

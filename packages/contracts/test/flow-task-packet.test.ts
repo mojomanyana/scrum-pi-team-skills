@@ -5,6 +5,7 @@ import flow from "../examples/flow-task-packet.flow.json" with { type: "json" };
 import principal from "../examples/flow-task-packet.principal-developer.json" with { type: "json" };
 import verifier from "../examples/flow-task-packet.independent-verifier.json" with { type: "json" };
 import {
+  canonicalizeFlowTaskPacket,
   digestFlowTaskPacket,
   isFlowPathAuthorized,
   validateFlowTaskPacket,
@@ -52,6 +53,33 @@ describe("flow task packet v2", () => {
     expect(code(signed)).toBe("valid");
     signed.work.acceptanceCriteria.reverse();
     expect(code(signed)).toBe("non-canonical");
+  });
+  it("canonicalizes producer set arrays while strict wire validation stays ordered", () => {
+    const wire: any = sign({
+      ...structuredClone(product),
+      work: {
+        ...structuredClone(product.work),
+        acceptanceCriteria: ["a", "z"],
+      },
+    });
+    wire.work.acceptanceCriteria.reverse();
+    expect(code(wire)).toBe("non-canonical");
+
+    const unsigned = structuredClone(wire);
+    delete unsigned.packetDigest;
+    const result = canonicalizeFlowTaskPacket(unsigned);
+    expect(result.valid).toBe(true);
+    if (!result.valid) return;
+    expect(result.value.work.acceptanceCriteria).toEqual(["a", "z"]);
+    expect(Object.isFrozen(result.value.work.acceptanceCriteria)).toBe(true);
+    const { packetDigest, ...canonicalUnsigned } = result.value;
+    expect(digestFlowTaskPacket(canonicalUnsigned)).toEqual({
+      valid: true,
+      value: packetDigest,
+    });
+
+    unsigned.work.acceptanceCriteria = ["a", "a"];
+    expect(canonicalizeFlowTaskPacket(unsigned).valid).toBe(false);
   });
   it.each([
     "",

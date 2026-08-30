@@ -11,7 +11,9 @@ import {
   type ValidationResult,
 } from "./flow-task-packet.js";
 import {
+  canonicalizeFlowTaskPacket,
   validateFlowTaskPacket,
+  utf16OrdinalCompare,
   type FlowTaskPacketV2,
   type FlowRoleV2,
 } from "./flow-task-packet.js";
@@ -203,6 +205,13 @@ export function validateAgentExecutionManifestV2(
   )
     return failure("schema");
   if (!credentialFree(m)) return failure("credential-content");
+  const ordered = (values: readonly string[]) =>
+    values.every(
+      (value, index) =>
+        index === 0 || utf16OrdinalCompare(values[index - 1]!, value) < 0,
+    );
+  if (!ordered(m.resources.skills) || !ordered(m.resources.promptTemplates))
+    return failure("non-canonical");
   const packet = validateFlowTaskPacket(m.packet);
   if (!packet.valid)
     return packet as ValidationResult<AgentExecutionManifestV2>;
@@ -227,8 +236,56 @@ export function validateAgentExecutionManifestV2(
     return failure("tool-policy");
   return { valid: true, value: deepFreeze(m) };
 }
-export const canonicalizeAgentExecutionManifestV2 =
-  validateAgentExecutionManifestV2;
+function orderedManifestObject(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(orderedManifestObject);
+  if (!isObject(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort(utf16OrdinalCompare))
+    out[key] = orderedManifestObject(value[key]);
+  return out;
+}
+/** Producer boundary accepting safe unsigned or signed semantic input. */
+export function canonicalizeAgentExecutionManifestV2(
+  input: unknown,
+): ValidationResult<AgentExecutionManifestV2> {
+  const q = snapshot(input);
+  if (!q.valid) return q as ValidationResult<AgentExecutionManifestV2>;
+  const x = q.value as Record<string, unknown>;
+  if (
+    x.manifestDigest !== undefined &&
+    (typeof x.manifestDigest !== "string" ||
+      x.manifestDigest !== sha256(x, "manifestDigest"))
+  )
+    return failure("digest-mismatch", "/manifestDigest");
+  const packet = canonicalizeFlowTaskPacket(x.packet);
+  if (!packet.valid)
+    return packet as ValidationResult<AgentExecutionManifestV2>;
+  x.packet = packet.value;
+  if (isObject(x.resources)) {
+    for (const key of ["skills", "promptTemplates"]) {
+      const values = x.resources[key];
+      if (Array.isArray(values)) {
+        if (new Set(values).size !== values.length) return failure("schema");
+        values.sort((a, b) =>
+          typeof a === "string" && typeof b === "string"
+            ? utf16OrdinalCompare(a, b)
+            : 0,
+        );
+      }
+    }
+  }
+  if (Array.isArray(x.tools)) {
+    if (new Set(x.tools).size !== x.tools.length) return failure("schema");
+    const profile = AGENT_ROLE_PROFILES_V2[x.role as FlowRoleV2];
+    if (profile)
+      x.tools.sort(
+        (a, b) =>
+          profile.tools.indexOf(a as never) - profile.tools.indexOf(b as never),
+      );
+  }
+  x.manifestDigest = sha256(x, "manifestDigest");
+  return validateAgentExecutionManifestV2(orderedManifestObject(x));
+}
 export function digestAgentExecutionManifestV2(
   input: unknown,
 ): ValidationResult<string> {

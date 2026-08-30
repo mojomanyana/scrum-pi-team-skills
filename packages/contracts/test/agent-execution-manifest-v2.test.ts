@@ -6,6 +6,7 @@ import p2 from "../examples/flow-task-packet.principal-developer.json" with { ty
 import p3 from "../examples/flow-task-packet.independent-verifier.json" with { type: "json" };
 import {
   AGENT_ROLE_PROFILES_V2,
+  canonicalizeAgentExecutionManifestV2,
   digestAgentExecutionManifestV2,
   digestFlowTaskPacket,
   validateAgentExecutionManifestV2,
@@ -76,6 +77,29 @@ describe("agent execution manifest v2", () => {
   it("denies bash for product, flow, and verifier", () => {
     for (const i of [0, 1, 3]) expect(fixtures[i]!.tools).not.toContain("bash");
     expect(fixtures[2]!.tools).toContain("bash");
+  });
+  it("canonicalizes producer set arrays while strict wire validation stays ordered", () => {
+    const wire: any = structuredClone(fixtures[2]);
+    wire.tools.reverse();
+    expect(validateAgentExecutionManifestV2(wire).valid).toBe(false);
+
+    const unsigned = structuredClone(wire);
+    delete unsigned.manifestDigest;
+    const result = canonicalizeAgentExecutionManifestV2(unsigned);
+    expect(result.valid).toBe(true);
+    if (!result.valid) return;
+    expect(result.value.tools).toEqual([
+      ...AGENT_ROLE_PROFILES_V2["principal-developer"].tools,
+    ]);
+    expect(Object.isFrozen(result.value.tools)).toBe(true);
+    const { manifestDigest, ...canonicalUnsigned } = result.value;
+    expect(digestAgentExecutionManifestV2(canonicalUnsigned)).toEqual({
+      valid: true,
+      value: manifestDigest,
+    });
+
+    unsigned.tools = [unsigned.tools[0], unsigned.tools[0]];
+    expect(canonicalizeAgentExecutionManifestV2(unsigned).valid).toBe(false);
   });
   it("orders embedded packet validation before manifest correlation", () => {
     const x: any = structuredClone(fixtures[0]);

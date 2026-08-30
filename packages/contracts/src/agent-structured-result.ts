@@ -1,4 +1,5 @@
 import {
+  canonical,
   credentialFree,
   deepFreeze,
   exact,
@@ -166,35 +167,42 @@ function validPayload(r: AgentStructuredResultV2): boolean {
       p.taskDefinitions.length > 32
     )
       return false;
-    return p.taskDefinitions.every(
-      (d) =>
-        isObject(d) &&
-        exact(d, [
-          "taskId",
-          "objective",
-          "allowedPaths",
-          "acceptanceTests",
-          "dependencies",
-        ]) &&
-        typeof d.taskId === "string" &&
-        ID.test(d.taskId) &&
-        text(d.objective, 1024) &&
-        Array.isArray(d.allowedPaths) &&
-        d.allowedPaths.length >= 1 &&
-        d.allowedPaths.length <= 64 &&
-        orderedUnique(d.allowedPaths) &&
-        d.allowedPaths.every(
-          (x) => typeof x === "string" && isFlowPathAuthorized([x], x),
-        ) &&
-        Array.isArray(d.acceptanceTests) &&
-        d.acceptanceTests.length >= 1 &&
-        d.acceptanceTests.length <= 32 &&
-        d.acceptanceTests.every((x) => text(x, 512)) &&
-        orderedUnique(d.acceptanceTests) &&
-        Array.isArray(d.dependencies) &&
-        d.dependencies.length <= 32 &&
-        d.dependencies.every((x) => typeof x === "string" && ID.test(x)) &&
-        orderedUnique(d.dependencies),
+    return (
+      orderedUnique(
+        p.taskDefinitions.map((d) =>
+          isObject(d) && typeof d.taskId === "string" ? d.taskId : "",
+        ),
+      ) &&
+      p.taskDefinitions.every(
+        (d) =>
+          isObject(d) &&
+          exact(d, [
+            "taskId",
+            "objective",
+            "allowedPaths",
+            "acceptanceTests",
+            "dependencies",
+          ]) &&
+          typeof d.taskId === "string" &&
+          ID.test(d.taskId) &&
+          text(d.objective, 1024) &&
+          Array.isArray(d.allowedPaths) &&
+          d.allowedPaths.length >= 1 &&
+          d.allowedPaths.length <= 64 &&
+          orderedUnique(d.allowedPaths) &&
+          d.allowedPaths.every(
+            (x) => typeof x === "string" && isFlowPathAuthorized([x], x),
+          ) &&
+          Array.isArray(d.acceptanceTests) &&
+          d.acceptanceTests.length >= 1 &&
+          d.acceptanceTests.length <= 32 &&
+          d.acceptanceTests.every((x) => text(x, 512)) &&
+          orderedUnique(d.acceptanceTests) &&
+          Array.isArray(d.dependencies) &&
+          d.dependencies.length <= 32 &&
+          d.dependencies.every((x) => typeof x === "string" && ID.test(x)) &&
+          orderedUnique(d.dependencies),
+      )
     );
   }
   if (r.role === "flow") {
@@ -224,6 +232,7 @@ function validPayload(r: AgentStructuredResultV2): boolean {
       );
     if (o === "changes-requested" && p.findings.length < 1) return false;
     return (
+      orderedUnique(p.findings.map(canonical)) &&
       p.findings.every(
         (f) =>
           isObject(f) &&
@@ -409,7 +418,112 @@ export function validateAgentStructuredResult(
     return failure("digest-mismatch", "/resultDigest");
   return { valid: true, value: deepFreeze(r) };
 }
-export const canonicalizeAgentStructuredResult = validateAgentStructuredResult;
+function sortUniqueArray(
+  value: unknown,
+  compare: (a: unknown, b: unknown) => number = (a, b) =>
+    utf16OrdinalCompare(String(a), String(b)),
+): boolean {
+  if (!Array.isArray(value)) return true;
+  const keys = value.map(canonical);
+  if (new Set(keys).size !== keys.length) return false;
+  value.sort(compare);
+  return true;
+}
+function orderedObject(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(orderedObject);
+  if (!isObject(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort(utf16OrdinalCompare))
+    out[key] = orderedObject(value[key]);
+  return out;
+}
+/** Producer boundary; wire validation remains deliberately order-strict. */
+export function canonicalizeAgentStructuredResult(
+  input: unknown,
+): ValidationResult<AgentStructuredResultV2> {
+  const q = snapshot(input);
+  if (!q.valid) return q as ValidationResult<AgentStructuredResultV2>;
+  const x = q.value as Record<string, unknown>;
+  if (
+    x.resultDigest !== undefined &&
+    (typeof x.resultDigest !== "string" ||
+      x.resultDigest !== sha256(x, "resultDigest"))
+  )
+    return failure("digest-mismatch", "/resultDigest");
+  const payload = x.payload;
+  if (isObject(payload)) {
+    if (Array.isArray(payload.taskDefinitions)) {
+      if (
+        !sortUniqueArray(payload.taskDefinitions, (a, b) =>
+          utf16OrdinalCompare(
+            String((a as Record<string, unknown>).taskId),
+            String((b as Record<string, unknown>).taskId),
+          ),
+        )
+      )
+        return failure("schema");
+      for (const task of payload.taskDefinitions) {
+        if (
+          isObject(task) &&
+          ![task.allowedPaths, task.acceptanceTests, task.dependencies].every(
+            (v) => sortUniqueArray(v),
+          )
+        )
+          return failure("schema");
+      }
+    }
+    if (
+      !sortUniqueArray(payload.findings, (a, b) =>
+        utf16OrdinalCompare(canonical(a), canonical(b)),
+      ) ||
+      !sortUniqueArray(payload.changedPaths)
+    )
+      return failure("schema");
+    if (
+      !sortUniqueArray(
+        payload.checks,
+        (a, b) =>
+          checkOrder.indexOf(
+            (a as Record<string, unknown>)
+              .commandId as (typeof checkOrder)[number],
+          ) -
+          checkOrder.indexOf(
+            (b as Record<string, unknown>)
+              .commandId as (typeof checkOrder)[number],
+          ),
+      )
+    )
+      return failure("schema");
+    if (Array.isArray(payload.axes)) {
+      if (
+        !sortUniqueArray(
+          payload.axes,
+          (a, b) =>
+            axisOrder.indexOf(
+              (a as Record<string, unknown>).axis as (typeof axisOrder)[number],
+            ) -
+            axisOrder.indexOf(
+              (b as Record<string, unknown>).axis as (typeof axisOrder)[number],
+            ),
+        )
+      )
+        return failure("schema");
+      for (const axis of payload.axes)
+        if (
+          isObject(axis) &&
+          !sortUniqueArray(
+            axis.findingCodes,
+            (a, b) =>
+              findingCodes.indexOf(a as (typeof findingCodes)[number]) -
+              findingCodes.indexOf(b as (typeof findingCodes)[number]),
+          )
+        )
+          return failure("schema");
+    }
+  }
+  x.resultDigest = sha256(x, "resultDigest");
+  return validateAgentStructuredResult(orderedObject(x));
+}
 export function digestAgentStructuredResult(
   input: unknown,
 ): ValidationResult<string> {
