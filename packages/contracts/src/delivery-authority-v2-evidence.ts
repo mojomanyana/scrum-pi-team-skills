@@ -7,6 +7,7 @@ import {
   snapshotDeliveryV2Input,
 } from "./delivery-authority-v2-input.js";
 import {
+  deliveryIdentityContextsMatchV2,
   isDeliveryIdentityV2,
   type DeliveryIdentityV2,
 } from "./delivery-authority-v2.js";
@@ -76,7 +77,11 @@ const validCurrent = (v: unknown): v is TrustedCurrentDeliveryIdentityV2 =>
   hasExactDeliveryV2Keys(v, identityKeys) &&
   isDeliveryIdentityV2((v as TrustedCurrentDeliveryIdentityV2).delivery) &&
   isDeliveryIdentityV2((v as TrustedCurrentDeliveryIdentityV2).controller) &&
-  (v as TrustedCurrentDeliveryIdentityV2).controller.role === "controller";
+  (v as TrustedCurrentDeliveryIdentityV2).controller.role === "controller" &&
+  deliveryIdentityContextsMatchV2(
+    (v as TrustedCurrentDeliveryIdentityV2).delivery,
+    (v as TrustedCurrentDeliveryIdentityV2).controller,
+  );
 const currentMatchesCandidate = (
   current: TrustedCurrentDeliveryIdentityV2,
   candidate: CandidateIdentityV2,
@@ -109,6 +114,11 @@ export function validateDeliveryVerifierVerdictsV2(
     !validCurrent(t.currentIdentity) ||
     !isDeliveryIdentityV2(t.identity) ||
     t.identity.role !== "independent-verifier" ||
+    !deliveryIdentityContextsMatchV2(
+      t.currentIdentity.delivery,
+      t.currentIdentity.controller,
+      t.identity,
+    ) ||
     !validCandidate(t.candidate) ||
     !currentMatchesCandidate(t.currentIdentity, t.candidate) ||
     !Number.isSafeInteger(t.controllerRevision) ||

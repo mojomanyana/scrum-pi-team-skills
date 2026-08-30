@@ -90,7 +90,10 @@ export interface DeliveryAuthorityContractV2 {
 }
 export interface TrustedMergeGrantV2 {
   grantId: string;
+  projectId: string;
+  taskId: string;
   repositoryId: string;
+  runId: string;
   pullRequest: number;
   headBranch: string;
   candidateCommit: string;
@@ -121,6 +124,7 @@ export interface TrustedDeliveryInputsV2 {
   controllerRevision?: number;
   trustedNow?: string;
   mergeGrant?: TrustedMergeGrantV2;
+  pullRequest?: number;
 }
 export type DeliveryV2Error = { path: string; code: string; message: string };
 export type DeliveryV2Validation<T = DeliveryAuthorityContractV2> =
@@ -177,6 +181,33 @@ const roleAccess: Record<
   stakeholder: "authorize-merge",
   controller: "controller",
 };
+export function deliveryIdentityContextV2(value: DeliveryIdentityV2) {
+  return {
+    projectId: value.projectId,
+    taskId: value.taskId,
+    repositoryId: value.repositoryId,
+    runId: value.runId,
+    baseBranch: value.baseBranch,
+    baseCommit: value.baseCommit,
+    baseTree: value.baseTree,
+    headBranch: value.headBranch,
+    candidateCommit: value.candidateCommit,
+    candidateTree: value.candidateTree,
+  };
+}
+export function deliveryIdentityContextsMatchV2(
+  ...values: DeliveryIdentityV2[]
+): boolean {
+  return (
+    values.length > 0 &&
+    values.every((value) =>
+      sameDeliveryV2Value(
+        deliveryIdentityContextV2(value),
+        deliveryIdentityContextV2(values[0]!),
+      ),
+    )
+  );
+}
 export function isDeliveryIdentityV2(
   value: unknown,
 ): value is DeliveryIdentityV2 {
@@ -236,6 +267,7 @@ export function validateFrozenDeliveryAuthorityContractV2(
     "controllerRevision",
     "trustedNow",
     "mergeGrant",
+    "pullRequest",
   ].filter((k) => Object.hasOwn(trusted, k));
   if (
     !hasExactDeliveryV2Keys(trusted, [...baseKeys, ...optional]) ||

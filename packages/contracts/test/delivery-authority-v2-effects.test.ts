@@ -89,6 +89,7 @@ describe("v2 effects and blocked recovery", () => {
     expect(
       evaluateDeliveryEffectV2(v2, effect, trusted, [
         {
+          namespace: "effect",
           idempotencyKey: "effect",
           requestDigest: effect.requestDigest,
           outcome: "accepted",
@@ -99,6 +100,7 @@ describe("v2 effects and blocked recovery", () => {
     expect(
       evaluateDeliveryEffectV2(v2, effect, trusted, [
         {
+          namespace: "effect",
           idempotencyKey: "effect",
           requestDigest: effect.requestDigest,
           outcome: "unknown",

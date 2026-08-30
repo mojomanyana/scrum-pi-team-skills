@@ -163,6 +163,7 @@ describe("review repair boundaries", () => {
       principalTrusted,
       [
         {
+          namespace: "effect",
           idempotencyKey: request.idempotencyKey,
           requestDigest: request.requestDigest,
           outcome: "accepted",
@@ -178,6 +179,7 @@ describe("review repair boundaries", () => {
     expect(
       evaluateDeliveryEffectV2(implementation, request, principalTrusted, [
         {
+          namespace: "effect",
           idempotencyKey: request.idempotencyKey,
           requestDigest: request.requestDigest,
           outcome: "unknown",

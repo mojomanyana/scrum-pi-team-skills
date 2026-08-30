@@ -155,7 +155,10 @@ describe("closed decision boundaries", () => {
       ...baseEffect,
       kind: "merge",
       identity: stakeholder,
+      projectId: identity.projectId,
+      taskId: identity.taskId,
       repositoryId: identity.repositoryId,
+      runId: identity.runId,
       pullRequest: 7,
       headBranch: identity.headBranch,
       candidateCommit: identity.candidateCommit,
@@ -165,7 +168,10 @@ describe("closed decision boundaries", () => {
     };
     const grant = {
       grantId: "merge-grant",
+      projectId: identity.projectId,
+      taskId: identity.taskId,
       repositoryId: identity.repositoryId,
+      runId: identity.runId,
       pullRequest: 7,
       headBranch: identity.headBranch,
       candidateCommit: identity.candidateCommit,
@@ -179,6 +185,7 @@ describe("closed decision boundaries", () => {
     const mergeTrusted = {
       ...trusted,
       identity: stakeholder,
+      pullRequest: 7,
       trustedNow: "2026-08-29T01:00:00.000Z",
       mergeGrant: grant,
     };
@@ -308,6 +315,7 @@ describe("closed decision boundaries", () => {
       [{ idempotencyKey: "effect" }],
       [
         {
+          namespace: "effect",
           idempotencyKey: "effect",
           requestDigest: "a".repeat(64),
           outcome: "accepted",

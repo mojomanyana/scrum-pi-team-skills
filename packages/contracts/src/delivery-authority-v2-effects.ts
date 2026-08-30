@@ -7,6 +7,7 @@ import {
 } from "./delivery-authority-v2-input.js";
 import { isCanonicalLifecycleTimestamp } from "./lifecycle-receipt.js";
 import {
+  deliveryIdentityContextsMatchV2,
   isDeliveryIdentityV2,
   validateFrozenDeliveryAuthorityContractV2,
   type DeliveryAuthorityContractV2,
@@ -53,7 +54,10 @@ interface EffectRequest {
   preconditionDigest: string;
   postconditionDigest: string;
   remainingBudget: number;
+  projectId?: string;
+  taskId?: string;
   repositoryId?: string;
+  runId?: string;
   pullRequest?: number;
   headBranch?: string;
   candidateCommit?: string;
@@ -62,6 +66,7 @@ interface EffectRequest {
   observedAt?: string;
 }
 interface PriorEffect {
+  namespace: string;
   idempotencyKey: string;
   requestDigest: string;
   outcome: "accepted" | "rejected" | "unknown";
@@ -183,7 +188,10 @@ export function evaluateDeliveryEffectV2(
     request.kind === "merge"
       ? [
           ...baseKeys,
+          "projectId",
+          "taskId",
           "repositoryId",
+          "runId",
           "pullRequest",
           "headBranch",
           "candidateCommit",
@@ -216,20 +224,26 @@ export function evaluateDeliveryEffectV2(
   for (const entry of history)
     if (
       !hasExactDeliveryV2Keys(entry, [
+        "namespace",
         "idempotencyKey",
         "requestDigest",
         "outcome",
         "postcondition",
       ]) ||
+      typeof entry.namespace !== "string" ||
+      entry.namespace.length === 0 ||
       typeof entry.idempotencyKey !== "string" ||
       !isSha256DeliveryV2(entry.requestDigest) ||
       !["accepted", "rejected", "unknown"].includes(entry.outcome) ||
       !["applied", "not-applied", "unknown"].includes(entry.postcondition)
     )
       return denied("history-invalid");
-  const prior = history.find(
-    (x) => x.idempotencyKey === request.idempotencyKey,
+  const matches = history.filter(
+    (x) =>
+      x.namespace === "effect" && x.idempotencyKey === request.idempotencyKey,
   );
+  if (matches.length > 1) return denied("history-ambiguous");
+  const prior = matches[0];
   if (prior) {
     if (prior.requestDigest !== request.requestDigest)
       return denied("idempotency-conflict");
@@ -253,7 +267,10 @@ export function evaluateDeliveryEffectV2(
       !grant ||
       !hasExactDeliveryV2Keys(grant, [
         "grantId",
+        "projectId",
+        "taskId",
         "repositoryId",
+        "runId",
         "pullRequest",
         "headBranch",
         "candidateCommit",
@@ -268,13 +285,37 @@ export function evaluateDeliveryEffectV2(
       !isDeliveryIdentityV2(grant.stakeholderIdentity) ||
       grant.stakeholderIdentity.role !== "stakeholder" ||
       !sameDeliveryV2Value(grant.stakeholderIdentity, request.identity) ||
+      !deliveryIdentityContextsMatchV2(
+        c.identity,
+        request.identity,
+        grant.stakeholderIdentity,
+      ) ||
       !isCanonicalLifecycleTimestamp(grant.notBefore) ||
       !isCanonicalLifecycleTimestamp(grant.expiresAt) ||
       typeof trusted.trustedNow !== "string" ||
       !isCanonicalLifecycleTimestamp(trusted.trustedNow) ||
       trusted.trustedNow < grant.notBefore ||
       trusted.trustedNow >= grant.expiresAt ||
+      request.projectId !== c.identity.projectId ||
+      request.taskId !== c.identity.taskId ||
+      request.repositoryId !== c.identity.repositoryId ||
+      request.runId !== c.identity.runId ||
+      request.headBranch !== c.identity.headBranch ||
+      request.candidateCommit !== c.identity.candidateCommit ||
+      request.candidateTree !== c.identity.candidateTree ||
+      grant.projectId !== c.identity.projectId ||
+      grant.taskId !== c.identity.taskId ||
+      grant.repositoryId !== c.identity.repositoryId ||
+      grant.runId !== c.identity.runId ||
+      grant.headBranch !== c.identity.headBranch ||
+      grant.candidateCommit !== c.identity.candidateCommit ||
+      grant.candidateTree !== c.identity.candidateTree ||
+      grant.projectId !== request.projectId ||
+      grant.taskId !== request.taskId ||
+      grant.runId !== request.runId ||
       grant.repositoryId !== request.repositoryId ||
+      !Number.isSafeInteger(trusted.pullRequest) ||
+      trusted.pullRequest !== request.pullRequest ||
       grant.pullRequest !== request.pullRequest ||
       grant.headBranch !== request.headBranch ||
       grant.candidateCommit !== request.candidateCommit ||
