@@ -137,6 +137,131 @@ describe("delivery identity and history binding", () => {
     expect(evaluateDeliveryEffectV2(contract, request, mt, []).allowed).toBe(
       true,
     );
+    const grantFields = Object.keys(grant) as Array<keyof typeof grant>;
+    const malformedValues: Record<keyof typeof grant, unknown> = {
+      grantId: 1,
+      projectId: 1,
+      taskId: 1,
+      repositoryId: 1,
+      runId: 1,
+      pullRequest: "7",
+      headBranch: 1,
+      candidateCommit: 1,
+      candidateTree: 1,
+      mergeMethod: 1,
+      stakeholderIdentity: 1,
+      notBefore: 1,
+      expiresAt: 1,
+      consumed: 0,
+    };
+    for (const field of grantFields) {
+      expect(
+        evaluateDeliveryEffectV2(
+          contract,
+          request,
+          {
+            ...mt,
+            mergeGrant: { ...grant, [field]: malformedValues[field] },
+          },
+          [],
+        ),
+        `wrong primitive ${field}`,
+      ).toMatchObject({
+        allowed: false,
+        code: "merge-grant-required",
+        executable: false,
+      });
+      const missing = { ...grant } as Record<string, unknown>;
+      delete missing[field];
+      expect(
+        evaluateDeliveryEffectV2(
+          contract,
+          request,
+          { ...mt, mergeGrant: missing },
+          [],
+        ),
+        `missing ${field}`,
+      ).toMatchObject({
+        allowed: false,
+        code: "merge-grant-required",
+        executable: false,
+      });
+    }
+    for (const consumed of [0, 1, null, "false", true])
+      expect(
+        evaluateDeliveryEffectV2(
+          contract,
+          request,
+          { ...mt, mergeGrant: { ...grant, consumed } },
+          [],
+        ),
+      ).toMatchObject({ allowed: false, executable: false });
+    for (const grantId of [1, "", "   ", null])
+      expect(
+        evaluateDeliveryEffectV2(
+          contract,
+          request,
+          { ...mt, mergeGrant: { ...grant, grantId } },
+          [],
+        ),
+      ).toMatchObject({ allowed: false, executable: false });
+    let grantGetterCalled = false;
+    const accessorGrant = { ...grant };
+    Object.defineProperty(accessorGrant, "grantId", {
+      enumerable: true,
+      get: () => {
+        grantGetterCalled = true;
+        return "grant";
+      },
+    });
+    const inheritedGrant = Object.create(grant) as Record<string, unknown>;
+    const { proxy: revokedGrant, revoke: revokeGrant } = Proxy.revocable(
+      grant,
+      {},
+    );
+    revokeGrant();
+    for (const mergeGrant of [
+      { ...grant, extra: true },
+      { ...grant, [Symbol("authority")]: true },
+      inheritedGrant,
+      accessorGrant,
+      revokedGrant,
+    ])
+      expect(
+        evaluateDeliveryEffectV2(contract, request, { ...mt, mergeGrant }, []),
+      ).toMatchObject({ allowed: false, executable: false });
+    expect(grantGetterCalled).toBe(false);
+    expect(
+      evaluateDeliveryEffectV2(contract, request, mt, [
+        {
+          namespace: "effect",
+          idempotencyKey: request.idempotencyKey,
+          requestDigest: request.requestDigest,
+          outcome: "accepted",
+          postcondition: "applied",
+        },
+      ]).code,
+    ).toBe("idempotent-replay");
+    expect(
+      evaluateDeliveryEffectV2(
+        contract,
+        request,
+        { ...mt, mergeGrant: { ...grant, grantId: "" } },
+        [
+          {
+            namespace: "effect",
+            idempotencyKey: request.idempotencyKey,
+            requestDigest: request.requestDigest,
+            outcome: "accepted",
+            postcondition: "applied",
+          },
+        ],
+      ),
+    ).toMatchObject({
+      allowed: false,
+      code: "merge-grant-required",
+      executable: false,
+    });
     for (const mergeMethod of ["octopus", "", 1, null])
       expect(
         evaluateDeliveryEffectV2(

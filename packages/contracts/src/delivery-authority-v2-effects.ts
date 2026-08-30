@@ -13,6 +13,7 @@ import {
   type DeliveryAuthorityContractV2,
   type DeliveryIdentityV2,
   type TrustedDeliveryInputsV2,
+  type TrustedMergeGrantV2,
   type DeliveryAuthorityV2State,
 } from "./delivery-authority-v2.js";
 export const DELIVERY_EFFECT_KINDS_V2 = [
@@ -147,6 +148,48 @@ const denied = (code: string) => ({
   code,
   executable: false as const,
 });
+const mergeGrantKeys = [
+  "grantId",
+  "projectId",
+  "taskId",
+  "repositoryId",
+  "runId",
+  "pullRequest",
+  "headBranch",
+  "candidateCommit",
+  "candidateTree",
+  "mergeMethod",
+  "stakeholderIdentity",
+  "notBefore",
+  "expiresAt",
+  "consumed",
+];
+const isValidMergeGrantV2 = (value: unknown): value is TrustedMergeGrantV2 => {
+  if (!hasExactDeliveryV2Keys(value, mergeGrantKeys)) return false;
+  const grant = value as TrustedMergeGrantV2;
+  return (
+    typeof grant.grantId === "string" &&
+    grant.grantId.trim().length > 0 &&
+    [
+      grant.projectId,
+      grant.taskId,
+      grant.repositoryId,
+      grant.runId,
+      grant.headBranch,
+    ].every((field) => typeof field === "string" && field.trim().length > 0) &&
+    Number.isSafeInteger(grant.pullRequest) &&
+    grant.pullRequest > 0 &&
+    isSha1DeliveryV2(grant.candidateCommit) &&
+    isSha1DeliveryV2(grant.candidateTree) &&
+    ["merge", "squash", "rebase"].includes(grant.mergeMethod) &&
+    isDeliveryIdentityV2(grant.stakeholderIdentity) &&
+    grant.stakeholderIdentity.role === "stakeholder" &&
+    isCanonicalLifecycleTimestamp(grant.notBefore) &&
+    isCanonicalLifecycleTimestamp(grant.expiresAt) &&
+    grant.notBefore < grant.expiresAt &&
+    grant.consumed === false
+  );
+};
 export function evaluateDeliveryEffectV2(
   contractInput: unknown,
   requestInput: unknown,
@@ -220,6 +263,8 @@ export function evaluateDeliveryEffectV2(
     return denied("cancelled");
   if (!sameDeliveryV2Value(request.identity, c.identity))
     return denied("identity-drift");
+  if (request.kind === "merge" && !isValidMergeGrantV2(trusted.mergeGrant))
+    return denied("merge-grant-required");
   if (!Array.isArray(history)) return denied("history-invalid");
   for (const entry of history)
     if (
@@ -265,25 +310,7 @@ export function evaluateDeliveryEffectV2(
     const grant = trusted.mergeGrant;
     if (
       !grant ||
-      !hasExactDeliveryV2Keys(grant, [
-        "grantId",
-        "projectId",
-        "taskId",
-        "repositoryId",
-        "runId",
-        "pullRequest",
-        "headBranch",
-        "candidateCommit",
-        "candidateTree",
-        "mergeMethod",
-        "stakeholderIdentity",
-        "notBefore",
-        "expiresAt",
-        "consumed",
-      ]) ||
-      grant.consumed ||
-      !isDeliveryIdentityV2(grant.stakeholderIdentity) ||
-      grant.stakeholderIdentity.role !== "stakeholder" ||
+      !isValidMergeGrantV2(grant) ||
       !sameDeliveryV2Value(grant.stakeholderIdentity, request.identity) ||
       !deliveryIdentityContextsMatchV2(
         c.identity,
