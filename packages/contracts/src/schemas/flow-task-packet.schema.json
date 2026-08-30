@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "spts.flow-task-packet/2.0.0",
+  "title": "Flow task packet v2",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "sha1": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "branch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(?!-)(?!.*\\.\\.)(?!.*@\\{)(?!.*[\\\\\\s\\x00-\\x1f\\x7f])(?!.*(?:/|\\.|\\.lock)$).+$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\x00-\\x1f\\x7f*?\\[\\]{}]).+$"
+    },
+    "ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/id" }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractId",
+    "schemaVersion",
+    "packetId",
+    "packetDigest",
+    "issuedAt",
+    "task",
+    "repository",
+    "run",
+    "subject",
+    "assurance",
+    "authorityDigest",
+    "controllerStateDigest",
+    "work"
+  ],
+  "properties": {
+    "contractId": { "const": "spts.flow-task-packet" },
+    "schemaVersion": { "const": "2.0.0" },
+    "packetId": { "$ref": "#/$defs/id" },
+    "packetDigest": { "$ref": "#/$defs/sha256" },
+    "issuedAt": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "taskId", "sliceId"],
+      "properties": {
+        "projectId": { "$ref": "#/$defs/id" },
+        "taskId": { "$ref": "#/$defs/id" },
+        "sliceId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositoryId",
+        "rootId",
+        "baseBranch",
+        "headBranch",
+        "baseCommit",
+        "baseTree",
+        "candidateCommit",
+        "candidateTree"
+      ],
+      "properties": {
+        "repositoryId": { "$ref": "#/$defs/id" },
+        "rootId": { "$ref": "#/$defs/id" },
+        "baseBranch": { "$ref": "#/$defs/branch" },
+        "headBranch": { "$ref": "#/$defs/branch" },
+        "baseCommit": { "$ref": "#/$defs/sha1" },
+        "baseTree": { "$ref": "#/$defs/sha1" },
+        "candidateCommit": { "$ref": "#/$defs/sha1" },
+        "candidateTree": { "$ref": "#/$defs/sha1" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/id" },
+        "parentExecutionId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "actorId", "executionId", "workspaceId", "access"],
+      "properties": {
+        "role": {
+          "enum": [
+            "product",
+            "flow",
+            "principal-developer",
+            "independent-verifier"
+          ]
+        },
+        "actorId": { "$ref": "#/$defs/id" },
+        "executionId": { "$ref": "#/$defs/id" },
+        "workspaceId": { "$ref": "#/$defs/id" },
+        "access": { "$ref": "#/$defs/id" }
+      }
+    },
+    "assurance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "phase"],
+      "properties": {
+        "profile": { "enum": ["lean", "standard", "critical"] },
+        "phase": { "enum": ["planning", "implementation", "verification"] }
+      }
+    },
+    "authorityDigest": { "$ref": "#/$defs/sha256" },
+    "controllerStateDigest": { "$ref": "#/$defs/sha256" },
+    "work": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "objective",
+        "acceptanceCriteria",
+        "allowedPaths",
+        "outOfScope",
+        "resources"
+      ],
+      "properties": {
+        "objective": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "acceptanceCriteria": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1024 }
+        },
+        "allowedPaths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/path" }
+        },
+        "outOfScope": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 8192 }
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["skills", "promptTemplates"],
+          "properties": {
+            "skills": {
+              "allOf": [{ "$ref": "#/$defs/ids" }, { "maxItems": 16 }]
+            },
+            "promptTemplates": {
+              "allOf": [{ "$ref": "#/$defs/ids" }, { "maxItems": 16 }]
+            }
+          }
+        }
+      }
+    }
+  }
+}

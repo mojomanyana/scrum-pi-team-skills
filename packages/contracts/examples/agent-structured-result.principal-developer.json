@@ -1,0 +1,43 @@
+{
+  "contractId": "spts.agent-structured-result",
+  "schemaVersion": "2.0.0",
+  "resultId": "result-principal",
+  "resultDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "packetId": "packet-principal",
+  "packetDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "projectId": "SPTS",
+  "taskId": "SPTS-10",
+  "repositoryId": "scrum-pi-team-skills",
+  "runId": "run-2",
+  "baseBranch": "main",
+  "baseCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "baseTree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "headBranch": "feature/spts-10",
+  "candidateCommit": "cccccccccccccccccccccccccccccccccccccccc",
+  "candidateTree": "dddddddddddddddddddddddddddddddddddddddd",
+  "role": "principal-developer",
+  "actorId": "principal-1",
+  "executionId": "exec-principal",
+  "workspaceId": "workspace-principal",
+  "access": "read-write",
+  "assurance": "standard",
+  "authorityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "controllerStateDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "status": "completed",
+  "payload": {
+    "kind": "principal-developer",
+    "outcomeCode": "implementation-ready",
+    "baseCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "baseTree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "resultCommit": "cccccccccccccccccccccccccccccccccccccccc",
+    "resultTree": "dddddddddddddddddddddddddddddddddddddddd",
+    "changedPaths": ["packages/contracts/src/flow-task-packet.ts"],
+    "checks": [
+      {
+        "commandId": "quality",
+        "outcome": "passed",
+        "evidenceDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ]
+  }
+}

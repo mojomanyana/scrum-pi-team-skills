@@ -5,6 +5,9 @@ import executionContextSchema from "./schemas/execution-context.schema.json" wit
 import { containsCredentialShapedContent } from "./credential-shape.js";
 
 export { containsCredentialShapedContent } from "./credential-shape.js";
+export * from "./flow-task-packet.js";
+export * from "./agent-structured-result.js";
+export * from "./agent-execution-manifest-v2.js";
 export * from "./delivery-authority.js";
 export * from "./delivery-authority-bootstrap.js";
 export * from "./delivery-authority-v2.js";
