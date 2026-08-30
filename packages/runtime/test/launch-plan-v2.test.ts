@@ -290,6 +290,68 @@ describe("launch plan v2", () => {
       ).valid,
     ).toBe(false),
   );
+  it("accepts the packet's optional parent execution identity at stage one", () => {
+    const packetWithParent = signed(
+      { ...packet, run: { ...packet.run, parentExecutionId: "exec-parent" } },
+      "packetDigest",
+      digestFlowTaskPacket,
+    );
+    const manifestWithParent = signed(
+      { ...manifest, packet: packetWithParent },
+      "manifestDigest",
+      digestAgentExecutionManifestV2,
+    );
+    const decisionWithParent = signed(
+      {
+        ...decision,
+        packetDigest: packetWithParent.packetDigest,
+        manifestDigest: manifestWithParent.manifestDigest,
+      },
+      "decisionDigest",
+      digestTrustedConcreteLaunchDecisionV2,
+    );
+    const trustedWithParent = {
+      ...trusted,
+      expectedControllerDecisionDigest: decisionWithParent.decisionDigest,
+    };
+    expect(
+      __testOnlyCreateLaunchPlanV2Preview(
+        manifestWithParent,
+        decisionWithParent,
+        trustedWithParent,
+        policy,
+      ).valid,
+    ).toBe(true);
+  });
+  it("preserves earlier malformed-source precedence over a later hostile source", () => {
+    const hostile = Object.defineProperty({}, "effect", {
+      enumerable: true,
+      get() {
+        throw Error("must not run");
+      },
+    });
+    expect(
+      __testOnlyCreateLaunchPlanV2Preview({}, hostile, trusted, policy),
+    ).toMatchObject({ valid: false, errors: [{ code: "schema" }] });
+  });
+  it.each([
+    [null, "unsafe-input"],
+    [{ ...policy, skills: null }, "schema"],
+    [{ ...policy, promptTemplates: null }, "schema"],
+  ])(
+    "rejects malformed policy objects without throwing",
+    (badPolicy, expectedCode) => {
+      expect(() =>
+        createPiLaunchPlanV2(manifest, decision, trusted, badPolicy),
+      ).not.toThrow();
+      expect(
+        createPiLaunchPlanV2(manifest, decision, trusted, badPolicy),
+      ).toMatchObject({
+        valid: false,
+        errors: [{ code: expectedCode }],
+      });
+    },
+  );
   it.each([
     [
       "decision",

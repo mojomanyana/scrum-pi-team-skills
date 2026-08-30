@@ -572,7 +572,12 @@ function manifestStage1(x: unknown): boolean {
         "candidateTree",
       ],
     ],
-    [packet.run, ["runId"]],
+    [
+      packet.run,
+      Object.hasOwn(packet.run as object, "parentExecutionId")
+        ? ["runId", "parentExecutionId"]
+        : ["runId"],
+    ],
     [
       packet.subject,
       ["role", "actorId", "executionId", "workspaceId", "access"],
@@ -681,8 +686,11 @@ function policyStage1(x: unknown): boolean {
   const p = x as Record<string, unknown>;
   if (
     !Array.isArray(p.extensions) ||
-    !closed(p.skills, Object.keys(p.skills as object)) ||
-    !closed(p.promptTemplates, Object.keys(p.promptTemplates as object)) ||
+    !isObject(p.skills) ||
+    !isObject(p.promptTemplates) ||
+    !isObject(p.roles) ||
+    !closed(p.skills, Object.keys(p.skills)) ||
+    !closed(p.promptTemplates, Object.keys(p.promptTemplates)) ||
     !closed(p.roles, roles)
   )
     return false;
@@ -723,20 +731,20 @@ function stage1(
   inputs: readonly unknown[],
 ): ValidationResult<readonly unknown[]> {
   const values: unknown[] = [];
-  for (const input of inputs) {
-    const q = snapshot(input);
-    if (!q.valid) return q as ValidationResult<readonly unknown[]>;
-    values.push(q.value);
-  }
-  if (inputs.length !== 4) return failure("schema");
   const validators = [
     manifestStage1,
     decisionStage1,
     trustedStage1,
     policyStage1,
   ];
-  for (let i = 0; i < validators.length; i++)
-    if (!validators[i]!(values[i])) return failure("schema");
+  for (let i = 0; i < inputs.length; i++) {
+    if (i >= validators.length) return failure("schema");
+    const q = snapshot(inputs[i]);
+    if (!q.valid) return q as ValidationResult<readonly unknown[]>;
+    if (!validators[i]!(q.value)) return failure("schema");
+    values.push(q.value);
+  }
+  if (inputs.length !== validators.length) return failure("schema");
   return { valid: true, value: values };
 }
 
