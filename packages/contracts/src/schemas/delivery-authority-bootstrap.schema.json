@@ -18,19 +18,40 @@
     "expiresAt"
   ],
   "properties": {
-    "contractId": { "const": "spts.delivery-authority-bootstrap" },
-    "contractVersion": { "const": "1.0.0" },
-    "projectId": { "$ref": "#/definitions/id" },
-    "taskId": { "$ref": "#/definitions/id" },
-    "authorityAnchor": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "contractId": {
+      "const": "spts.delivery-authority-bootstrap"
+    },
+    "contractVersion": {
+      "const": "1.0.0"
+    },
+    "projectId": {
+      "$ref": "#/definitions/id"
+    },
+    "taskId": {
+      "$ref": "#/definitions/id"
+    },
+    "authorityAnchor": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "origin": {
       "type": "string",
-      "pattern": "^http://(?:127(?:\\.[0-9]{1,3}){3}|\\[0*:0*1\\]):[1-9][0-9]{0,4}$"
+      "pattern": "^http://(?:127\\.0\\.0\\.1|\\[::1\\]):[1-9][0-9]{0,4}$"
     },
-    "taskPath": { "$ref": "#/definitions/path" },
-    "anchorPath": { "$ref": "#/definitions/path" },
-    "notBefore": { "type": "string", "format": "date-time" },
-    "expiresAt": { "type": "string", "format": "date-time" }
+    "taskPath": {
+      "$ref": "#/definitions/path"
+    },
+    "anchorPath": {
+      "$ref": "#/definitions/path"
+    },
+    "notBefore": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    }
   },
   "definitions": {
     "id": {

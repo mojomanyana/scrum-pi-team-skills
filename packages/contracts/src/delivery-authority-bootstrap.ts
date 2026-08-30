@@ -5,6 +5,7 @@ import {
   isCanonicalLifecycleTimestamp,
 } from "./lifecycle-receipt.js";
 import schema from "./schemas/delivery-authority-bootstrap.schema.json" with { type: "json" };
+import { snapshotDeliveryV2Input } from "./delivery-authority-v2-input.js";
 
 export const DELIVERY_AUTHORITY_BOOTSTRAP_ID =
   "spts.delivery-authority-bootstrap" as const;
@@ -29,39 +30,6 @@ export type BootstrapValidationResult =
     };
 const ajv = new Ajv({ allErrors: true, formats: { "date-time": true } });
 const validate = ajv.compile<DeliveryAuthorityBootstrap>(schema);
-function snapshot(value: unknown): unknown | null {
-  try {
-    const seen = new WeakSet<object>();
-    let nodes = 0;
-    const copy = (v: unknown, depth: number): unknown => {
-      if (++nodes > 10000 || depth > 32) throw new TypeError();
-      if (typeof v !== "object" || v === null) return v;
-      if (seen.has(v)) throw new TypeError();
-      seen.add(v);
-      try {
-        if (Array.isArray(v)) return v.map((x) => copy(x, depth + 1));
-        if (Object.getPrototypeOf(v) !== Object.prototype)
-          throw new TypeError();
-        const out: Record<string, unknown> = {};
-        for (const key of Reflect.ownKeys(v)) {
-          if (typeof key !== "string") throw new TypeError();
-          const d = Object.getOwnPropertyDescriptor(v, key);
-          if (!d || !("value" in d)) throw new TypeError();
-          Object.defineProperty(out, key, {
-            enumerable: true,
-            value: copy(d.value, depth + 1),
-          });
-        }
-        return out;
-      } finally {
-        seen.delete(v);
-      }
-    };
-    return copy(value, 0);
-  } catch {
-    return null;
-  }
-}
 const structural = (e: ErrorObject) => ({
   path: e.instancePath || "/",
   code: e.keyword,
@@ -70,22 +38,42 @@ const structural = (e: ErrorObject) => ({
 export function validateDeliveryAuthorityBootstrap(
   value: unknown,
 ): BootstrapValidationResult {
-  const frozen = snapshot(value);
-  if (frozen === null)
+  const snapshot = snapshotDeliveryV2Input(value);
+  if (!snapshot.ok)
     return {
       valid: false,
       errors: [
         {
           path: "/",
-          code: "input-introspection",
+          code: snapshot.code,
           message: "bootstrap input could not be safely inspected",
         },
       ],
     };
+  const frozen = snapshot.value;
   if (!validate(frozen))
     return { valid: false, errors: (validate.errors ?? []).map(structural) };
   const b = frozen as DeliveryAuthorityBootstrap;
+  const originValid = (() => {
+    try {
+      const origin = new URL(b.origin);
+      return (
+        origin.protocol === "http:" &&
+        origin.username === "" &&
+        origin.password === "" &&
+        origin.port !== "" &&
+        (origin.hostname === "127.0.0.1" || origin.hostname === "[::1]") &&
+        origin.pathname === "/" &&
+        origin.search === "" &&
+        origin.hash === "" &&
+        origin.origin === b.origin
+      );
+    } catch {
+      return false;
+    }
+  })();
   if (
+    !originValid ||
     !isCanonicalLifecycleTimestamp(b.notBefore) ||
     !isCanonicalLifecycleTimestamp(b.expiresAt) ||
     b.notBefore >= b.expiresAt
@@ -119,11 +107,24 @@ export type BootstrapReadDecision = {
   code: "accepted" | "contract-invalid" | "request-denied" | "stale-authority";
 };
 export function authorizeBootstrapRead(
-  bootstrap: DeliveryAuthorityBootstrap,
-  request: BootstrapReadRequest,
-  trustedDigest: string,
-  trustedNow: string,
+  bootstrapInput: DeliveryAuthorityBootstrap,
+  requestInput: BootstrapReadRequest,
+  trustedDigestInput: string,
+  trustedNowInput: string,
 ): BootstrapReadDecision {
+  const inputs = snapshotDeliveryV2Input({
+    bootstrap: bootstrapInput,
+    request: requestInput,
+    trustedDigest: trustedDigestInput,
+    trustedNow: trustedNowInput,
+  });
+  if (!inputs.ok) return { allowed: false, code: "contract-invalid" };
+  const { bootstrap, request, trustedDigest, trustedNow } = inputs.value as {
+    bootstrap: DeliveryAuthorityBootstrap;
+    request: BootstrapReadRequest;
+    trustedDigest: string;
+    trustedNow: string;
+  };
   const checked = validateDeliveryAuthorityBootstrap(bootstrap);
   if (
     !checked.valid ||
@@ -133,7 +134,7 @@ export function authorizeBootstrapRead(
   if (
     !isCanonicalLifecycleTimestamp(trustedNow) ||
     trustedNow < bootstrap.notBefore ||
-    trustedNow > bootstrap.expiresAt
+    trustedNow >= bootstrap.expiresAt
   )
     return { allowed: false, code: "stale-authority" };
   if (

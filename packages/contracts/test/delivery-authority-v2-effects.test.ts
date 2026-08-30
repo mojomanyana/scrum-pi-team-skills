@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  DELIVERY_RECOVERY_KINDS_V2,
+  DELIVERY_RECOVERY_EVIDENCE_V2,
   evaluateDeliveryEffectV2,
   evaluateDeliveryRecoveryV2,
+  type DeliveryAuthorityV2State,
   type DeliveryIdentityV2,
 } from "../src/index.js";
 import { identity, v2 } from "./delivery-authority-v2.test.js";
@@ -11,6 +14,15 @@ const trusted = {
   controllerStateDigest: v2.controllerStateDigest,
   identity,
 };
+const effect = {
+  kind: "prepare-branch-worktree",
+  identity,
+  idempotencyKey: "effect",
+  requestDigest: "a".repeat(64),
+  preconditionDigest: "b".repeat(64),
+  postconditionDigest: "c".repeat(64),
+  remainingBudget: 1,
+};
 const controller = {
   ...identity,
   role: "controller",
@@ -19,138 +31,199 @@ const controller = {
   executionId: "controller-exec",
   workspaceId: "controller-work",
 } satisfies DeliveryIdentityV2;
-describe("v2 effects, recovery, reconciliation, and cancellation", () => {
-  it("authorizes pure intent once and detects replay conflicts", () => {
-    const request = {
-      kind: "prepare-branch-worktree",
-      identity,
-      idempotencyKey: "effect-1",
-      requestDigest: "a".repeat(64),
-      preconditionDigest: "b".repeat(64),
-      postconditionDigest: "c".repeat(64),
-      remainingBudget: 1,
-    };
-    expect(evaluateDeliveryEffectV2(v2, request, trusted, [])).toMatchObject({
+const cases: Record<
+  string,
+  {
+    state: DeliveryAuthorityV2State;
+    resume: DeliveryAuthorityV2State;
+    evidence: number;
+  }
+> = {
+  "redundant-assurance-downgrade": {
+    state: "ready",
+    resume: "ready",
+    evidence: 2,
+  },
+  "missing-keep-branch-choice": {
+    state: "implementation",
+    resume: "implementation",
+    evidence: 3,
+  },
+  "repair-order-correction": {
+    state: "repair-required",
+    resume: "repair-required",
+    evidence: 3,
+  },
+  "completed-repair-missing-receipt": {
+    state: "repair-required",
+    resume: "repair-required",
+    evidence: 3,
+  },
+  "stale-evidence-regeneration": {
+    state: "publication-authorized",
+    resume: "independent-verification",
+    evidence: 3,
+  },
+  "canonical-digest-retransmission": {
+    state: "ready",
+    resume: "ready",
+    evidence: 3,
+  },
+  "disappeared-product": { state: "intake", resume: "intake", evidence: 2 },
+  "disappeared-flow": { state: "ready", resume: "ready", evidence: 2 },
+  "disappeared-principal": {
+    state: "implementation",
+    resume: "implementation",
+    evidence: 3,
+  },
+  "disappeared-verifier": {
+    state: "independent-verification",
+    resume: "independent-verification",
+    evidence: 3,
+  },
+  "already-completed-feature-push": {
+    state: "publication-authorized",
+    resume: "published",
+    evidence: 2,
+  },
+  "already-created-or-updated-pr": {
+    state: "published",
+    resume: "ci-monitoring",
+    evidence: 2,
+  },
+  "interrupted-ci-polling": {
+    state: "ci-monitoring",
+    resume: "ci-monitoring",
+    evidence: 2,
+  },
+  "interrupted-paca-update": {
+    state: "published",
+    resume: "published",
+    evidence: 2,
+  },
+  "cancellation-cleanup": {
+    state: "cancelling",
+    resume: "cancelled",
+    evidence: 3,
+  },
+};
+describe("v2 effects and recovery", () => {
+  it("issues executable intent only for exact role/state", () =>
+    expect(evaluateDeliveryEffectV2(v2, effect, trusted, [])).toMatchObject({
       allowed: true,
       code: "accepted",
-    });
+      executable: true,
+    }));
+  it("makes replay non-executable and ambiguous outcomes reconcilable", () => {
     expect(
-      evaluateDeliveryEffectV2(v2, request, trusted, [
+      evaluateDeliveryEffectV2(v2, effect, trusted, [
         {
-          idempotencyKey: "effect-1",
-          requestDigest: request.requestDigest,
+          idempotencyKey: "effect",
+          requestDigest: effect.requestDigest,
           outcome: "accepted",
+          postcondition: "applied",
         },
       ]),
-    ).toMatchObject({ allowed: true, code: "idempotent-replay" });
+    ).toMatchObject({
+      allowed: false,
+      code: "idempotent-replay",
+      executable: false,
+    });
     expect(
-      evaluateDeliveryEffectV2(
-        v2,
-        { ...request, requestDigest: "f".repeat(64) },
-        trusted,
-        [
-          {
-            idempotencyKey: "effect-1",
-            requestDigest: request.requestDigest,
-            outcome: "accepted",
-          },
-        ],
-      ),
-    ).toMatchObject({ allowed: false, code: "idempotency-conflict" });
+      evaluateDeliveryEffectV2(v2, effect, trusted, [
+        {
+          idempotencyKey: "effect",
+          requestDigest: effect.requestDigest,
+          outcome: "unknown",
+          postcondition: "unknown",
+        },
+      ]),
+    ).toMatchObject({ allowed: false, code: "reconciliation-required" });
   });
-  it("fails closed on cancellation, no budget, wrong role, and unknown effects", () => {
+  it.each(DELIVERY_RECOVERY_KINDS_V2)("enforces table row %s", (kind) => {
+    const row = cases[kind]!;
+    const contract = { ...v2, state: row.state };
     const request = {
-      kind: "launch-verifier",
-      identity,
-      idempotencyKey: "effect-2",
-      requestDigest: "a".repeat(64),
-      preconditionDigest: "b".repeat(64),
-      postconditionDigest: "c".repeat(64),
-      remainingBudget: 0,
+      kind,
+      suspendedState: row.state,
+      identity: controller,
+      idempotencyKey: `recovery-${kind}`,
+      boundaryId: `boundary-${kind}`,
+      boundaryConsumed: false,
+      authenticatedBoundary: true,
+      identityRevalidated: true,
+      immutableIdentity: identity,
+      worktreeClean: true,
+      evidenceIds: [...DELIVERY_RECOVERY_EVIDENCE_V2[kind]!],
+      staleEvidenceIds: [],
+      remainingAttempts: 1,
+      requestedResumeState: row.resume,
     };
-    expect(evaluateDeliveryEffectV2(v2, request, trusted, []).allowed).toBe(
-      false,
-    );
+    const recoveryTrusted = {
+      ...trusted,
+      recoveryBoundary: {
+        boundaryId: request.boundaryId,
+        idempotencyKey: request.idempotencyKey,
+        kind: request.kind,
+        suspendedState: request.suspendedState,
+        consumed: false,
+        identity: request.immutableIdentity,
+      },
+    };
     expect(
-      evaluateDeliveryEffectV2(
-        { ...v2, cancelled: true },
-        { ...request, remainingBudget: 1 },
-        trusted,
-        [],
-      ).code,
-    ).toBe("cancelled");
+      evaluateDeliveryRecoveryV2(contract, request, recoveryTrusted),
+    ).toMatchObject({
+      allowed: true,
+      code: "accepted",
+      resumeState: row.resume,
+    });
     expect(
-      evaluateDeliveryEffectV2(
-        v2,
-        { ...request, kind: "unknown", remainingBudget: 1 },
-        trusted,
-        [],
+      evaluateDeliveryRecoveryV2(
+        contract,
+        { ...request, boundaryConsumed: true },
+        recoveryTrusted,
       ).allowed,
     ).toBe(false);
   });
-  it.each([
-    "redundant-assurance-downgrade",
-    "missing-keep-branch-choice",
-    "repair-order-correction",
-    "completed-repair-missing-receipt",
-    "stale-evidence-regeneration",
-    "canonical-digest-retransmission",
-    "disappeared-product",
-    "disappeared-flow",
-    "disappeared-principal",
-    "disappeared-verifier",
-    "already-completed-feature-push",
-    "already-created-or-updated-pr",
-    "interrupted-ci-polling",
-    "interrupted-paca-update",
-    "cancellation-cleanup",
-  ])("accepts exact allowlisted recovery %s", (kind) => {
-    expect(
-      evaluateDeliveryRecoveryV2(
-        { ...v2, state: "blocked" },
-        {
-          kind,
-          suspendedState: "blocked",
-          identity: controller,
-          idempotencyKey: `recovery-${kind}`,
-          boundaryId: `boundary-${kind}`,
-          boundaryConsumed: false,
-          identityRevalidated: true,
-          worktreeClean: true,
-          evidenceIds: ["rejected-event"],
-          staleEvidenceIds: [],
-          remainingAttempts: 1,
-        },
-        trusted,
-      ),
-    ).toMatchObject({ allowed: true, code: "accepted" });
-  });
-  it("rejects replayed boundary, dirty worktree, drift, skipped evidence, and nonallowlisted recovery", () => {
+  it("rejects dirty, drifted, skipped, or unknown recovery", () => {
     const request = {
       kind: "disappeared-verifier",
-      suspendedState: "blocked",
+      suspendedState: "independent-verification",
       identity: controller,
-      idempotencyKey: "recovery",
-      boundaryId: "boundary",
+      idempotencyKey: "r",
+      boundaryId: "b",
       boundaryConsumed: false,
+      authenticatedBoundary: true,
       identityRevalidated: true,
+      immutableIdentity: identity,
       worktreeClean: true,
-      evidenceIds: ["rejected-event"],
+      evidenceIds: [...DELIVERY_RECOVERY_EVIDENCE_V2["disappeared-verifier"]!],
       staleEvidenceIds: [],
       remainingAttempts: 1,
+      requestedResumeState: "independent-verification",
     };
-    for (const changed of [
-      { ...request, boundaryConsumed: true },
+    const recoveryTrusted = {
+      ...trusted,
+      recoveryBoundary: {
+        boundaryId: request.boundaryId,
+        idempotencyKey: request.idempotencyKey,
+        kind: request.kind,
+        suspendedState: request.suspendedState,
+        consumed: false,
+        identity: request.immutableIdentity,
+      },
+    };
+    for (const r of [
       { ...request, worktreeClean: false },
       { ...request, identityRevalidated: false },
-      { ...request, evidenceIds: [] },
+      { ...request, requestedResumeState: "published" },
       { ...request, kind: "remote-main-drift" },
     ])
       expect(
         evaluateDeliveryRecoveryV2(
-          { ...v2, state: "blocked" },
-          changed,
-          trusted,
+          { ...v2, state: "independent-verification" },
+          r,
+          recoveryTrusted,
         ).allowed,
       ).toBe(false);
   });

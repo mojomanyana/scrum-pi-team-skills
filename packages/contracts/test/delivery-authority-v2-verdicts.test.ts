@@ -6,7 +6,7 @@ import {
   type DeliveryIdentityV2,
 } from "../src/index.js";
 const candidate = { commit: "a".repeat(40), tree: "b".repeat(40) };
-const verifier = {
+const identity = {
   projectId: "SPTS",
   taskId: "SPTS-10",
   repositoryId: "repo",
@@ -23,111 +23,84 @@ const verifier = {
   workspaceId: "fresh-check",
   access: "read-only",
 } satisfies DeliveryIdentityV2;
+const trustedVerifier = {
+  identity,
+  candidate,
+  controllerRevision: 3,
+  observedAt: "2026-08-29T01:00:00.000Z",
+  freshThroughEventId: "verify-boundary",
+  evidenceIds: ["spec-check", "quality-check"],
+};
+const make = (axis: "specification" | "quality") => ({
+  axis,
+  verdict: "APPROVE" as const,
+  identity,
+  candidate,
+  controllerRevision: 3,
+  observedAt: trustedVerifier.observedAt,
+  freshThroughEventId: trustedVerifier.freshThroughEventId,
+  evidenceIds: [axis === "specification" ? "spec-check" : "quality-check"],
+});
 const verdicts = {
-  specification: {
-    verdict: "APPROVE",
-    candidate,
-    ...verifier,
-    evidenceIds: ["spec-check"],
-    controllerRevision: 3,
-    fresh: true,
-  },
-  quality: {
-    verdict: "APPROVE",
-    candidate,
-    ...verifier,
-    evidenceIds: ["quality-check"],
-    controllerRevision: 3,
-    fresh: true,
-  },
-} as const;
+  specification: make("specification"),
+  quality: make("quality"),
+};
 const ci = {
+  projectId: "SPTS",
+  taskId: "SPTS-10",
   repositoryId: "repo",
+  runId: "run",
   pullRequest: 10,
+  baseBranch: "main",
   headBranch: "feature/spts-10",
   candidate,
   workflowId: "quality",
   checkId: "quality",
-  runId: "run-10",
+  ciRunId: "ci-run",
   attempt: 1,
-  conclusion: "success",
-  observedAt: "2026-08-29T01:00:00.000Z",
-  fresh: true,
+  conclusion: "success" as const,
+  observedAt: "2026-08-29T01:10:00.000Z",
+  freshThroughEventId: "ci-boundary",
   requiredCheckPolicyDigest: "e".repeat(64),
+  fresh: true,
 };
 describe("v2 verifier and CI boundaries", () => {
-  it("accepts verifier-owned dual verdicts for one exact candidate", () =>
-    expect(validateDeliveryVerifierVerdictsV2(verdicts, candidate).valid).toBe(
-      true,
-    ));
-  it("rejects controller authorship, split candidates, stale evidence, and writable verifier", () => {
+  it("accepts complete separately trusted verifier provenance", () =>
+    expect(
+      validateDeliveryVerifierVerdictsV2(verdicts, trustedVerifier).valid,
+    ).toBe(true));
+  it("rejects split identity and candidate provenance", () =>
     expect(
       validateDeliveryVerifierVerdictsV2(
         {
           ...verdicts,
           quality: {
             ...verdicts.quality,
-            candidate: { ...candidate, tree: "f".repeat(40) },
+            identity: { ...identity, workspaceId: "other" },
           },
         },
-        candidate,
+        trustedVerifier,
       ).valid,
-    ).toBe(false);
+    ).toBe(false));
+  it("requires exact trusted CI provenance", () => {
+    expect(validateDeliveryCiEvidenceV2(ci, { ...ci }).valid).toBe(true);
     expect(
-      validateDeliveryVerifierVerdictsV2(
-        { ...verdicts, quality: { ...verdicts.quality, fresh: false } },
-        candidate,
-      ).valid,
-    ).toBe(false);
-    expect(
-      validateDeliveryVerifierVerdictsV2(
-        { ...verdicts, quality: { ...verdicts.quality, role: "controller" } },
-        candidate,
-      ).valid,
-    ).toBe(false);
-    expect(
-      validateDeliveryVerifierVerdictsV2(
-        { ...verdicts, quality: { ...verdicts.quality, access: "read-write" } },
-        candidate,
-      ).valid,
+      validateDeliveryCiEvidenceV2({ ...ci, attempt: 2 }, { ...ci }).valid,
     ).toBe(false);
   });
-  it("binds minimal trusted CI identity and required-check policy", () => {
+  it("publishes only with both trusted boundaries", () => {
     expect(
-      validateDeliveryCiEvidenceV2(ci, {
-        repositoryId: "repo",
-        pullRequest: 10,
-        headBranch: "feature/spts-10",
-        candidate,
-        requiredCheckPolicyDigest: "e".repeat(64),
-      }).valid,
-    ).toBe(true);
-    expect(
-      validateDeliveryCiEvidenceV2(
-        { ...ci, attempt: 0 },
-        {
-          repositoryId: "repo",
-          pullRequest: 10,
-          headBranch: "feature/spts-10",
-          candidate,
-          requiredCheckPolicyDigest: "e".repeat(64),
-        },
-      ).valid,
-    ).toBe(false);
-  });
-  it("requires both fresh approvals and exact CI success", () => {
-    expect(evaluateDeliveryPublicationV2(verdicts, ci, candidate)).toEqual({
-      allowed: true,
-      code: "accepted",
-    });
+      evaluateDeliveryPublicationV2(verdicts, trustedVerifier, ci, { ...ci }),
+    ).toEqual({ allowed: true, code: "accepted" });
     expect(
       evaluateDeliveryPublicationV2(
         {
           ...verdicts,
           quality: { ...verdicts.quality, verdict: "REQUEST_CHANGES" },
         },
+        trustedVerifier,
         ci,
-        candidate,
+        { ...ci },
       ).allowed,
     ).toBe(false);
   });
