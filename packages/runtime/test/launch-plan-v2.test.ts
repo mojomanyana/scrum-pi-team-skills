@@ -252,6 +252,28 @@ describe("launch plan v2", () => {
       ).toMatchObject({ valid: false, errors: [{ code: "schema" }] });
     },
   );
+  it("rejects non-canonical signed manifests instead of normalizing them", () => {
+    const nonCanonicalPacket = structuredClone(packet);
+    nonCanonicalPacket.work.allowedPaths.reverse();
+    nonCanonicalPacket.packetDigest = sha256(
+      nonCanonicalPacket,
+      "packetDigest",
+    );
+    const nonCanonicalManifest = structuredClone(manifest);
+    nonCanonicalManifest.packet = nonCanonicalPacket;
+    nonCanonicalManifest.manifestDigest = sha256(
+      nonCanonicalManifest,
+      "manifestDigest",
+    );
+    expect(
+      __testOnlyCreateLaunchPlanV2Preview(
+        nonCanonicalManifest,
+        decision,
+        trusted,
+        policy,
+      ),
+    ).toMatchObject({ valid: false, errors: [{ code: "non-canonical" }] });
+  });
   it.each([
     [
       "tool",

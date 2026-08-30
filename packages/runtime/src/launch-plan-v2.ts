@@ -1,6 +1,6 @@
 import {
   canonical,
-  canonicalizeAgentExecutionManifestV2,
+  validateAgentExecutionManifestV2,
   credentialFree,
   deepFreeze,
   exact,
@@ -776,7 +776,7 @@ export function __testOnlyCreateLaunchPlanV2Preview(
   if (!shaped.valid) return shaped as ValidationResult<never>;
   /* Only after every source passes stage 1 may semantic validators run, in
    * source order. */
-  const m = canonicalizeAgentExecutionManifestV2(shaped.value[0]);
+  const m = validateAgentExecutionManifestV2(shaped.value[0]);
   if (!m.valid) return m as ValidationResult<never>;
   const dc = canonicalizeTrustedConcreteLaunchDecisionV2(shaped.value[1]);
   if (!dc.valid) return dc as ValidationResult<never>;
