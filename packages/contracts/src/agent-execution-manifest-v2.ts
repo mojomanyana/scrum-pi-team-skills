@@ -3,6 +3,7 @@ import {
   deepFreeze,
   exact,
   failure,
+  hasCanonicalObjectOrder,
   ID,
   isObject,
   SHA,
@@ -172,6 +173,7 @@ export function validateAgentExecutionManifestV2(
   // checked first, then the complete embedded packet, before either contract's
   // content, canonicalization, digest, or correlation checks.
   if (!embeddedPacketHasShape(x.packet)) return failure("schema");
+  if (!hasCanonicalObjectOrder(x)) return failure("non-canonical");
   const m = x as unknown as AgentExecutionManifestV2;
   if (
     m.contractId !== AGENT_EXECUTION_MANIFEST_V2_ID ||
@@ -294,10 +296,9 @@ export function digestAgentExecutionManifestV2(
   const unsigned = q.value as Record<string, unknown>;
   if (Object.hasOwn(unsigned, "manifestDigest")) return failure("schema");
   const digest = sha256(unsigned, "manifestDigest");
-  const checked = validateAgentExecutionManifestV2({
-    ...unsigned,
-    manifestDigest: digest,
-  });
+  const checked = validateAgentExecutionManifestV2(
+    orderedManifestObject({ ...unsigned, manifestDigest: digest }),
+  );
   return checked.valid
     ? { valid: true, value: digest }
     : (checked as ValidationResult<string>);

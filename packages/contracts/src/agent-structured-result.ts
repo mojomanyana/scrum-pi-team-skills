@@ -4,6 +4,7 @@ import {
   deepFreeze,
   exact,
   failure,
+  hasCanonicalObjectOrder,
   ID,
   isObject,
   isFlowBranch,
@@ -380,6 +381,7 @@ export function validateAgentStructuredResult(
   if (!q.valid) return q as ValidationResult<AgentStructuredResultV2>;
   const x = q.value as Record<string, unknown>;
   if (!exact(x, common) || !isObject(x.payload)) return failure("schema");
+  if (!hasCanonicalObjectOrder(x)) return failure("non-canonical");
   if (Buffer.byteLength(JSON.stringify(x)) > 16384)
     return failure("excessive-size");
   const r = x as unknown as AgentStructuredResultV2;
@@ -532,10 +534,9 @@ export function digestAgentStructuredResult(
   const unsigned = q.value as Record<string, unknown>;
   if (Object.hasOwn(unsigned, "resultDigest")) return failure("schema");
   const digest = sha256(unsigned, "resultDigest");
-  const checked = validateAgentStructuredResult({
-    ...unsigned,
-    resultDigest: digest,
-  });
+  const checked = validateAgentStructuredResult(
+    orderedObject({ ...unsigned, resultDigest: digest }),
+  );
   return checked.valid
     ? { valid: true, value: digest }
     : (checked as ValidationResult<string>);

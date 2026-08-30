@@ -18,12 +18,21 @@ import {
   digestTrustedLaunchPolicyV2,
   digestTrustedToolProfileV2,
 } from "../src/launch-plan-v2.js";
+const ordered = (value: any): any => {
+  if (Array.isArray(value)) return value.map(ordered);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+      .map((key) => [key, ordered(value[key])]),
+  );
+};
 const signed = (x: any, key: string, digest: (v: any) => any) => {
   const y = structuredClone(x);
   delete y[key];
   const r = digest(y);
   if (!r.valid) throw 0;
-  return { ...y, [key]: r.value };
+  return ordered({ ...y, [key]: r.value });
 };
 const packet = signed(raw, "packetDigest", digestFlowTaskPacket);
 const profile = AGENT_ROLE_PROFILES_V2["principal-developer"];
@@ -252,6 +261,20 @@ describe("launch plan v2", () => {
       ).toMatchObject({ valid: false, errors: [{ code: "schema" }] });
     },
   );
+  it.each([
+    ["outer manifest", Object.fromEntries(Object.entries(manifest).reverse())],
+    [
+      "embedded packet",
+      {
+        ...manifest,
+        packet: Object.fromEntries(Object.entries(manifest.packet).reverse()),
+      },
+    ],
+  ])("rejects non-canonical %s object-key order", (_name, candidate) => {
+    expect(
+      __testOnlyCreateLaunchPlanV2Preview(candidate, decision, trusted, policy),
+    ).toMatchObject({ valid: false, errors: [{ code: "non-canonical" }] });
+  });
   it("rejects non-canonical signed manifests instead of normalizing them", () => {
     const nonCanonicalPacket = structuredClone(packet);
     nonCanonicalPacket.work.allowedPaths.reverse();

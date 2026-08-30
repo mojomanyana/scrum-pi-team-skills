@@ -158,6 +158,17 @@ export function deepFreeze<T>(v: T): Readonly<T> {
   }
   return v;
 }
+const compareObjectKey = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+export function hasCanonicalObjectOrder(value: unknown): boolean {
+  if (Array.isArray(value)) return value.every(hasCanonicalObjectOrder);
+  if (!isObject(value)) return true;
+  const keys = Object.keys(value);
+  const sorted = [...keys].sort(compareObjectKey);
+  return (
+    keys.every((key, index) => key === sorted[index]) &&
+    keys.every((key) => hasCanonicalObjectOrder(value[key]))
+  );
+}
 export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (isObject(value))
@@ -355,6 +366,7 @@ export function validateFlowTaskPacket(
   if (!q.valid) return q as ValidationResult<FlowTaskPacketV2>;
   const x = q.value as Record<string, unknown>;
   if (!shape(x)) return failure("schema");
+  if (!hasCanonicalObjectOrder(x)) return failure("non-canonical");
   if (Buffer.byteLength(JSON.stringify(x)) > 32768)
     return failure("excessive-size");
   const p = x as unknown as FlowTaskPacketV2;
@@ -533,7 +545,9 @@ export function digestFlowTaskPacket(input: unknown): ValidationResult<string> {
   const unsigned = q.value as Record<string, unknown>;
   if (Object.hasOwn(unsigned, "packetDigest")) return failure("schema");
   const digest = sha256(unsigned, "packetDigest");
-  const checked = validateFlowTaskPacket({ ...unsigned, packetDigest: digest });
+  const checked = validateFlowTaskPacket(
+    canonicalObject({ ...unsigned, packetDigest: digest }),
+  );
   return checked.valid
     ? { valid: true, value: digest }
     : (checked as ValidationResult<string>);

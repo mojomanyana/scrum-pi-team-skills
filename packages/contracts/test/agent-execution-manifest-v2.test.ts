@@ -7,16 +7,16 @@ import p3 from "../examples/flow-task-packet.independent-verifier.json" with { t
 import {
   AGENT_ROLE_PROFILES_V2,
   canonicalizeAgentExecutionManifestV2,
+  canonicalizeFlowTaskPacket,
   digestAgentExecutionManifestV2,
-  digestFlowTaskPacket,
   validateAgentExecutionManifestV2,
 } from "../src/index.js";
 const packet = (v: any) => {
   const x = structuredClone(v);
   delete x.packetDigest;
-  const d = digestFlowTaskPacket(x);
-  if (!d.valid) throw 0;
-  return { ...x, packetDigest: d.value };
+  const canonical = canonicalizeFlowTaskPacket(x);
+  if (!canonical.valid) throw 0;
+  return canonical.value;
 };
 const manifest = (v: any) => {
   const p = packet(v),
@@ -46,9 +46,9 @@ const manifest = (v: any) => {
       maximum: 1,
     },
   };
-  const d = digestAgentExecutionManifestV2(x);
-  if (!d.valid) throw 0;
-  return { ...x, manifestDigest: d.value };
+  const canonical = canonicalizeAgentExecutionManifestV2(x);
+  if (!canonical.valid) throw 0;
+  return canonical.value;
 };
 const fixtures = [p0, p1, p2, p3].map(manifest);
 describe("agent execution manifest v2", () => {

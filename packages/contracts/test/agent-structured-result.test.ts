@@ -11,23 +11,23 @@ import r3 from "../examples/agent-structured-result.independent-verifier.json" w
 import {
   acceptStructuredResultSubmission,
   canonicalizeAgentStructuredResult,
+  canonicalizeFlowTaskPacket,
   digestAgentStructuredResult,
-  digestFlowTaskPacket,
   validateAgentStructuredResult,
 } from "../src/index.js";
 const signPacket = (v: any) => {
   const x = structuredClone(v);
   delete x.packetDigest;
-  const d = digestFlowTaskPacket(x);
-  if (!d.valid) throw 0;
-  return { ...x, packetDigest: d.value };
+  const canonical = canonicalizeFlowTaskPacket(x);
+  if (!canonical.valid) throw 0;
+  return canonical.value;
 };
 const signResult = (v: any, p: any) => {
   const x = { ...structuredClone(v), packetDigest: p.packetDigest };
   delete x.resultDigest;
-  const d = digestAgentStructuredResult(x);
-  if (!d.valid) throw 0;
-  return { ...x, resultDigest: d.value };
+  const canonical = canonicalizeAgentStructuredResult(x);
+  if (!canonical.valid) throw 0;
+  return canonical.value;
 };
 const fixtures = [
   [p0, r0],
@@ -65,7 +65,7 @@ describe("agent structured result v2", () => {
     const [p, r] = fixtures[0]!;
     const x: any = structuredClone(r);
     x.payload.taskDefinitions[0].allowedPaths = ["z", "ä"];
-    const signed = signResult(x, p);
+    const signed: any = structuredClone(signResult(x, p));
     expect(validateAgentStructuredResult(signed).valid).toBe(true);
     signed.payload.taskDefinitions[0].allowedPaths.reverse();
     expect(validateAgentStructuredResult(signed).valid).toBe(false);
@@ -74,7 +74,7 @@ describe("agent structured result v2", () => {
     const [p, fixture] = fixtures[0]!;
     const ordered: any = structuredClone(fixture);
     ordered.payload.taskDefinitions[0].allowedPaths = ["a/", "z/"];
-    const wire: any = signResult(ordered, p);
+    const wire: any = structuredClone(signResult(ordered, p));
     wire.payload.taskDefinitions[0].allowedPaths.reverse();
     expect(validateAgentStructuredResult(wire).valid).toBe(false);
 

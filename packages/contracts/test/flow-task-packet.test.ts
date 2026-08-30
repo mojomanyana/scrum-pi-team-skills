@@ -14,9 +14,9 @@ const examples = [product, flow, principal, verifier];
 const sign = (input: unknown) => {
   const x = structuredClone(input) as Record<string, unknown>;
   delete x.packetDigest;
-  const d = digestFlowTaskPacket(x as never);
-  if (!d.valid) throw new Error("fixture");
-  return { ...x, packetDigest: d.value };
+  const canonical = canonicalizeFlowTaskPacket(x);
+  if (!canonical.valid) throw new Error("fixture");
+  return canonical.value;
 };
 const code = (x: unknown) => {
   const r = validateFlowTaskPacket(x);
@@ -42,26 +42,28 @@ describe("flow task packet v2", () => {
     ],
     ["size", (x: any) => (x.work.objective = "x".repeat(4097))],
   ])("rejects %s mutation", (_n, mutate) => {
-    const x = sign(product);
+    const x = structuredClone(sign(product));
     mutate(x);
     expect(code(x)).not.toBe("valid");
   });
   it("uses UTF-16 ordinal ordering independently of locale", () => {
     const x: any = structuredClone(product);
     x.work.acceptanceCriteria = ["z", "ä"];
-    const signed: any = sign(x);
+    const signed: any = structuredClone(sign(x));
     expect(code(signed)).toBe("valid");
     signed.work.acceptanceCriteria.reverse();
     expect(code(signed)).toBe("non-canonical");
   });
   it("canonicalizes producer set arrays while strict wire validation stays ordered", () => {
-    const wire: any = sign({
-      ...structuredClone(product),
-      work: {
-        ...structuredClone(product.work),
-        acceptanceCriteria: ["a", "z"],
-      },
-    });
+    const wire: any = structuredClone(
+      sign({
+        ...structuredClone(product),
+        work: {
+          ...structuredClone(product.work),
+          acceptanceCriteria: ["a", "z"],
+        },
+      }),
+    );
     wire.work.acceptanceCriteria.reverse();
     expect(code(wire)).toBe("non-canonical");
 
@@ -103,7 +105,7 @@ describe("flow task packet v2", () => {
     "a[b",
     "a\\b",
   ])("rejects invalid branch grammar: %s", (branch) => {
-    const x: any = sign(product);
+    const x: any = structuredClone(sign(product));
     x.repository.headBranch = branch;
     expect(code(x)).not.toBe("valid");
   });
