@@ -1,0 +1,162 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mojomanyana/scrum-pi-team-skills/schemas/spts.delivery-authority/2.0.0",
+  "title": "spts.delivery-authority v2 closed structural envelope",
+  "description": "Non-authorizing structural contract; trusted controller inputs are required at execution boundaries.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractId",
+    "contractVersion",
+    "authorityDigest",
+    "meteringDigest",
+    "controllerStateDigest",
+    "identity",
+    "state",
+    "limits",
+    "usage",
+    "cancelled"
+  ],
+  "properties": {
+    "contractId": { "const": "spts.delivery-authority" },
+    "contractVersion": { "const": "2.0.0" },
+    "authorityDigest": { "$ref": "#/definitions/sha256" },
+    "meteringDigest": { "$ref": "#/definitions/sha256" },
+    "controllerStateDigest": { "$ref": "#/definitions/sha256" },
+    "identity": { "$ref": "#/definitions/identity" },
+    "state": { "$ref": "#/definitions/state" },
+    "limits": { "$ref": "#/definitions/metering" },
+    "usage": { "$ref": "#/definitions/usage" },
+    "cancelled": { "type": "boolean" }
+  },
+  "definitions": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$"
+    },
+    "sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projectId",
+        "taskId",
+        "repositoryId",
+        "runId",
+        "baseBranch",
+        "baseCommit",
+        "baseTree",
+        "headBranch",
+        "candidateCommit",
+        "candidateTree",
+        "role",
+        "actorId",
+        "executionId",
+        "workspaceId",
+        "access"
+      ],
+      "properties": {
+        "projectId": { "$ref": "#/definitions/id" },
+        "taskId": { "$ref": "#/definitions/id" },
+        "repositoryId": { "$ref": "#/definitions/id" },
+        "runId": { "$ref": "#/definitions/id" },
+        "baseBranch": { "$ref": "#/definitions/id" },
+        "baseCommit": { "$ref": "#/definitions/sha1" },
+        "baseTree": { "$ref": "#/definitions/sha1" },
+        "headBranch": { "$ref": "#/definitions/id" },
+        "candidateCommit": { "$ref": "#/definitions/sha1" },
+        "candidateTree": { "$ref": "#/definitions/sha1" },
+        "role": {
+          "enum": [
+            "product",
+            "flow",
+            "principal-developer",
+            "independent-verifier",
+            "stakeholder",
+            "controller"
+          ]
+        },
+        "actorId": { "$ref": "#/definitions/id" },
+        "executionId": { "$ref": "#/definitions/id" },
+        "workspaceId": { "$ref": "#/definitions/id" },
+        "access": {
+          "enum": [
+            "product-control",
+            "orchestrate",
+            "read-write",
+            "read-only",
+            "authorize-merge",
+            "controller"
+          ]
+        }
+      }
+    },
+    "state": {
+      "enum": [
+        "intake",
+        "ready",
+        "implementation",
+        "internal-review",
+        "independent-verification",
+        "repair-required",
+        "publication-authorized",
+        "published",
+        "ci-monitoring",
+        "merge-gate",
+        "post-merge-verification",
+        "blocked",
+        "cancelling",
+        "completed",
+        "cancelled",
+        "escalated"
+      ]
+    },
+    "metering": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "implementationAttempts",
+        "verificationRepairCycles",
+        "ciRepairCycles",
+        "durationMinutes",
+        "concurrentAgents",
+        "worktrees",
+        "evidenceBytes"
+      ],
+      "properties": {
+        "implementationAttempts": { "type": "integer", "minimum": 0 },
+        "verificationRepairCycles": { "type": "integer", "minimum": 0 },
+        "ciRepairCycles": { "type": "integer", "minimum": 0 },
+        "durationMinutes": { "type": "integer", "minimum": 0 },
+        "concurrentAgents": { "type": "integer", "minimum": 0 },
+        "worktrees": { "type": "integer", "minimum": 0 },
+        "evidenceBytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "implementationAttempts",
+        "verificationRepairCycles",
+        "ciRepairCycles",
+        "elapsedMinutes",
+        "concurrentAgents",
+        "worktrees",
+        "evidenceBytes"
+      ],
+      "properties": {
+        "implementationAttempts": { "type": "integer", "minimum": 0 },
+        "verificationRepairCycles": { "type": "integer", "minimum": 0 },
+        "ciRepairCycles": { "type": "integer", "minimum": 0 },
+        "elapsedMinutes": { "type": "integer", "minimum": 0 },
+        "concurrentAgents": { "type": "integer", "minimum": 0 },
+        "worktrees": { "type": "integer", "minimum": 0 },
+        "evidenceBytes": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

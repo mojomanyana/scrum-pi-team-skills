@@ -1,0 +1,44 @@
+{
+  "contractId": "spts.delivery-authority",
+  "contractVersion": "2.0.0",
+  "authorityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "meteringDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "controllerStateDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "identity": {
+    "projectId": "SPTS",
+    "taskId": "SPTS-10",
+    "repositoryId": "scrum-pi-team-skills",
+    "runId": "run-spts-10",
+    "baseBranch": "main",
+    "baseCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "baseTree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "headBranch": "feature/spts-10-flow-orchestration",
+    "candidateCommit": "cccccccccccccccccccccccccccccccccccccccc",
+    "candidateTree": "dddddddddddddddddddddddddddddddddddddddd",
+    "role": "flow",
+    "actorId": "flow-1",
+    "executionId": "flow-exec-1",
+    "workspaceId": "flow-work-1",
+    "access": "orchestrate"
+  },
+  "state": "ready",
+  "limits": {
+    "implementationAttempts": 2,
+    "verificationRepairCycles": 2,
+    "ciRepairCycles": 2,
+    "durationMinutes": 60,
+    "concurrentAgents": 2,
+    "worktrees": 3,
+    "evidenceBytes": 10000
+  },
+  "usage": {
+    "implementationAttempts": 0,
+    "verificationRepairCycles": 0,
+    "ciRepairCycles": 0,
+    "elapsedMinutes": 0,
+    "concurrentAgents": 0,
+    "worktrees": 0,
+    "evidenceBytes": 0
+  },
+  "cancelled": false
+}
