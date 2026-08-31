@@ -366,7 +366,6 @@ export function validateFlowTaskPacket(
   if (!q.valid) return q as ValidationResult<FlowTaskPacketV2>;
   const x = q.value as Record<string, unknown>;
   if (!shape(x)) return failure("schema");
-  if (!hasCanonicalObjectOrder(x)) return failure("non-canonical");
   if (Buffer.byteLength(JSON.stringify(x)) > 32768)
     return failure("excessive-size");
   const p = x as unknown as FlowTaskPacketV2;
@@ -424,6 +423,7 @@ export function validateFlowTaskPacket(
   )
     return failure("schema");
   if (!credentialFree(p)) return failure("credential-content");
+  if (!hasCanonicalObjectOrder(x)) return failure("non-canonical");
   if (
     ![
       p.work.acceptanceCriteria,

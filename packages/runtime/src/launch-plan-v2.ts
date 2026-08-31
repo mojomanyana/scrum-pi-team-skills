@@ -5,6 +5,7 @@ import {
   deepFreeze,
   exact,
   failure,
+  hasCanonicalObjectOrder,
   ID,
   isObject,
   SHA,
@@ -780,10 +781,16 @@ export function __testOnlyCreateLaunchPlanV2Preview(
   if (!m.valid) return m as ValidationResult<never>;
   const dc = canonicalizeTrustedConcreteLaunchDecisionV2(shaped.value[1]);
   if (!dc.valid) return dc as ValidationResult<never>;
+  if (!hasCanonicalObjectOrder(shaped.value[1]))
+    return failure("non-canonical");
   const ti = canonicalizeTrustedInputs(shaped.value[2]);
   if (!ti.valid) return ti as ValidationResult<never>;
+  if (!hasCanonicalObjectOrder(shaped.value[2]))
+    return failure("non-canonical");
   const pr = createTrustedLaunchPolicyV2(shaped.value[3]);
   if (!pr.valid) return pr as ValidationResult<never>;
+  if (!hasCanonicalObjectOrder(shaped.value[3]))
+    return failure("non-canonical");
   const policyDigest = sha256(pr.value, "__none__");
   if (
     dc.value.launchPolicyDigest !== policyDigest ||

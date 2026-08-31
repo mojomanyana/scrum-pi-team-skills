@@ -88,7 +88,7 @@ const profileDigests = Object.fromEntries(
   }),
 );
 const profileDigest = profileDigests["principal-developer"]!;
-const policy = {
+const policy = ordered({
   policyId: "policy-v2",
   piExecutable: "/trusted/pi",
   extensions: [
@@ -114,7 +114,7 @@ const policy = {
       },
     ]),
   ),
-};
+});
 const policyDigestResult = digestTrustedLaunchPolicyV2(policy);
 if (!policyDigestResult.valid) throw 0;
 const policyDigest = policyDigestResult.value;
@@ -158,7 +158,7 @@ const decision = signed(
   "decisionDigest",
   digestTrustedConcreteLaunchDecisionV2,
 );
-const trusted = {
+const trusted = ordered({
   expectedControllerDecisionDigest: decision.decisionDigest,
   expectedControllerStateDigest: decision.controllerStateDigest,
   expectedCurrentDeliveryIdentity: identity,
@@ -167,7 +167,7 @@ const trusted = {
   expectedIsolationAttestationDigest: H,
   trustedObservedAt: decision.observedAt,
   source: "controlled-test" as const,
-};
+});
 describe("launch plan v2", () => {
   it("builds deterministic explicit argv without executable authority", () => {
     const r = __testOnlyCreateLaunchPlanV2Preview(
@@ -199,7 +199,7 @@ describe("launch plan v2", () => {
       "identity",
       {
         expectedCurrentDeliveryIdentity: {
-          ...identity,
+          ...trusted.expectedCurrentDeliveryIdentity,
           baseTree: "a".repeat(40),
         },
       },
@@ -259,6 +259,65 @@ describe("launch plan v2", () => {
           policy,
         ),
       ).toMatchObject({ valid: false, errors: [{ code: "schema" }] });
+    },
+  );
+  it.each([
+    [
+      "decision identity",
+      decision,
+      {
+        ...decision,
+        identity: Object.fromEntries(
+          Object.entries(decision.identity).reverse(),
+        ),
+      },
+      trusted,
+      policy,
+    ],
+    [
+      "trusted current identity",
+      decision,
+      decision,
+      {
+        ...trusted,
+        expectedCurrentDeliveryIdentity: Object.fromEntries(
+          Object.entries(trusted.expectedCurrentDeliveryIdentity).reverse(),
+        ),
+      },
+      policy,
+    ],
+    [
+      "policy role row",
+      decision,
+      decision,
+      trusted,
+      {
+        ...policy,
+        roles: {
+          ...policy.roles,
+          "principal-developer": Object.fromEntries(
+            Object.entries(policy.roles["principal-developer"]).reverse(),
+          ),
+        },
+      },
+    ],
+  ])(
+    "rejects non-canonical nested authority object: %s",
+    (
+      _name,
+      _baseline,
+      candidateDecision,
+      candidateTrusted,
+      candidatePolicy,
+    ) => {
+      expect(
+        __testOnlyCreateLaunchPlanV2Preview(
+          manifest,
+          candidateDecision,
+          candidateTrusted,
+          candidatePolicy,
+        ),
+      ).toMatchObject({ valid: false, errors: [{ code: "non-canonical" }] });
     },
   );
   it.each([

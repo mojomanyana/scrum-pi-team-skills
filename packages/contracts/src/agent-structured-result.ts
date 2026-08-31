@@ -381,7 +381,6 @@ export function validateAgentStructuredResult(
   if (!q.valid) return q as ValidationResult<AgentStructuredResultV2>;
   const x = q.value as Record<string, unknown>;
   if (!exact(x, common) || !isObject(x.payload)) return failure("schema");
-  if (!hasCanonicalObjectOrder(x)) return failure("non-canonical");
   if (Buffer.byteLength(JSON.stringify(x)) > 16384)
     return failure("excessive-size");
   const r = x as unknown as AgentStructuredResultV2;
@@ -416,6 +415,7 @@ export function validateAgentStructuredResult(
   )
     return failure("schema");
   if (!credentialFree(r)) return failure("credential-content");
+  if (!hasCanonicalObjectOrder(x)) return failure("non-canonical");
   if (r.resultDigest !== sha256(r, "resultDigest"))
     return failure("digest-mismatch", "/resultDigest");
   return { valid: true, value: deepFreeze(r) };
