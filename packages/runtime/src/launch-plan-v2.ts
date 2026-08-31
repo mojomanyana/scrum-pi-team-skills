@@ -375,12 +375,22 @@ function canonicalizeTrustedInputs(
 }
 export function validateTrustedConcreteLaunchDecisionV2(
   input: unknown,
-  trustedInput: TrustedLaunchInputsV2,
+  trustedInput: unknown,
 ): ValidationResult<TrustedConcreteLaunchDecisionV2> {
-  const d = canonicalizeTrustedConcreteLaunchDecisionV2(input);
+  const decisionSnapshot = snapshot(input);
+  if (!decisionSnapshot.valid)
+    return decisionSnapshot as ValidationResult<TrustedConcreteLaunchDecisionV2>;
+  const d = canonicalizeTrustedConcreteLaunchDecisionV2(decisionSnapshot.value);
   if (!d.valid) return d;
-  const t = canonicalizeTrustedInputs(trustedInput);
+  if (!hasCanonicalObjectOrder(decisionSnapshot.value))
+    return failure("non-canonical");
+  const trustedSnapshot = snapshot(trustedInput);
+  if (!trustedSnapshot.valid)
+    return trustedSnapshot as ValidationResult<TrustedConcreteLaunchDecisionV2>;
+  const t = canonicalizeTrustedInputs(trustedSnapshot.value);
   if (!t.valid) return t as ValidationResult<TrustedConcreteLaunchDecisionV2>;
+  if (!hasCanonicalObjectOrder(trustedSnapshot.value))
+    return failure("non-canonical");
   const checks = [
     d.value.decisionDigest === t.value.expectedControllerDecisionDigest,
     d.value.controllerStateDigest === t.value.expectedControllerStateDigest,

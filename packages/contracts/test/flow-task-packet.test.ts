@@ -111,24 +111,32 @@ describe("flow task packet v2", () => {
   });
   it("binds every descriptive identity only after a valid digest", () => {
     const x: any = sign(product);
-    const expected = {
-      ...x.task,
-      repositoryId: x.repository.repositoryId,
-      rootId: x.repository.rootId,
-      runId: x.run.runId,
-      baseBranch: x.repository.baseBranch,
-      headBranch: x.repository.headBranch,
-      baseCommit: x.repository.baseCommit,
-      baseTree: x.repository.baseTree,
-      candidateCommit: x.repository.candidateCommit,
-      candidateTree: x.repository.candidateTree,
-      ...x.subject,
-      assurance: x.assurance.profile,
-      phase: x.assurance.phase,
-      authorityDigest: x.authorityDigest,
-      controllerStateDigest: x.controllerStateDigest,
-    };
+    const expected = Object.fromEntries(
+      Object.entries({
+        ...x.task,
+        repositoryId: x.repository.repositoryId,
+        rootId: x.repository.rootId,
+        runId: x.run.runId,
+        baseBranch: x.repository.baseBranch,
+        headBranch: x.repository.headBranch,
+        baseCommit: x.repository.baseCommit,
+        baseTree: x.repository.baseTree,
+        candidateCommit: x.repository.candidateCommit,
+        candidateTree: x.repository.candidateTree,
+        ...x.subject,
+        assurance: x.assurance.profile,
+        phase: x.assurance.phase,
+        authorityDigest: x.authorityDigest,
+        controllerStateDigest: x.controllerStateDigest,
+      }).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    );
     expect(validateFlowTaskPacket(x, expected).valid).toBe(true);
+    expect(
+      validateFlowTaskPacket(
+        x,
+        Object.fromEntries(Object.entries(expected).reverse()),
+      ),
+    ).toMatchObject({ valid: false, errors: [{ code: "non-canonical" }] });
     expect(code({ ...x, packetDigest: "f".repeat(64) })).toBe(
       "digest-mismatch",
     );

@@ -468,6 +468,7 @@ export function validateFlowTaskPacket(
       ])
     )
       return failure("schema");
+    if (!hasCanonicalObjectOrder(e.value)) return failure("non-canonical");
     const actual: TrustedPacketExpectedContextV2 = {
       ...p.task,
       repositoryId: p.repository.repositoryId,

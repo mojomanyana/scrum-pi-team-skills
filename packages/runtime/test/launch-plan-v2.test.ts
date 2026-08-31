@@ -261,6 +261,22 @@ describe("launch plan v2", () => {
       ).toMatchObject({ valid: false, errors: [{ code: "schema" }] });
     },
   );
+  it("rejects non-canonical direct trusted-decision validator inputs", async () => {
+    const { validateTrustedConcreteLaunchDecisionV2 } =
+      await import("../src/launch-plan-v2.js");
+    expect(
+      validateTrustedConcreteLaunchDecisionV2(
+        Object.fromEntries(Object.entries(decision).reverse()),
+        trusted,
+      ),
+    ).toMatchObject({ valid: false, errors: [{ code: "non-canonical" }] });
+    expect(
+      validateTrustedConcreteLaunchDecisionV2(
+        decision,
+        Object.fromEntries(Object.entries(trusted).reverse()),
+      ),
+    ).toMatchObject({ valid: false, errors: [{ code: "non-canonical" }] });
+  });
   it.each([
     [
       "decision identity",
