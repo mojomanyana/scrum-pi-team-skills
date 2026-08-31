@@ -391,6 +391,8 @@ export function validateTrustedConcreteLaunchDecisionV2(
   if (!t.valid) return t as ValidationResult<TrustedConcreteLaunchDecisionV2>;
   if (!hasCanonicalObjectOrder(trustedSnapshot.value))
     return failure("non-canonical");
+  if (t.value.source === "authenticated-controller-store")
+    return failure("production-authorization-unavailable");
   const checks = [
     d.value.decisionDigest === t.value.expectedControllerDecisionDigest,
     d.value.controllerStateDigest === t.value.expectedControllerStateDigest,

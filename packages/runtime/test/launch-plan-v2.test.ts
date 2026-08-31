@@ -169,6 +169,23 @@ const trusted = ordered({
   source: "controlled-test" as const,
 });
 describe("launch plan v2", () => {
+  it("fails closed for the unavailable authenticated controller/store source", () => {
+    const authenticated = ordered({
+      ...trusted,
+      source: "authenticated-controller-store",
+    });
+    expect(
+      __testOnlyCreateLaunchPlanV2Preview(
+        manifest,
+        decision,
+        authenticated,
+        policy,
+      ),
+    ).toMatchObject({
+      valid: false,
+      errors: [{ code: "production-authorization-unavailable" }],
+    });
+  });
   it("builds deterministic explicit argv without executable authority", () => {
     const r = __testOnlyCreateLaunchPlanV2Preview(
       manifest,
