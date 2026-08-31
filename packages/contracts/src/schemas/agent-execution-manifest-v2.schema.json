@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "spts.agent-execution-manifest/2.0.0",
+  "title": "Agent execution manifest v2",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "sha": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "ids": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/id" }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractId",
+    "schemaVersion",
+    "manifestId",
+    "manifestDigest",
+    "packet",
+    "role",
+    "actorId",
+    "executionId",
+    "workspaceId",
+    "access",
+    "resources",
+    "toolProfileId",
+    "workspaceProfileId",
+    "tools",
+    "resultProtocol"
+  ],
+  "properties": {
+    "contractId": { "const": "spts.agent-execution-manifest" },
+    "schemaVersion": { "const": "2.0.0" },
+    "manifestId": { "$ref": "#/$defs/id" },
+    "manifestDigest": { "$ref": "#/$defs/sha" },
+    "packet": { "$ref": "spts.flow-task-packet/2.0.0" },
+    "role": {
+      "enum": ["product", "flow", "principal-developer", "independent-verifier"]
+    },
+    "actorId": { "$ref": "#/$defs/id" },
+    "executionId": { "$ref": "#/$defs/id" },
+    "workspaceId": { "$ref": "#/$defs/id" },
+    "access": { "$ref": "#/$defs/id" },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["skills", "promptTemplates"],
+      "properties": {
+        "skills": { "$ref": "#/$defs/ids" },
+        "promptTemplates": { "$ref": "#/$defs/ids" }
+      }
+    },
+    "toolProfileId": { "$ref": "#/$defs/id" },
+    "workspaceProfileId": { "$ref": "#/$defs/id" },
+    "tools": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["read", "grep", "find", "ls", "bash", "flow_submit_result"]
+      }
+    },
+    "resultProtocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "toolName",
+        "contractId",
+        "schemaVersion",
+        "minimum",
+        "maximum"
+      ],
+      "properties": {
+        "toolName": { "const": "flow_submit_result" },
+        "contractId": { "const": "spts.agent-structured-result" },
+        "schemaVersion": { "const": "2.0.0" },
+        "minimum": { "const": 1 },
+        "maximum": { "const": 1 }
+      }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "contractId": "spts.flow-task-packet",
+  "schemaVersion": "2.0.0",
+  "packetId": "packet-product",
+  "packetDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "issuedAt": "2026-08-30T23:09:25.000Z",
+  "task": { "projectId": "SPTS", "taskId": "SPTS-10", "sliceId": "S2" },
+  "repository": {
+    "repositoryId": "scrum-pi-team-skills",
+    "rootId": "repo-root",
+    "baseBranch": "main",
+    "headBranch": "feature/spts-10",
+    "baseCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "baseTree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "candidateCommit": "cccccccccccccccccccccccccccccccccccccccc",
+    "candidateTree": "dddddddddddddddddddddddddddddddddddddddd"
+  },
+  "run": { "runId": "run-2" },
+  "subject": {
+    "role": "product",
+    "actorId": "product-1",
+    "executionId": "exec-product",
+    "workspaceId": "workspace-product",
+    "access": "product-control"
+  },
+  "assurance": { "profile": "standard", "phase": "planning" },
+  "authorityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "controllerStateDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "work": {
+    "objective": "Define the Slice 2 protocol.",
+    "acceptanceCriteria": ["Contracts validate."],
+    "allowedPaths": ["packages/contracts/"],
+    "outOfScope": [],
+    "resources": {
+      "skills": ["skill-product"],
+      "promptTemplates": ["prompt-product"]
+    }
+  }
+}

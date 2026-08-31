@@ -1,4 +1,16 @@
 import { createHash } from "node:crypto";
+export {
+  canonicalizeTrustedConcreteLaunchDecisionV2,
+  createPiLaunchPlanV2,
+  createTrustedLaunchPolicyV2,
+  digestTrustedConcreteLaunchDecisionV2,
+  digestTrustedLaunchPolicyV2,
+  digestTrustedToolProfileV2,
+  validateTrustedConcreteLaunchDecisionV2,
+  type TrustedConcreteLaunchDecisionV2,
+  type TrustedLaunchInputsV2,
+  type TrustedLaunchPolicyV2Definition,
+} from "./launch-plan-v2.js";
 
 export {
   createOperatorEnvironmentPolicy,

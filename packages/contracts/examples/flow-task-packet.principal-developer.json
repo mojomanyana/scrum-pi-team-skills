@@ -1,0 +1,39 @@
+{
+  "contractId": "spts.flow-task-packet",
+  "schemaVersion": "2.0.0",
+  "packetId": "packet-principal",
+  "packetDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "issuedAt": "2026-08-30T23:09:25.000Z",
+  "task": { "projectId": "SPTS", "taskId": "SPTS-10", "sliceId": "S2" },
+  "repository": {
+    "repositoryId": "scrum-pi-team-skills",
+    "rootId": "repo-root",
+    "baseBranch": "main",
+    "headBranch": "feature/spts-10",
+    "baseCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "baseTree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "candidateCommit": "cccccccccccccccccccccccccccccccccccccccc",
+    "candidateTree": "dddddddddddddddddddddddddddddddddddddddd"
+  },
+  "run": { "runId": "run-2" },
+  "subject": {
+    "role": "principal-developer",
+    "actorId": "principal-1",
+    "executionId": "exec-principal",
+    "workspaceId": "workspace-principal",
+    "access": "read-write"
+  },
+  "assurance": { "profile": "standard", "phase": "implementation" },
+  "authorityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "controllerStateDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "work": {
+    "objective": "Implement the Slice 2 protocol.",
+    "acceptanceCriteria": ["Quality passes."],
+    "allowedPaths": ["packages/contracts/", "packages/runtime/"],
+    "outOfScope": ["production"],
+    "resources": {
+      "skills": ["skill-build"],
+      "promptTemplates": ["prompt-build"]
+    }
+  }
+}

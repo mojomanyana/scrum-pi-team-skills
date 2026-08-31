@@ -60,6 +60,14 @@ Slice 1 adds the closed `spts.delivery-authority/2.0.0` contract beside unchange
 
 This contract-only slice does not launch Pi or Herdr, call Paca, GitHub, or CI, execute adapters, publish, merge, or grant later-slice authority. Production Paca and real-Pi execution remain disabled pending their separately approved protocols and confinement gates. Candidate publication requires verifier-owned specification and quality approvals for one exact tree and exact trusted CI evidence; completion still requires later stakeholder merge authority. Every candidate tree requires a fresh independent Critical review.
 
+## Flow agent protocol v2 (SPTS-10 Slice 2)
+
+The v2 Flow task packet, four-role structured result, and execution manifest are closed, immutable descriptive contracts. Their digests and caller-supplied context do not grant authority. Results are submitted only through `flow_submit_result`; the contract helper enforces one accepted result in its supplied state (persistent exactly-once storage is deferred).
+
+Manifest profiles are fixed: Product and Flow use `read-only-v2`, Principal Developer uses `bounded-writer-v2`, and independent Verifier uses `fresh-detached-read-only-v2`. All receive `read,grep,find,ls,flow_submit_result`; only Principal Developer additionally receives `bash`. A manifest cannot select or widen trusted policy.
+
+Launch-plan v2 preserves the trusted-controller boundary. Policy binds both extensions (`spts.pi-daddy-grants`, then `spts.flow-submit-result`) and physical resources; preview planning is pure and non-executing, disables implicit extensions, sessions, skills, templates and context files, and contains no executable, environment, working directory, or authority token. The exported production `createPiLaunchPlanV2` always denies with `production-authorization-unavailable` until authenticated controller/store and isolation gates are implemented in later slices. Existing v1 contracts and planner remain compatible and unchanged.
+
 ## Governed autonomous delivery authority (SPTS-9)
 
 `packages/contracts/src/schemas/delivery-authority.schema.json` defines the unpublished `spts.delivery-authority/1.0.0` envelope. The contract binds one Paca task, repository/base/feature branch, separated Product/Flow/Principal Developer/independent Verifier/stakeholder identities, bounded autonomy, workflow, grants, recoveries, decisions, and evidence. Paca remains the system of record; all agents remain local Pi processes governed by pi-daddy and supervised through Herdr.

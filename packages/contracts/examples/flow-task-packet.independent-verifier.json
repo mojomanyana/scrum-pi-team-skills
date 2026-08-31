@@ -1,0 +1,39 @@
+{
+  "contractId": "spts.flow-task-packet",
+  "schemaVersion": "2.0.0",
+  "packetId": "packet-verifier",
+  "packetDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "issuedAt": "2026-08-30T23:09:25.000Z",
+  "task": { "projectId": "SPTS", "taskId": "SPTS-10", "sliceId": "S2" },
+  "repository": {
+    "repositoryId": "scrum-pi-team-skills",
+    "rootId": "repo-root",
+    "baseBranch": "main",
+    "headBranch": "feature/spts-10",
+    "baseCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "baseTree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "candidateCommit": "cccccccccccccccccccccccccccccccccccccccc",
+    "candidateTree": "dddddddddddddddddddddddddddddddddddddddd"
+  },
+  "run": { "runId": "run-2" },
+  "subject": {
+    "role": "independent-verifier",
+    "actorId": "verifier-1",
+    "executionId": "exec-verifier",
+    "workspaceId": "workspace-verifier",
+    "access": "read-only"
+  },
+  "assurance": { "profile": "critical", "phase": "verification" },
+  "authorityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "controllerStateDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "work": {
+    "objective": "Independently verify Slice 2.",
+    "acceptanceCriteria": ["All axes approve."],
+    "allowedPaths": ["packages/"],
+    "outOfScope": [],
+    "resources": {
+      "skills": ["skill-review"],
+      "promptTemplates": ["prompt-review"]
+    }
+  }
+}
