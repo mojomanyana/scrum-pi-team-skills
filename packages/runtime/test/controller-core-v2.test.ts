@@ -278,4 +278,93 @@ describe("controller publication rows 9-12", () => {
       "publication-binding-invalid",
     );
   });
+
+  it("checks publication bindings only for an applicable row", () => {
+    const s = snapshot("intent-committed"),
+      c = command(s, "recover-reconcile-publication");
+    c.payload.publicationIntentDigest = zero;
+    c.payload.priorUnknownObservationDigest = "2".repeat(64);
+    expect(evaluateControllerTransitionV2(s, c, context(s)).code).toBe(
+      "transition-denied",
+    );
+  });
+
+  it("accepts ordered evidence batches and rejects duplicate IDs and bad order", () => {
+    const s = snapshot("intent-committed"),
+      c = command(s, "record-publication-unknown");
+    c.evidence = [
+      {
+        evidenceId: "a",
+        kind: "publication-observation",
+        digest: "3".repeat(64),
+      },
+      {
+        evidenceId: "b",
+        kind: "publication-observation",
+        digest: "4".repeat(64),
+      },
+    ];
+    expect(evaluateControllerTransitionV2(s, c, context(s)).code).toBe(
+      "transition-proposed",
+    );
+    c.evidence = [c.evidence[1]!, c.evidence[0]!];
+    expect(evaluateControllerTransitionV2(s, c, context(s)).code).toBe(
+      "evidence-required",
+    );
+    c.evidence = [
+      {
+        evidenceId: "a",
+        kind: "publication-observation",
+        digest: "3".repeat(64),
+      },
+      {
+        evidenceId: "a",
+        kind: "publication-observation",
+        digest: "4".repeat(64),
+      },
+    ];
+    expect(evaluateControllerTransitionV2(s, c, context(s)).code).toBe(
+      "evidence-required",
+    );
+  });
+
+  it("hashes the complete unknown observation projection and requests a Paca update", () => {
+    const s = snapshot("intent-committed"),
+      c = command(s, "record-publication-unknown"),
+      result = evaluateControllerTransitionV2(s, c, context(s));
+    const commandDigest = hash("spts.controller-command/2.0.0", c);
+    const projection = {
+      domain: "spts.publication-unknown-observation/2.0.0",
+      projectId: c.target.projectId,
+      taskId: c.target.taskId,
+      repositoryId: c.target.repositoryId,
+      candidateCommit: c.target.candidateCommit,
+      candidateTree: c.target.candidateTree,
+      commandId: c.commandId,
+      commandDigest,
+      publicationId: c.payload.publicationId,
+      publicationIntentId: c.payload.publicationIntentId,
+      publicationIntentDigest: c.payload.publicationIntentDigest,
+      evidence: c.evidence,
+    };
+    expect(
+      result.proposedNextSnapshot?.status.publication.unknownObservationDigest,
+    ).toBe(hash("spts.publication-unknown-observation/2.0.0", projection));
+    expect(result.intents.map((intent) => intent.kind)).toContain(
+      "update-paca",
+    );
+  });
+
+  it("rejects non-NFC and surrogate property names before contract validation", () => {
+    const s = snapshot("intent-committed") as Record<string, unknown>;
+    s["e\u0301"] = true;
+    expect(evaluateControllerTransitionV2(s, {}, {}).code).toBe(
+      "snapshot-input-invalid",
+    );
+    delete s["e\u0301"];
+    s["\ud800"] = true;
+    expect(evaluateControllerTransitionV2(s, {}, {}).code).toBe(
+      "snapshot-input-invalid",
+    );
+  });
 });

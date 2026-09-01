@@ -3,6 +3,7 @@ import {
   validateControllerCommandV2,
   validateControllerEvaluationContextV2,
   validateControllerSnapshotV2,
+  validateControllerTransitionV2,
 } from "@scrum-pi-team-skills/contracts";
 import type {
   ControllerCommandV2,
@@ -127,7 +128,15 @@ function isolate(input: unknown): unknown {
           throw 0;
         const out: unknown[] = [];
         for (const k of keys) {
-          bytes += enc.encode(String(k)).length;
+          const key = String(k);
+          const keyBytes = enc.encode(key).length;
+          if (
+            keyBytes > 4096 ||
+            (bytes += keyBytes) > 1048576 ||
+            key.normalize("NFC") !== key ||
+            /[\uD800-\uDFFF]/u.test(key)
+          )
+            throw 0;
           if (k === "length") continue;
           if (!/^(0|[1-9]\d*)$/.test(String(k)) || Number(k) >= ld.value)
             throw 0;
@@ -148,7 +157,13 @@ function isolate(input: unknown): unknown {
       const out: Record<string, unknown> = {};
       for (const k of keys as string[]) {
         const n = enc.encode(k).length;
-        if (n > 4096 || (bytes += n) > 1048576) throw 0;
+        if (
+          n > 4096 ||
+          (bytes += n) > 1048576 ||
+          k.normalize("NFC") !== k ||
+          /[\uD800-\uDFFF]/u.test(k)
+        )
+          throw 0;
         const d = Object.getOwnPropertyDescriptor(v, k);
         if (!d || !("value" in d) || !d.enumerable) throw 0;
         out[k] = walk(d.value, depth + 1);
@@ -281,6 +296,7 @@ function validContext(v: unknown): v is ControllerEvaluationContextV2 {
 function base(
   code: ControllerRejectionCodeV2,
   known: Partial<ControllerTransitionV2> = {},
+  validate = true,
 ): ControllerTransitionV2 {
   const [message, path] = messages[code];
   const seed = {
@@ -310,26 +326,60 @@ function base(
     executableAuthority: false,
     ...known,
   } as ControllerTransitionV2;
-  return finalize(seed);
+  return finalize(seed, validate);
 }
-function finalize(result: ControllerTransitionV2): ControllerTransitionV2 {
-  const projection = {
-    ...result,
-    proposalId: undefined,
-    proposalDigest: undefined,
-    intents: result.intents.map((intent) => {
-      const projected: Partial<typeof intent> = { ...intent };
-      delete projected.intentId;
-      delete projected.proposalDigestBinding;
-      return projected;
-    }),
-  };
+function finalize(
+  result: ControllerTransitionV2,
+  validate = true,
+): ControllerTransitionV2 {
+  const projection: Dynamic = { ...result };
+  delete projection.proposalId;
+  delete projection.proposalDigest;
+  projection.intents = result.intents.map((intent) => {
+    const projected: Partial<typeof intent> = { ...intent };
+    delete projected.intentId;
+    delete projected.proposalDigestBinding;
+    return projected;
+  });
   result.proposalDigest = hash(
     "spts.controller-transition-proposal/2.0.0",
     canonical(projection),
   );
   result.proposalId = `proposal-${result.proposalDigest.slice(0, 32)}`;
-  return deepFreeze(result);
+  let reconstructed: unknown;
+  try {
+    reconstructed = isolate(result);
+  } catch {
+    reconstructed = null;
+  }
+  if (
+    validate &&
+    (!validateControllerTransitionV2(reconstructed) ||
+      !validOutputSemantics(reconstructed))
+  )
+    return base("output-invalid", {}, false);
+  return deepFreeze(reconstructed as ControllerTransitionV2);
+}
+function validOutputSemantics(result: ControllerTransitionV2): boolean {
+  if (result.disposition !== "proposed")
+    return result.proposedNextSnapshot === null;
+  const next = result.proposedNextSnapshot;
+  return (
+    next !== null &&
+    validSnapshot(next) &&
+    result.snapshotId === next.snapshotId &&
+    result.toRevision === next.revision &&
+    result.fromRevision !== null &&
+    result.toRevision === result.fromRevision + 1 &&
+    result.toPhase === next.phase &&
+    result.transitionDigest === next.previousTransitionDigest &&
+    result.intents.every(
+      (intent) =>
+        intent.commandDigest === result.commandDigest &&
+        intent.proposalDigestBinding === result.proposalDigest &&
+        intent.executableAuthority === false,
+    )
+  );
 }
 function evidenceOkay(c: ControllerCommandV2) {
   const map: Record<string, string | null> = {
@@ -351,19 +401,24 @@ function evidenceOkay(c: ControllerCommandV2) {
   };
   const expected = map[c.kind];
   if (expected === null) return c.evidence.length === 0;
-  if (c.evidence.length !== 1) return false;
-  let prev = "";
-  const ids = new Set<string>();
-  return c.evidence.every(
-    (e) =>
+  if (c.evidence.length < 1 || c.evidence.length > 32) return false;
+  let previous = "";
+  const ids = new Set<string>(),
+    triples = new Set<string>();
+  return c.evidence.every((e) => {
+    const triple = `${e.kind}\0${e.evidenceId}\0${e.digest}`;
+    const okay =
       e.kind === expected &&
       id.test(e.evidenceId) &&
       sha.test(e.digest) &&
       !ids.has(e.evidenceId) &&
-      !!ids.add(e.evidenceId) &&
-      e.evidenceId > prev &&
-      (prev = e.evidenceId),
-  );
+      !triples.has(triple) &&
+      triple > previous;
+    ids.add(e.evidenceId);
+    triples.add(triple);
+    previous = triple;
+    return okay;
+  });
 }
 export function evaluateControllerTransitionV2(
   snapshot: unknown,
@@ -439,13 +494,6 @@ export function evaluateControllerTransitionV2(
   if (s.revision === Number.MAX_SAFE_INTEGER)
     return base("revision-overflow", known);
   const row = selectRow(s, c);
-  if (row?.actor && !row.actor.includes(c.actor.role))
-    return base("actor-denied", known);
-  const publicationError = publicationBindingError(s, c);
-  if (publicationError) return base(publicationError, known);
-  if (!evidenceOkay(c)) return base("evidence-required", known);
-  if (row?.capacity && !row.capacity())
-    return base("attempt-limit-exhausted", known);
   if (
     !row ||
     (c.target.candidateCommit !== s.candidate.commit &&
@@ -453,6 +501,12 @@ export function evaluateControllerTransitionV2(
     (c.target.candidateTree !== s.candidate.tree && c.kind !== "submit-review")
   )
     return base("transition-denied", known);
+  if (!row.actor.includes(c.actor.role)) return base("actor-denied", known);
+  const publicationError = publicationBindingError(s, c);
+  if (publicationError) return base(publicationError, known);
+  if (!evidenceOkay(c)) return base("evidence-required", known);
+  if (row?.capacity && !row.capacity())
+    return base("attempt-limit-exhausted", known);
   if (s.acceptedCommands.length === 256) return base("history-full", known);
   return propose(s, c, x, sd, cd, row.apply);
 }
@@ -693,13 +747,46 @@ function selectRow(
       });
     case "publication:record-publication-unknown":
       if (s.status.publication.state !== "intent-committed") return null;
-      return simple(["flow"], (n, ch) => {
-        const payload = c.payload as { publicationId: string };
+      return simple(["flow"], (n, ch, i) => {
+        const payload = c.payload as {
+          publicationId: string;
+          publicationIntentId: string;
+          publicationIntentDigest: string;
+        };
+        const commandDigest = hash(
+          "spts.controller-command/2.0.0",
+          canonical(c),
+        );
+        const projection = {
+          domain: "spts.publication-unknown-observation/2.0.0",
+          projectId: c.target.projectId,
+          taskId: c.target.taskId,
+          repositoryId: c.target.repositoryId,
+          candidateCommit: c.target.candidateCommit,
+          candidateTree: c.target.candidateTree,
+          commandId: c.commandId,
+          commandDigest,
+          publicationId: payload.publicationId,
+          publicationIntentId: payload.publicationIntentId,
+          publicationIntentDigest: payload.publicationIntentDigest,
+          evidence: c.evidence,
+        };
         set(n, ch, "publication", {
           ...s.status.publication,
           state: "outcome-unknown",
           publicationId: payload.publicationId,
-          unknownObservationDigest: c.evidence[0]!.digest,
+          unknownObservationDigest: hash(
+            "spts.publication-unknown-observation/2.0.0",
+            canonical(projection),
+          ),
+        });
+        i.push({
+          kind: "update-paca",
+          payload: {
+            kind: "update-paca",
+            fromPhase: "publication",
+            toPhase: "publication",
+          },
         });
       });
     case "publication:record-publication-succeeded":
@@ -968,17 +1055,15 @@ function propose(
     proposedNextSnapshot: n,
     executableAuthority: false,
   };
-  const projection = {
-    ...r,
-    proposalId: undefined,
-    proposalDigest: undefined,
-    intents: (r.intents as DynamicList).map((intent) => {
-      const projected = { ...intent };
-      delete projected.intentId;
-      delete projected.proposalDigestBinding;
-      return projected;
-    }),
-  };
+  const projection = { ...r };
+  delete projection.proposalId;
+  delete projection.proposalDigest;
+  projection.intents = (r.intents as DynamicList).map((intent) => {
+    const projected = { ...intent };
+    delete projected.intentId;
+    delete projected.proposalDigestBinding;
+    return projected;
+  });
   const proposalDigest = hash(
     "spts.controller-transition-proposal/2.0.0",
     canonical(projection),
@@ -989,5 +1074,16 @@ function propose(
     z.intentId = `intent-${hash("spts.controller-intent/2.0.0", `${r.proposalDigest}\0${String(i).padStart(4, "0")}\0${z.kind}`).slice(0, 32)}`;
     z.proposalDigestBinding = r.proposalDigest;
   });
-  return deepFreeze(r) as unknown as Readonly<ControllerTransitionV2>;
+  let reconstructed: unknown;
+  try {
+    reconstructed = isolate(r);
+  } catch {
+    reconstructed = null;
+  }
+  if (
+    !validateControllerTransitionV2(reconstructed) ||
+    !validOutputSemantics(reconstructed)
+  )
+    return base("output-invalid");
+  return deepFreeze(reconstructed);
 }
