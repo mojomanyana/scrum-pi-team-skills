@@ -1,0 +1,50 @@
+{
+  "contractId": "spts.controller-snapshot",
+  "schemaVersion": "2.0.0",
+  "snapshotId": "snapshot-1",
+  "revision": 0,
+  "previousTransitionDigest": null,
+  "authorityDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "meteringDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "controllerStateDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "identity": {
+    "projectId": "project-1",
+    "taskId": "task-1",
+    "repositoryId": "repository-1",
+    "baseCommit": "0000000000000000000000000000000000000000",
+    "baseTree": "0000000000000000000000000000000000000000",
+    "headBranch": "feature/task-1"
+  },
+  "candidate": {
+    "commit": "0000000000000000000000000000000000000000",
+    "tree": "0000000000000000000000000000000000000000"
+  },
+  "phase": "ready",
+  "activeRole": "principal-developer",
+  "status": {
+    "verification": "unverified",
+    "ci": "not-started",
+    "publication": {
+      "state": "not-requested",
+      "publicationId": null,
+      "publicationIntentId": null,
+      "publicationIntentDigest": null,
+      "unknownObservationDigest": null
+    },
+    "merged": false,
+    "cancelled": false,
+    "terminal": false,
+    "repairSource": null
+  },
+  "limits": {
+    "implementationAttempts": 3,
+    "verificationRepairs": 2,
+    "ciRepairs": 2
+  },
+  "usage": {
+    "implementationAttempts": 0,
+    "verificationRepairs": 0,
+    "ciRepairs": 0
+  },
+  "acceptedCommands": []
+}
