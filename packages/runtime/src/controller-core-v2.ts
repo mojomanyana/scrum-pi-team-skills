@@ -101,7 +101,12 @@ function isolate(input: unknown): unknown {
     if (depth > 32 || ++nodes > 10000) throw 0;
     if (typeof v === "string") {
       const n = enc.encode(v).length;
-      if (n > 4096 || (bytes += n) > 1048576 || v.normalize("NFC") !== v)
+      if (
+        n > 4096 ||
+        (bytes += n) > 1048576 ||
+        v.normalize("NFC") !== v ||
+        /[\uD800-\uDFFF]/u.test(v)
+      )
         throw 0;
       return v;
     }
@@ -494,19 +499,19 @@ export function evaluateControllerTransitionV2(
   if (s.revision === Number.MAX_SAFE_INTEGER)
     return base("revision-overflow", known);
   const row = selectRow(s, c);
-  if (
-    !row ||
-    (c.target.candidateCommit !== s.candidate.commit &&
-      c.kind !== "submit-review") ||
-    (c.target.candidateTree !== s.candidate.tree && c.kind !== "submit-review")
-  )
-    return base("transition-denied", known);
+  if (!row) return base("transition-denied", known);
   if (!row.actor.includes(c.actor.role)) return base("actor-denied", known);
   const publicationError = publicationBindingError(s, c);
   if (publicationError) return base(publicationError, known);
   if (!evidenceOkay(c)) return base("evidence-required", known);
-  if (row?.capacity && !row.capacity())
+  if (row.capacity && !row.capacity())
     return base("attempt-limit-exhausted", known);
+  if (
+    c.kind !== "submit-review" &&
+    (c.target.candidateCommit !== s.candidate.commit ||
+      c.target.candidateTree !== s.candidate.tree)
+  )
+    return base("transition-denied", known);
   if (s.acceptedCommands.length === 256) return base("history-full", known);
   return propose(s, c, x, sd, cd, row.apply);
 }
@@ -759,6 +764,7 @@ function selectRow(
         );
         const projection = {
           domain: "spts.publication-unknown-observation/2.0.0",
+          observationKind: "publication-outcome-unknown",
           projectId: c.target.projectId,
           taskId: c.target.taskId,
           repositoryId: c.target.repositoryId,

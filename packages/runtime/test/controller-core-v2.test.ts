@@ -332,30 +332,15 @@ describe("controller publication rows 9-12", () => {
     const s = snapshot("intent-committed"),
       c = command(s, "record-publication-unknown"),
       result = evaluateControllerTransitionV2(s, c, context(s));
-    const commandDigest = hash("spts.controller-command/2.0.0", c);
-    const projection = {
-      domain: "spts.publication-unknown-observation/2.0.0",
-      projectId: c.target.projectId,
-      taskId: c.target.taskId,
-      repositoryId: c.target.repositoryId,
-      candidateCommit: c.target.candidateCommit,
-      candidateTree: c.target.candidateTree,
-      commandId: c.commandId,
-      commandDigest,
-      publicationId: c.payload.publicationId,
-      publicationIntentId: c.payload.publicationIntentId,
-      publicationIntentDigest: c.payload.publicationIntentDigest,
-      evidence: c.evidence,
-    };
     expect(
       result.proposedNextSnapshot?.status.publication.unknownObservationDigest,
-    ).toBe(hash("spts.publication-unknown-observation/2.0.0", projection));
+    ).toBe("a5e8cebf07bf4251aac9a668c4df8ed721b625ab695e30436da46c7be89cd941");
     expect(result.intents.map((intent) => intent.kind)).toContain(
       "update-paca",
     );
   });
 
-  it("rejects non-NFC and surrogate property names before contract validation", () => {
+  it("rejects non-NFC and unpaired surrogates in names and values at isolation", () => {
     const s = snapshot("intent-committed") as Record<string, unknown>;
     s["e\u0301"] = true;
     expect(evaluateControllerTransitionV2(s, {}, {}).code).toBe(
@@ -366,5 +351,29 @@ describe("controller publication rows 9-12", () => {
     expect(evaluateControllerTransitionV2(s, {}, {}).code).toBe(
       "snapshot-input-invalid",
     );
+    delete s["\ud800"];
+    (s.identity as Record<string, unknown>).projectId = "p\ud800";
+    expect(evaluateControllerTransitionV2(s, {}, {}).code).toBe(
+      "snapshot-input-invalid",
+    );
   });
+
+  it.each([
+    ["actor-denied", true, false, false],
+    ["publication-binding-invalid", false, true, false],
+    ["evidence-required", false, false, true],
+  ] as const)(
+    "reports %s before a candidate mismatch",
+    (expected, wrongActor, wrongBinding, wrongEvidence) => {
+      const s = snapshot("intent-committed"),
+        c = command(s, "record-publication-succeeded");
+      c.target.candidateCommit = "9".repeat(40);
+      if (wrongActor) c.actor.role = "product";
+      if (wrongBinding) c.payload.publicationIntentDigest = zero;
+      if (wrongEvidence) c.evidence = [];
+      expect(evaluateControllerTransitionV2(s, c, context(s)).code).toBe(
+        expected,
+      );
+    },
+  );
 });
