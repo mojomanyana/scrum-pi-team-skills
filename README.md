@@ -193,3 +193,7 @@ All workspaces are private during this baseline phase. Publishing requires a sep
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+## Pure controller core v2 trust boundary
+
+`evaluateControllerTransitionV2` creates deterministic, non-executable proposals only. Snapshots, evaluation context, evidence, accepted history, and observations are forgeable caller data. Hashes establish identity; they are not signatures. Proposals can be stale or replayed, and JavaScript inspection creates no trust. This slice grants no production, publication, merge, release, deployment, Paca mutation, process, or agent-launch authority. A later S4 boundary must authenticate inputs, durably deduplicate, CAS-commit, execute, record outcomes, and reconcile them.
