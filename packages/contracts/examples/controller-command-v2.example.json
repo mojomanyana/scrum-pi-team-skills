@@ -1,0 +1,23 @@
+{
+  "contractId": "spts.controller-command",
+  "schemaVersion": "2.0.0",
+  "commandId": "command-1",
+  "idempotencyKey": "key-1",
+  "kind": "begin-implementation",
+  "expectedRevision": 0,
+  "actor": {
+    "role": "principal-developer",
+    "actorId": "actor-1",
+    "executionId": "execution-1",
+    "workspaceId": "workspace-1"
+  },
+  "target": {
+    "projectId": "project-1",
+    "taskId": "task-1",
+    "repositoryId": "repository-1",
+    "candidateCommit": "0000000000000000000000000000000000000000",
+    "candidateTree": "0000000000000000000000000000000000000000"
+  },
+  "evidence": [],
+  "payload": {}
+}

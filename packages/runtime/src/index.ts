@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+export { evaluateControllerTransitionV2 } from "./controller-core-v2.js";
 export {
   canonicalizeTrustedConcreteLaunchDecisionV2,
   createPiLaunchPlanV2,

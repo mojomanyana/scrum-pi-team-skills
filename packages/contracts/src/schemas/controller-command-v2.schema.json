@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Controller command v2",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+      "maxLength": 128
+    },
+    "sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "actorId", "executionId", "workspaceId"],
+      "properties": {
+        "role": {
+          "enum": [
+            "product",
+            "flow",
+            "principal-developer",
+            "independent-verifier"
+          ]
+        },
+        "actorId": { "$ref": "#/$defs/id" },
+        "executionId": { "$ref": "#/$defs/id" },
+        "workspaceId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projectId",
+        "taskId",
+        "repositoryId",
+        "candidateCommit",
+        "candidateTree"
+      ],
+      "properties": {
+        "projectId": { "$ref": "#/$defs/id" },
+        "taskId": { "$ref": "#/$defs/id" },
+        "repositoryId": { "$ref": "#/$defs/id" },
+        "candidateCommit": { "$ref": "#/$defs/sha1" },
+        "candidateTree": { "$ref": "#/$defs/sha1" }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["evidenceId", "kind", "digest"],
+        "properties": {
+          "evidenceId": { "$ref": "#/$defs/id" },
+          "kind": {
+            "enum": [
+              "implementation",
+              "review",
+              "verification",
+              "publication-observation",
+              "ci-observation",
+              "merge-request",
+              "merge-observation",
+              "cancellation"
+            ]
+          },
+          "digest": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    },
+    "empty": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "unknownPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publicationId",
+        "publicationIntentId",
+        "publicationIntentDigest",
+        "priorUnknownObservationDigest"
+      ],
+      "properties": {
+        "publicationId": { "$ref": "#/$defs/id" },
+        "publicationIntentId": { "$ref": "#/$defs/id" },
+        "publicationIntentDigest": { "$ref": "#/$defs/sha256" },
+        "priorUnknownObservationDigest": { "type": "null" }
+      }
+    },
+    "successPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publicationId",
+        "publicationIntentId",
+        "publicationIntentDigest",
+        "priorUnknownObservationDigest"
+      ],
+      "properties": {
+        "publicationId": { "$ref": "#/$defs/id" },
+        "publicationIntentId": { "$ref": "#/$defs/id" },
+        "publicationIntentDigest": { "$ref": "#/$defs/sha256" },
+        "priorUnknownObservationDigest": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        }
+      }
+    },
+    "reconcilePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publicationId",
+        "publicationIntentId",
+        "publicationIntentDigest",
+        "priorUnknownObservationDigest"
+      ],
+      "properties": {
+        "publicationId": { "$ref": "#/$defs/id" },
+        "publicationIntentId": { "$ref": "#/$defs/id" },
+        "publicationIntentDigest": { "$ref": "#/$defs/sha256" },
+        "priorUnknownObservationDigest": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "oneOf": [
+    { "properties": { "kind": { "const": "begin-implementation" } } },
+    { "properties": { "kind": { "const": "submit-review" } } },
+    { "properties": { "kind": { "const": "request-verification" } } },
+    { "properties": { "kind": { "const": "record-verification-approved" } } },
+    { "properties": { "kind": { "const": "record-verification-rejected" } } },
+    { "properties": { "kind": { "const": "begin-repair" } } },
+    { "properties": { "kind": { "const": "authorize-publication" } } },
+    { "properties": { "kind": { "const": "record-publication-unknown" } } },
+    { "properties": { "kind": { "const": "record-publication-succeeded" } } },
+    { "properties": { "kind": { "const": "recover-reconcile-publication" } } },
+    { "properties": { "kind": { "const": "record-ci-passed" } } },
+    { "properties": { "kind": { "const": "record-ci-failed" } } },
+    { "properties": { "kind": { "const": "request-merge" } } },
+    { "properties": { "kind": { "const": "record-merged" } } },
+    { "properties": { "kind": { "const": "cancel" } } }
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "kind": { "const": "record-publication-unknown" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/unknownPayload" } }
+      }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "record-publication-succeeded" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/successPayload" } }
+      }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "recover-reconcile-publication" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/reconcilePayload" } }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "begin-implementation",
+              "submit-review",
+              "request-verification",
+              "record-verification-approved",
+              "record-verification-rejected",
+              "begin-repair",
+              "authorize-publication",
+              "record-ci-passed",
+              "record-ci-failed",
+              "request-merge",
+              "record-merged",
+              "cancel"
+            ]
+          }
+        }
+      },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/empty" } } }
+    }
+  ],
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractId",
+    "schemaVersion",
+    "commandId",
+    "idempotencyKey",
+    "kind",
+    "expectedRevision",
+    "actor",
+    "target",
+    "evidence",
+    "payload"
+  ],
+  "properties": {
+    "contractId": { "const": "spts.controller-command" },
+    "schemaVersion": { "const": "2.0.0" },
+    "commandId": { "$ref": "#/$defs/id" },
+    "idempotencyKey": { "$ref": "#/$defs/id" },
+    "kind": { "type": "string" },
+    "expectedRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "actor": { "$ref": "#/$defs/actor" },
+    "target": { "$ref": "#/$defs/target" },
+    "evidence": { "$ref": "#/$defs/evidence" },
+    "payload": { "type": "object" }
+  }
+}

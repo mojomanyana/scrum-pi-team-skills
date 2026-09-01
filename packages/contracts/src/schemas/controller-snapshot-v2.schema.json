@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scrum-pi.dev/schemas/controller-snapshot-v2.schema.json",
+  "title": "Controller snapshot v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractId",
+    "schemaVersion",
+    "snapshotId",
+    "revision",
+    "previousTransitionDigest",
+    "authorityDigest",
+    "meteringDigest",
+    "controllerStateDigest",
+    "identity",
+    "candidate",
+    "phase",
+    "activeRole",
+    "status",
+    "limits",
+    "usage",
+    "acceptedCommands"
+  ],
+  "properties": {
+    "contractId": { "const": "spts.controller-snapshot" },
+    "schemaVersion": { "const": "2.0.0" },
+    "snapshotId": { "$ref": "#/$defs/id" },
+    "revision": { "$ref": "#/$defs/revision" },
+    "previousTransitionDigest": {
+      "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }]
+    },
+    "authorityDigest": { "$ref": "#/$defs/digest" },
+    "meteringDigest": { "$ref": "#/$defs/digest" },
+    "controllerStateDigest": { "$ref": "#/$defs/digest" },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projectId",
+        "taskId",
+        "repositoryId",
+        "baseCommit",
+        "baseTree",
+        "headBranch"
+      ],
+      "properties": {
+        "projectId": { "$ref": "#/$defs/id" },
+        "taskId": { "$ref": "#/$defs/id" },
+        "repositoryId": { "$ref": "#/$defs/id" },
+        "baseCommit": { "$ref": "#/$defs/git" },
+        "baseTree": { "$ref": "#/$defs/git" },
+        "headBranch": { "$ref": "#/$defs/id" }
+      }
+    },
+    "candidate": { "$ref": "#/$defs/candidate" },
+    "phase": {
+      "enum": [
+        "ready",
+        "implementation",
+        "internal-review",
+        "independent-verification",
+        "repair-required",
+        "publication",
+        "pr-ci-monitoring",
+        "merge-gate",
+        "completed",
+        "cancelled"
+      ]
+    },
+    "activeRole": {
+      "enum": ["product", "flow", "principal-developer", "independent-verifier"]
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verification",
+        "ci",
+        "publication",
+        "merged",
+        "cancelled",
+        "terminal",
+        "repairSource"
+      ],
+      "properties": {
+        "verification": { "enum": ["unverified", "approved", "rejected"] },
+        "ci": { "enum": ["not-started", "pending", "passed", "failed"] },
+        "publication": { "$ref": "#/$defs/publication" },
+        "merged": { "type": "boolean" },
+        "cancelled": { "type": "boolean" },
+        "terminal": { "type": "boolean" },
+        "repairSource": { "enum": [null, "verification", "ci"] }
+      }
+    },
+    "limits": { "$ref": "#/$defs/counters" },
+    "usage": { "$ref": "#/$defs/usage" },
+    "acceptedCommands": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["idempotencyKey", "commandDigest", "transitionDigest"],
+        "properties": {
+          "idempotencyKey": { "$ref": "#/$defs/id" },
+          "commandDigest": { "$ref": "#/$defs/digest" },
+          "transitionDigest": { "$ref": "#/$defs/digest" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "git": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "tree"],
+      "properties": {
+        "commit": { "$ref": "#/$defs/git" },
+        "tree": { "$ref": "#/$defs/git" }
+      }
+    },
+    "counters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "implementationAttempts",
+        "verificationRepairs",
+        "ciRepairs"
+      ],
+      "properties": {
+        "implementationAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "verificationRepairs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "ciRepairs": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "implementationAttempts",
+        "verificationRepairs",
+        "ciRepairs"
+      ],
+      "properties": {
+        "implementationAttempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "verificationRepairs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "ciRepairs": { "type": "integer", "minimum": 0, "maximum": 1000000 }
+      }
+    },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "publicationId",
+        "publicationIntentId",
+        "publicationIntentDigest",
+        "unknownObservationDigest"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "not-requested",
+            "intent-committed",
+            "outcome-unknown",
+            "succeeded"
+          ]
+        },
+        "publicationId": {
+          "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }]
+        },
+        "publicationIntentId": {
+          "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }]
+        },
+        "publicationIntentDigest": {
+          "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }]
+        },
+        "unknownObservationDigest": {
+          "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }]
+        }
+      }
+    }
+  }
+}

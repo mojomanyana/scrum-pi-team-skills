@@ -1,0 +1,32 @@
+{
+  "contractId": "spts.controller-transition",
+  "schemaVersion": "2.0.0",
+  "disposition": "rejected",
+  "code": "snapshot-invalid",
+  "proposalId": "proposal-00000000000000000000000000000000",
+  "proposalDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "commandId": null,
+  "commandDigest": null,
+  "snapshotId": null,
+  "snapshotDigest": null,
+  "fromRevision": null,
+  "toRevision": null,
+  "fromPhase": null,
+  "toPhase": null,
+  "evaluationId": null,
+  "evaluatedAt": null,
+  "target": null,
+  "priorTransitionDigest": null,
+  "transitionDigest": null,
+  "changes": [],
+  "intents": [],
+  "diagnostics": [
+    {
+      "code": "snapshot-invalid",
+      "message": "Snapshot contract is invalid.",
+      "path": "/snapshot"
+    }
+  ],
+  "proposedNextSnapshot": null,
+  "executableAuthority": false
+}

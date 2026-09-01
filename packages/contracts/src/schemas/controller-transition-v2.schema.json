@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scrum-pi.dev/schemas/controller-transition-v2.schema.json",
+  "title": "Controller transition v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractId",
+    "schemaVersion",
+    "disposition",
+    "code",
+    "proposalId",
+    "proposalDigest",
+    "commandId",
+    "commandDigest",
+    "snapshotId",
+    "snapshotDigest",
+    "fromRevision",
+    "toRevision",
+    "fromPhase",
+    "toPhase",
+    "evaluationId",
+    "evaluatedAt",
+    "target",
+    "priorTransitionDigest",
+    "transitionDigest",
+    "changes",
+    "intents",
+    "diagnostics",
+    "proposedNextSnapshot",
+    "executableAuthority"
+  ],
+  "properties": {
+    "contractId": { "const": "spts.controller-transition" },
+    "schemaVersion": { "const": "2.0.0" },
+    "disposition": { "enum": ["proposed", "duplicate", "rejected"] },
+    "code": {
+      "enum": [
+        "transition-proposed",
+        "duplicate-command",
+        "snapshot-input-invalid",
+        "command-input-invalid",
+        "context-input-invalid",
+        "snapshot-invalid",
+        "command-invalid",
+        "context-invalid",
+        "digest-mismatch",
+        "identity-mismatch",
+        "idempotency-conflict",
+        "revision-conflict",
+        "terminal",
+        "cancelled",
+        "revision-overflow",
+        "actor-denied",
+        "publication-binding-invalid",
+        "recovery-denied",
+        "evidence-required",
+        "attempt-limit-exhausted",
+        "transition-denied",
+        "history-full",
+        "output-invalid"
+      ]
+    },
+    "proposalId": { "$ref": "#/$defs/id" },
+    "proposalDigest": { "$ref": "#/$defs/digest" },
+    "commandId": { "$ref": "#/$defs/nullableId" },
+    "commandDigest": { "$ref": "#/$defs/nullableDigest" },
+    "snapshotId": { "$ref": "#/$defs/nullableId" },
+    "snapshotDigest": { "$ref": "#/$defs/nullableDigest" },
+    "fromRevision": { "$ref": "#/$defs/nullableRevision" },
+    "toRevision": { "$ref": "#/$defs/nullableRevision" },
+    "fromPhase": { "$ref": "#/$defs/nullablePhase" },
+    "toPhase": { "$ref": "#/$defs/nullablePhase" },
+    "evaluationId": { "$ref": "#/$defs/nullableId" },
+    "evaluatedAt": {
+      "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+    },
+    "target": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "projectId",
+            "taskId",
+            "repositoryId",
+            "candidateCommit",
+            "candidateTree"
+          ],
+          "properties": {
+            "projectId": { "$ref": "#/$defs/id" },
+            "taskId": { "$ref": "#/$defs/id" },
+            "repositoryId": { "$ref": "#/$defs/id" },
+            "candidateCommit": { "$ref": "#/$defs/git" },
+            "candidateTree": { "$ref": "#/$defs/git" }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "priorTransitionDigest": { "$ref": "#/$defs/nullableDigest" },
+    "transitionDigest": { "$ref": "#/$defs/nullableDigest" },
+    "changes": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "required": ["kind"],
+        "properties": { "kind": { "type": "string" } }
+      }
+    },
+    "intents": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "intentId",
+          "kind",
+          "commandDigest",
+          "proposalDigestBinding",
+          "target",
+          "payload",
+          "executableAuthority"
+        ],
+        "properties": {
+          "intentId": { "$ref": "#/$defs/id" },
+          "kind": {
+            "enum": [
+              "run-implementation",
+              "run-independent-verification",
+              "publish-candidate",
+              "monitor-ci",
+              "merge-candidate",
+              "update-paca",
+              "reconcile-publication"
+            ]
+          },
+          "commandDigest": { "$ref": "#/$defs/digest" },
+          "proposalDigestBinding": { "$ref": "#/$defs/digest" },
+          "target": { "type": "object" },
+          "payload": { "type": "object" },
+          "executableAuthority": { "const": false }
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "path"],
+        "properties": {
+          "code": { "type": "string" },
+          "message": { "type": "string" },
+          "path": { "type": "string" }
+        }
+      }
+    },
+    "proposedNextSnapshot": {
+      "anyOf": [
+        { "$ref": "controller-snapshot-v2.schema.json" },
+        { "type": "null" }
+      ]
+    },
+    "executableAuthority": { "const": false }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "git": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "phase": {
+      "enum": [
+        "ready",
+        "implementation",
+        "internal-review",
+        "independent-verification",
+        "repair-required",
+        "publication",
+        "pr-ci-monitoring",
+        "merge-gate",
+        "completed",
+        "cancelled"
+      ]
+    },
+    "nullableId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+    "nullableDigest": {
+      "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }]
+    },
+    "nullableRevision": {
+      "anyOf": [
+        { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        { "type": "null" }
+      ]
+    },
+    "nullablePhase": {
+      "anyOf": [{ "$ref": "#/$defs/phase" }, { "type": "null" }]
+    }
+  }
+}
