@@ -1,0 +1,122 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "version",
+    "runId",
+    "operationId",
+    "registrationId",
+    "operationKind",
+    "purpose",
+    "sequence",
+    "observedAt",
+    "repositoryIdentity",
+    "pre",
+    "post",
+    "outcome",
+    "diagnostic",
+    "requestDigest",
+    "observationDigest"
+  ],
+  "properties": {
+    "contract": { "const": "spts.fixture-repository-observation" },
+    "version": { "const": "1.0.0" },
+    "runId": { "type": "string" },
+    "operationId": { "type": "string" },
+    "registrationId": { "type": "string" },
+    "operationKind": {
+      "enum": [
+        "create-repository",
+        "create-bare-remote",
+        "create-worktree",
+        "inspect-worktrees",
+        "remove-worktree",
+        "cleanup-run"
+      ]
+    },
+    "purpose": {
+      "enum": [
+        "principal-candidate",
+        "independent-verifier",
+        "named-check",
+        "fixture-remote"
+      ]
+    },
+    "sequence": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+    "observedAt": { "type": "string" },
+    "repositoryIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commonDirectoryDigest", "objectFormat"],
+      "properties": {
+        "commonDirectoryDigest": { "type": "string" },
+        "objectFormat": { "enum": ["sha1", "sha256"] }
+      }
+    },
+    "pre": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/state" }] },
+    "post": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/state" }] },
+    "outcome": {
+      "enum": [
+        "applied",
+        "already-applied",
+        "not-applied",
+        "blocked",
+        "cancelled",
+        "outcome-unknown"
+      ]
+    },
+    "diagnostic": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "string" },
+            "message": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "requestDigest": { "type": "string" },
+    "observationDigest": { "type": "string" }
+  },
+  "$defs": {
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headCommit",
+        "headTree",
+        "branch",
+        "detached",
+        "clean",
+        "indexDigest",
+        "trackedWorktreeDigest",
+        "untrackedSetDigest",
+        "ignoredSetDigest",
+        "conflictSetDigest",
+        "submoduleSetDigest",
+        "filesystemSentinelDigest",
+        "worktreeSetDigest"
+      ],
+      "properties": {
+        "headCommit": { "type": "string" },
+        "headTree": { "type": "string" },
+        "branch": { "anyOf": [{ "type": "null" }, { "type": "string" }] },
+        "detached": { "type": "boolean" },
+        "clean": { "type": "boolean" },
+        "indexDigest": { "type": "string" },
+        "trackedWorktreeDigest": { "type": "string" },
+        "untrackedSetDigest": { "type": "string" },
+        "ignoredSetDigest": { "type": "string" },
+        "conflictSetDigest": { "type": "string" },
+        "submoduleSetDigest": { "type": "string" },
+        "filesystemSentinelDigest": { "type": "string" },
+        "worktreeSetDigest": { "type": "string" }
+      }
+    }
+  }
+}

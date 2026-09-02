@@ -1,0 +1,89 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "version",
+    "runId",
+    "operationId",
+    "checkId",
+    "registrationId",
+    "attempt",
+    "candidateCommit",
+    "candidateTree",
+    "workspaceTreeBefore",
+    "workspaceTreeAfter",
+    "startedAt",
+    "completedAt",
+    "elapsedMs",
+    "outcome",
+    "exitCode",
+    "signal",
+    "stdoutBytes",
+    "stderrBytes",
+    "stdoutDigest",
+    "stderrDigest",
+    "diagnostic",
+    "requestDigest",
+    "resultDigest"
+  ],
+  "properties": {
+    "contract": { "const": "spts.named-check-result" },
+    "version": { "const": "1.0.0" },
+    "runId": { "type": "string" },
+    "operationId": { "type": "string" },
+    "checkId": { "type": "string" },
+    "registrationId": { "type": "string" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 32 },
+    "candidateCommit": { "type": "string" },
+    "candidateTree": { "type": "string" },
+    "workspaceTreeBefore": { "type": "string" },
+    "workspaceTreeAfter": { "type": "string" },
+    "startedAt": { "type": "string" },
+    "completedAt": { "type": "string" },
+    "elapsedMs": { "type": "integer", "minimum": 0 },
+    "outcome": {
+      "enum": [
+        "passed",
+        "failed",
+        "timed-out",
+        "cancelled",
+        "spawn-failed",
+        "mutation-detected",
+        "outcome-unknown"
+      ]
+    },
+    "exitCode": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "integer", "minimum": 0, "maximum": 255 }
+      ]
+    },
+    "signal": {
+      "anyOf": [
+        { "type": "null" },
+        { "enum": ["SIGINT", "SIGTERM", "SIGKILL"] }
+      ]
+    },
+    "stdoutBytes": { "type": "integer", "minimum": 0 },
+    "stderrBytes": { "type": "integer", "minimum": 0 },
+    "stdoutDigest": { "type": "string" },
+    "stderrDigest": { "type": "string" },
+    "diagnostic": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "string" },
+            "message": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "requestDigest": { "type": "string" },
+    "resultDigest": { "type": "string" }
+  }
+}

@@ -21,6 +21,7 @@ export * from "./controller-snapshot-v2.js";
 export * from "./controller-transition-v2.js";
 export * from "./controller-store-v2.js";
 export * from "./controller-store-receipt-v2.js";
+export * from "./git-check-fixtures.js";
 
 export interface ExecutionContext {
   process: "local-pi";

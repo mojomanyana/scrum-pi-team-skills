@@ -48,6 +48,7 @@ export {
   type StartGovernedLocalProcessOptions,
   type SupervisedExecution,
 } from "./process-host.js";
+export * from "./named-check-runner.js";
 
 import {
   canonicalSerializeLifecycleValue,

@@ -2,6 +2,8 @@
 
 Development baseline for locally executed Pi agents supporting a Scrum team.
 
+Fixture-only Git check support lives in `packages/contracts`, `packages/agents`, and `packages/runtime`.
+
 Paca is the Scrum control plane and system of record. Agents are planned and supervised as local Pi processes governed by pi-daddy. The repository implements the governed manifest/planning boundary and a Linux/WSL-local foreground process host; ACP and Paca adapters remain future scope.
 
 ## Prerequisites

@@ -1,0 +1,21 @@
+{
+  "contract": "spts.fixture-repository-observation",
+  "version": "1.0.0",
+  "runId": "run-1",
+  "operationId": "op-1",
+  "registrationId": "reg-1",
+  "operationKind": "create-repository",
+  "purpose": "principal-candidate",
+  "sequence": 1,
+  "observedAt": "2000-01-01T00:00:00.000Z",
+  "repositoryIdentity": {
+    "commonDirectoryDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "objectFormat": "sha256"
+  },
+  "pre": null,
+  "post": null,
+  "outcome": "applied",
+  "diagnostic": null,
+  "requestDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "observationDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}

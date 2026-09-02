@@ -1,2 +1,2 @@
-// Agent implementations are intentionally out of scope for the repository baseline.
-export {};
+export * from "./adapters/git.js";
+export * from "./adapters/worktrees.js";
