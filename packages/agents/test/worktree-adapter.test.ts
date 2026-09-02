@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   __testOnlyDescribeFixtureHarnessV1,
@@ -32,6 +32,8 @@ const fixtureScriptPath = new URL(
   "../../runtime/test/fixtures/named-check.mjs",
   import.meta.url,
 ).pathname;
+const heavySuiteLockPath = join(tmpdir(), "spts10-s5-heavy-suite.lock");
+const heavySuiteOwnerPath = join(heavySuiteLockPath, "owner.json");
 
 function requireValid(
   result: ValidationResult<NamedCheckResultV1>,
@@ -40,19 +42,79 @@ function requireValid(
   return result.value;
 }
 
-function gitExecutable(): string {
+function resolveGitExecutable(): string {
   const resolved = spawnSync("bash", ["-lc", "command -v git"], {
     encoding: "utf8",
   });
   return resolved.stdout.trim();
 }
 
-function gitExecPath(): string {
-  const resolved = spawnSync(gitExecutable(), ["--exec-path"], {
+function resolveGitExecPath(executable: string): string {
+  const resolved = spawnSync(executable, ["--exec-path"], {
     encoding: "utf8",
   });
   return resolved.stdout.trim();
 }
+
+const gitExecutablePath = resolveGitExecutable();
+const gitExecPathValue = resolveGitExecPath(gitExecutablePath);
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    if (code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function acquireHeavySuiteLock(owner: string): Promise<() => void> {
+  while (true) {
+    try {
+      mkdirSync(heavySuiteLockPath, { mode: 0o700 });
+      writeFileSync(
+        heavySuiteOwnerPath,
+        JSON.stringify({ owner, pid: process.pid }),
+        "utf8",
+      );
+      return () => {
+        rmSync(heavySuiteLockPath, { recursive: true, force: true });
+      };
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (code !== "EEXIST") throw error;
+      let stale: boolean;
+      try {
+        const holder = JSON.parse(
+          readFileSync(heavySuiteOwnerPath, "utf8"),
+        ) as {
+          pid?: unknown;
+        };
+        stale =
+          typeof holder.pid !== "number" ||
+          !Number.isSafeInteger(holder.pid) ||
+          !isProcessAlive(holder.pid);
+      } catch {
+        stale = true;
+      }
+      if (stale) {
+        rmSync(heavySuiteLockPath, { recursive: true, force: true });
+        continue;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
+let releaseHeavySuiteLock: (() => void) | undefined;
 
 function fixtureLimits(): FixtureLimitsV1 {
   return {
@@ -103,8 +165,8 @@ function createPolicy(parent: string) {
   return createTrustedFixtureGitPolicyV1({
     policyId: "policy-worktrees",
     trustedParent: parent,
-    gitExecutable: gitExecutable(),
-    gitExecPath: gitExecPath(),
+    gitExecutable: gitExecutablePath,
+    gitExecPath: gitExecPathValue,
     namedChecks: [
       {
         checkId: "fixture-pass",
@@ -138,6 +200,17 @@ function replaceDirectoryAtSamePath(path: string): {
   const afterInode = statSync(path).ino;
   return Object.freeze({ beforeInode, afterInode });
 }
+
+beforeAll(async () => {
+  releaseHeavySuiteLock = await acquireHeavySuiteLock(
+    new URL(import.meta.url).pathname,
+  );
+}, 120_000);
+
+afterAll(() => {
+  releaseHeavySuiteLock?.();
+  releaseHeavySuiteLock = undefined;
+});
 
 describe("worktree adapter", () => {
   it("blocks dirty worktree removal and retains evidence", async () => {
@@ -352,8 +425,8 @@ describe("worktree adapter", () => {
     const policy = createTrustedFixtureGitPolicyV1({
       policyId: "policy-admin-drift",
       trustedParent: parent,
-      gitExecutable: gitExecutable(),
-      gitExecPath: gitExecPath(),
+      gitExecutable: gitExecutablePath,
+      gitExecPath: gitExecPathValue,
       namedChecks: [
         {
           checkId: "fixture-admin-drift",
@@ -773,7 +846,7 @@ describe("worktree adapter", () => {
       expect(remotePath).toBeDefined();
       expect(
         spawnSync(
-          gitExecutable(),
+          gitExecutablePath,
           [
             "-C",
             remotePath!,
@@ -807,7 +880,7 @@ describe("worktree adapter", () => {
           readonly candidateCommit: string;
         }) =>
           spawnSync(
-            gitExecutable(),
+            gitExecutablePath,
             [
               "-C",
               input.repoPath,
@@ -830,7 +903,7 @@ describe("worktree adapter", () => {
           readonly candidateCommit: string;
         }) =>
           spawnSync(
-            gitExecutable(),
+            gitExecutablePath,
             [
               "-C",
               input.repoPath,
@@ -852,7 +925,7 @@ describe("worktree adapter", () => {
           readonly candidateCommit: string;
         }) =>
           spawnSync(
-            gitExecutable(),
+            gitExecutablePath,
             ["-C", input.verifierPath!, "switch", "-c", "drift-branch"],
             { encoding: "utf8" },
           ),

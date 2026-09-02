@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   __testOnlyDescribeFixtureHarnessV1,
@@ -38,8 +38,10 @@ const fixtureScriptPath = new URL(
   "../../runtime/test/fixtures/named-check.mjs",
   import.meta.url,
 ).pathname;
+const heavySuiteLockPath = join(tmpdir(), "spts10-s5-heavy-suite.lock");
+const heavySuiteOwnerPath = join(heavySuiteLockPath, "owner.json");
 
-function gitExecutable(): string {
+function resolveGitExecutable(): string {
   const resolved = spawnSync("bash", ["-lc", "command -v git"], {
     encoding: "utf8",
   });
@@ -47,13 +49,73 @@ function gitExecutable(): string {
   return resolved.stdout.trim();
 }
 
-function gitExecPath(): string {
-  const resolved = spawnSync(gitExecutable(), ["--exec-path"], {
+function resolveGitExecPath(executable: string): string {
+  const resolved = spawnSync(executable, ["--exec-path"], {
     encoding: "utf8",
   });
   if ((resolved.status ?? 1) !== 0) throw new Error("git exec-path not found");
   return resolved.stdout.trim();
 }
+
+const gitExecutablePath = resolveGitExecutable();
+const gitExecPathValue = resolveGitExecPath(gitExecutablePath);
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    if (code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function acquireHeavySuiteLock(owner: string): Promise<() => void> {
+  while (true) {
+    try {
+      mkdirSync(heavySuiteLockPath, { mode: 0o700 });
+      writeFileSync(
+        heavySuiteOwnerPath,
+        JSON.stringify({ owner, pid: process.pid }),
+        "utf8",
+      );
+      return () => {
+        rmSync(heavySuiteLockPath, { recursive: true, force: true });
+      };
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (code !== "EEXIST") throw error;
+      let stale: boolean;
+      try {
+        const holder = JSON.parse(
+          readFileSync(heavySuiteOwnerPath, "utf8"),
+        ) as {
+          pid?: unknown;
+        };
+        stale =
+          typeof holder.pid !== "number" ||
+          !Number.isSafeInteger(holder.pid) ||
+          !isProcessAlive(holder.pid);
+      } catch {
+        stale = true;
+      }
+      if (stale) {
+        rmSync(heavySuiteLockPath, { recursive: true, force: true });
+        continue;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
+let releaseHeavySuiteLock: (() => void) | undefined;
 
 function fixtureLimits(): FixtureLimitsV1 {
   return {
@@ -117,7 +179,7 @@ function createControlledGit(parent: string): {
       `#!${JSON.stringify(process.execPath).slice(1, -1)}`,
       'import { readFileSync } from "node:fs";',
       'import { spawnSync } from "node:child_process";',
-      `const realGit = ${JSON.stringify(gitExecutable())};`,
+      `const realGit = ${JSON.stringify(gitExecutablePath)};`,
       `const controlPath = ${JSON.stringify(controlPath)};`,
       "const args = process.argv.slice(2);",
       "const control = JSON.parse(readFileSync(controlPath, 'utf8'));",
@@ -162,8 +224,8 @@ function createPolicy(
   return createTrustedFixtureGitPolicyV1({
     policyId: "policy-1",
     trustedParent: parent,
-    gitExecutable: options?.gitExecutablePath ?? gitExecutable(),
-    gitExecPath: gitExecPath(),
+    gitExecutable: options?.gitExecutablePath ?? gitExecutablePath,
+    gitExecPath: gitExecPathValue,
     namedChecks: [
       {
         checkId: "fixture-hang",
@@ -246,6 +308,17 @@ async function expectRedactedBoundaryError(
   }
 }
 
+beforeAll(async () => {
+  releaseHeavySuiteLock = await acquireHeavySuiteLock(
+    new URL(import.meta.url).pathname,
+  );
+}, 120_000);
+
+afterAll(() => {
+  releaseHeavySuiteLock?.();
+  releaseHeavySuiteLock = undefined;
+});
+
 describe("git adapter", () => {
   it("issues trusted policies and rejects duplicate check identifiers", async () => {
     const parent = createTrustedParent();
@@ -261,8 +334,8 @@ describe("git adapter", () => {
       createTrustedFixtureGitPolicyV1({
         policyId: "policy-2",
         trustedParent: parent,
-        gitExecutable: gitExecutable(),
-        gitExecPath: gitExecPath(),
+        gitExecutable: gitExecutablePath,
+        gitExecPath: gitExecPathValue,
         namedChecks: [
           {
             checkId: "fixture-pass",
@@ -711,13 +784,17 @@ describe("git adapter", () => {
             "utf8",
           );
           expect(
-            spawnSync(gitExecutable(), ["-C", repoPath, "add", "--all", "--"], {
-              encoding: "utf8",
-            }).status,
+            spawnSync(
+              gitExecutablePath,
+              ["-C", repoPath, "add", "--all", "--"],
+              {
+                encoding: "utf8",
+              },
+            ).status,
           ).toBe(0);
           expect(
             spawnSync(
-              gitExecutable(),
+              gitExecutablePath,
               [
                 "-C",
                 repoPath,
@@ -757,7 +834,7 @@ describe("git adapter", () => {
         name: "tampered object",
         tamper: (repoPath: string) => {
           const head = spawnSync(
-            gitExecutable(),
+            gitExecutablePath,
             ["-C", repoPath, "rev-parse", "HEAD^{commit}"],
             { encoding: "utf8" },
           ).stdout.trim();
@@ -1152,14 +1229,14 @@ describe("git adapter", () => {
       attempt: 1,
     });
     const blobId = spawnSync(
-      gitExecutable(),
+      gitExecutablePath,
       ["-C", checkPath!, "hash-object", "-w", "--stdin"],
       { encoding: "utf8", input: "ghost\n" },
     ).stdout.trim();
     expect(blobId).toMatch(/^[a-f0-9]{64}$/);
     expect(
       spawnSync(
-        gitExecutable(),
+        gitExecutablePath,
         [
           "-C",
           checkPath!,
@@ -1346,12 +1423,12 @@ describe("git adapter", () => {
       (entry) => entry.registrationId === "repo-ledger-main",
     )?.path;
     const headCommit = spawnSync(
-      gitExecutable(),
+      gitExecutablePath,
       ["-C", repoMainPath!, "rev-parse", "HEAD^{commit}"],
       { encoding: "utf8" },
     ).stdout.trim();
     const headTree = spawnSync(
-      gitExecutable(),
+      gitExecutablePath,
       ["-C", repoMainPath!, "rev-parse", "HEAD^{tree}"],
       { encoding: "utf8" },
     ).stdout.trim();
