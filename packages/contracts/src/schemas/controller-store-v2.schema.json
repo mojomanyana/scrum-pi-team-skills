@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scrum-pi.dev/schemas/controller-store-v2.schema.json",
+  "title": "Controller store status v2",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "identity",
+        "runIdentity",
+        "committedRevision",
+        "headRecordDigest",
+        "snapshotDigest",
+        "lastReceiptDigest",
+        "operationCount",
+        "quarantineCount",
+        "cleanupRequired"
+      ],
+      "properties": {
+        "kind": { "const": "ready" },
+        "identity": { "$ref": "#/$defs/storeIdentity" },
+        "runIdentity": { "$ref": "#/$defs/runIdentity" },
+        "committedRevision": { "$ref": "#/$defs/revision" },
+        "headRecordDigest": { "$ref": "#/$defs/digest" },
+        "snapshotDigest": { "$ref": "#/$defs/digest" },
+        "lastReceiptDigest": { "$ref": "#/$defs/nullableDigest" },
+        "operationCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100001
+        },
+        "quarantineCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "cleanupRequired": { "type": "boolean" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "identity", "runIdentity", "code"],
+      "properties": {
+        "kind": { "const": "repair-required" },
+        "identity": { "$ref": "#/$defs/storeIdentity" },
+        "runIdentity": { "$ref": "#/$defs/runIdentity" },
+        "code": {
+          "enum": [
+            "integrity-failure",
+            "recovery-required",
+            "resource-limit",
+            "durability-unavailable",
+            "storage-unavailable"
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "identity", "runIdentity"],
+      "properties": {
+        "kind": { "enum": ["absent", "closed", "busy"] },
+        "identity": { "$ref": "#/$defs/storeIdentity" },
+        "runIdentity": { "$ref": "#/$defs/runIdentity" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "identity", "runIdentity", "code"],
+      "properties": {
+        "kind": { "const": "unsupported" },
+        "identity": { "$ref": "#/$defs/storeIdentity" },
+        "runIdentity": { "$ref": "#/$defs/runIdentity" },
+        "code": {
+          "enum": ["unsupported-platform", "durability-unavailable"]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nullableDigest": {
+      "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }]
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "storeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractId",
+        "schemaVersion",
+        "namespaceDigest",
+        "keyId",
+        "integrityAlgorithm",
+        "formatVersion",
+        "durabilityMode"
+      ],
+      "properties": {
+        "contractId": { "const": "spts.controller-store.v2" },
+        "schemaVersion": { "const": 2 },
+        "namespaceDigest": { "$ref": "#/$defs/digest" },
+        "keyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[\\x21-\\x7e]+$"
+        },
+        "integrityAlgorithm": { "const": "hmac-sha256" },
+        "formatVersion": { "const": 1 },
+        "durabilityMode": { "const": "linux-local-fsync-rename-v1" }
+      }
+    },
+    "runIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespaceDigest",
+        "projectId",
+        "taskId",
+        "repositoryId",
+        "snapshotId",
+        "headBranch",
+        "runIdentityDigest"
+      ],
+      "properties": {
+        "namespaceDigest": { "$ref": "#/$defs/digest" },
+        "projectId": { "$ref": "#/$defs/identifier" },
+        "taskId": { "$ref": "#/$defs/identifier" },
+        "repositoryId": { "$ref": "#/$defs/identifier" },
+        "snapshotId": { "$ref": "#/$defs/identifier" },
+        "headBranch": { "$ref": "#/$defs/identifier" },
+        "runIdentityDigest": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}

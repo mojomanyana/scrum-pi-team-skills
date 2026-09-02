@@ -1,0 +1,28 @@
+{
+  "kind": "ready",
+  "identity": {
+    "contractId": "spts.controller-store.v2",
+    "schemaVersion": 2,
+    "namespaceDigest": "befaab798f2cec8585ed4bbc7c876320d3f27fe7b5d78074a342e90a873948b8",
+    "keyId": "test-key-1",
+    "integrityAlgorithm": "hmac-sha256",
+    "formatVersion": 1,
+    "durabilityMode": "linux-local-fsync-rename-v1"
+  },
+  "runIdentity": {
+    "namespaceDigest": "befaab798f2cec8585ed4bbc7c876320d3f27fe7b5d78074a342e90a873948b8",
+    "projectId": "project-1",
+    "taskId": "task-1",
+    "repositoryId": "repo-1",
+    "snapshotId": "snapshot-1",
+    "headBranch": "main",
+    "runIdentityDigest": "1b5466fd8b87936c355662b9881e7d0736336ac3e3e9a51a5f32ae219ad7a1fd"
+  },
+  "committedRevision": 1,
+  "headRecordDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "snapshotDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "lastReceiptDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "operationCount": 2,
+  "quarantineCount": 0,
+  "cleanupRequired": false
+}
