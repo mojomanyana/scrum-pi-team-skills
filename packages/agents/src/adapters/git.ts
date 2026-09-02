@@ -344,6 +344,7 @@ interface HarnessStateV1 {
     readonly registrations: string;
   };
   readonly operations: Map<string, OperationStateV1>;
+  readonly operationsByRegistration: Map<string, Set<string>>;
   readonly registrations: Map<string, RegistrationStateV1>;
   readonly issuedPermits: Set<NamedCheckPermitV1>;
   readonly activeNamedChecks: Map<string, ActiveNamedCheckExecutionV1>;
@@ -1166,6 +1167,7 @@ function runGit(
     readonly allowFileProtocol?: boolean;
     readonly environment?: Readonly<Record<string, string>>;
     readonly allowClosed?: boolean;
+    readonly failureCode?: FixtureDiagnosticCodeV1;
   },
 ): GitProcessResultV1 {
   ensureHarnessState(state, options?.allowClosed ?? false);
@@ -1207,10 +1209,13 @@ function runGit(
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
-  if (result.error) throw result.error;
+  const failureCode = options?.failureCode ?? "repository-identity-drift";
+  if (result.error) {
+    throw new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1[failureCode]);
+  }
   const status = result.status ?? 1;
   if (!options?.allowFailure && status !== 0) {
-    throw new Error(result.stderr || "git operation failed");
+    throw new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1[failureCode]);
   }
   return {
     status,
@@ -2041,6 +2046,10 @@ function validateWorktreeRequest(request: RegisterWorktreeRequestV1): void {
   if (request.checkId !== null) validateSafeId("checkId", request.checkId);
 }
 
+function hasTargetCollision(path: string): boolean {
+  return existsSync(path);
+}
+
 function fixtureFileRelativePath(file: Readonly<FixtureFileV1>): string {
   return file.pathComponents.join("/");
 }
@@ -2057,10 +2066,21 @@ function candidateTreeForCommit(
   registration: RegistrationStateV1,
   commit: string,
 ): string {
-  return runGit(state, registration.path, [
-    "rev-parse",
-    `${commit}^{tree}`,
-  ]).stdout.trim();
+  const result = runGit(
+    state,
+    registration.path,
+    ["rev-parse", `${commit}^{tree}`],
+    {
+      allowFailure: true,
+      failureCode: "candidate-identity-drift",
+    },
+  );
+  if (result.status !== 0) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["candidate-identity-drift"],
+    );
+  }
+  return result.stdout.trim();
 }
 
 function operationConflictObservation(
@@ -2112,6 +2132,22 @@ function makeOperationState(record: OperationStageRecordV1): OperationStateV1 {
   });
 }
 
+function storeOperationState(
+  state: HarnessStateV1,
+  record: OperationStageRecordV1,
+): void {
+  const operation = makeOperationState(record);
+  state.operations.set(operation.operationId, operation);
+  let registrations = state.operationsByRegistration.get(
+    operation.registrationId,
+  );
+  if (!registrations) {
+    registrations = new Set<string>();
+    state.operationsByRegistration.set(operation.registrationId, registrations);
+  }
+  registrations.add(operation.operationId);
+}
+
 async function executeOperationWithLedger<T>(
   state: HarnessStateV1,
   input: {
@@ -2147,7 +2183,7 @@ async function executeOperationWithLedger<T>(
     terminalState: "pending",
     result: null,
   });
-  state.operations.set(input.operationId, makeOperationState(prepared));
+  storeOperationState(state, prepared);
   priorRecordDigest = prepared.recordDigest;
   maybeInjectFault(state, `${input.kind}:after-prepared`);
 
@@ -2164,7 +2200,7 @@ async function executeOperationWithLedger<T>(
     terminalState: "pending",
     result: null,
   });
-  state.operations.set(input.operationId, makeOperationState(effectStarted));
+  storeOperationState(state, effectStarted);
   priorRecordDigest = effectStarted.recordDigest;
   maybeInjectFault(state, `${input.kind}:after-effect-started`);
 
@@ -2182,7 +2218,7 @@ async function executeOperationWithLedger<T>(
     terminalState: terminalStateForResult(result),
     result,
   });
-  state.operations.set(input.operationId, makeOperationState(effectObserved));
+  storeOperationState(state, effectObserved);
   priorRecordDigest = effectObserved.recordDigest;
   maybeInjectFault(state, `${input.kind}:after-effect-observed`);
 
@@ -2199,7 +2235,7 @@ async function executeOperationWithLedger<T>(
     terminalState: terminalStateForResult(result),
     result,
   });
-  state.operations.set(input.operationId, makeOperationState(completed));
+  storeOperationState(state, completed);
   return result;
 }
 
@@ -2265,6 +2301,86 @@ function hasActiveNamedCheck(
   return [...state.activeNamedChecks.values()].some(
     (entry) => entry.registrationId === registrationId,
   );
+}
+
+function namedCheckRetentionDiagnostic(
+  result: ValidationResult<NamedCheckResultV1> | null,
+): "workspace-mutated" | "outcome-unknown" | null {
+  if (!result || !result.valid) return null;
+  if (result.value.outcome === "mutation-detected") {
+    return "workspace-mutated";
+  }
+  if (result.value.outcome === "outcome-unknown") {
+    return "outcome-unknown";
+  }
+  return null;
+}
+
+function observationRetentionDiagnostic(
+  result: FixtureRepositoryObservationV1 | null,
+): "outcome-unknown" | null {
+  return result?.outcome === "outcome-unknown" ||
+    result?.diagnostic?.code === "outcome-unknown"
+    ? "outcome-unknown"
+    : null;
+}
+
+function operationRetentionDiagnostic(
+  operation: OperationStateV1,
+): "workspace-mutated" | "outcome-unknown" | null {
+  if (!operation.completed) return "outcome-unknown";
+  if (operation.kind === "named-check") {
+    return namedCheckRetentionDiagnostic(
+      operation.result as ValidationResult<NamedCheckResultV1> | null,
+    );
+  }
+  return observationRetentionDiagnostic(
+    operation.result as FixtureRepositoryObservationV1 | null,
+  );
+}
+
+function combineRetentionDiagnostic(
+  current: "workspace-mutated" | "outcome-unknown" | null,
+  candidate: "workspace-mutated" | "outcome-unknown" | null,
+): "workspace-mutated" | "outcome-unknown" | null {
+  if (current === "outcome-unknown" || candidate === "outcome-unknown") {
+    return "outcome-unknown";
+  }
+  return current ?? candidate;
+}
+
+function registrationRetentionDiagnostic(
+  state: HarnessStateV1,
+  registrationId: string,
+): "workspace-mutated" | "outcome-unknown" | null {
+  let diagnostic: "workspace-mutated" | "outcome-unknown" | null = null;
+  for (const operationId of state.operationsByRegistration.get(
+    registrationId,
+  ) ?? []) {
+    const operation = state.operations.get(operationId);
+    if (!operation) continue;
+    diagnostic = combineRetentionDiagnostic(
+      diagnostic,
+      operationRetentionDiagnostic(operation),
+    );
+    if (diagnostic === "outcome-unknown") return diagnostic;
+  }
+  return diagnostic;
+}
+
+function runRetentionDiagnostic(
+  state: HarnessStateV1,
+): "workspace-mutated" | "outcome-unknown" | null {
+  if (state.status === "recovery-required") return "outcome-unknown";
+  let diagnostic: "workspace-mutated" | "outcome-unknown" | null = null;
+  for (const operation of state.operations.values()) {
+    diagnostic = combineRetentionDiagnostic(
+      diagnostic,
+      operationRetentionDiagnostic(operation),
+    );
+    if (diagnostic === "outcome-unknown") return diagnostic;
+  }
+  return diagnostic;
 }
 
 async function settleNamedCheckCancellation(
@@ -2354,6 +2470,11 @@ function createHarnessObject(
 function cleanupHarness(harness: FixtureRepositoryHarnessV1): void {
   const state = requireHarnessState(harness);
   ensureHarnessState(state, true);
+  if (state.status === "recovery-required") {
+    throw new TypeError(
+      "fixture cleanup must retain recovery-required evidence",
+    );
+  }
   if (state.status !== "closed" && state.status !== "cancelled") {
     throw new TypeError("fixture cleanup requires a closed harness");
   }
@@ -2362,22 +2483,19 @@ function cleanupHarness(harness: FixtureRepositoryHarnessV1): void {
       "fixture cleanup must retain live named-check authority evidence",
     );
   }
-  for (const operation of state.operations.values()) {
-    if (!operation.completed) {
-      throw new TypeError(
-        "fixture cleanup must retain recovery-required evidence",
-      );
-    }
+  if (
+    [...state.operations.values()].some((operation) => !operation.completed)
+  ) {
+    throw new TypeError(
+      "fixture cleanup must retain recovery-required evidence",
+    );
+  }
+  if (runRetentionDiagnostic(state) !== null) {
+    throw new TypeError(
+      "fixture cleanup must retain mutation or unknown evidence",
+    );
   }
   for (const registration of state.registrations.values()) {
-    if (
-      registration.cleanupBlockedReason !== null &&
-      registration.state !== "removed"
-    ) {
-      throw new TypeError(
-        "fixture cleanup must retain mutation or unknown evidence",
-      );
-    }
     if (
       (registration.role === "independent-verifier" ||
         registration.role === "named-check") &&
@@ -2495,7 +2613,7 @@ function loadOperationStates(state: HarnessStateV1): void {
       .map((entry) => loadStageRecord(join(directory, entry)));
     if (records.length === 0) continue;
     const latest = records.at(-1)!;
-    state.operations.set(latest.operationId, makeOperationState(latest));
+    storeOperationState(state, latest);
   }
 }
 
@@ -2569,10 +2687,7 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
         terminalState: terminalStateForResult(result),
         result,
       });
-      state.operations.set(
-        operation.operationId,
-        makeOperationState(completed),
-      );
+      storeOperationState(state, completed);
       continue;
     }
     if (operation.kind === "named-check") {
@@ -2605,10 +2720,7 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
         terminalState: terminalStateForResult(unknown),
         result: unknown,
       });
-      state.operations.set(
-        operation.operationId,
-        makeOperationState(completed),
-      );
+      storeOperationState(state, completed);
       const registration = state.registrations.get(request.registrationId);
       if (registration) updateRegistrationCleanupState(registration, unknown);
       continue;
@@ -2643,10 +2755,7 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
         terminalState: terminalStateForResult(result),
         result,
       });
-      state.operations.set(
-        operation.operationId,
-        makeOperationState(completed),
-      );
+      storeOperationState(state, completed);
       continue;
     }
     const completed = writeOperationStage(state, {
@@ -2679,7 +2788,7 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
         diagnosticCode: "outcome-unknown",
       }),
     });
-    state.operations.set(operation.operationId, makeOperationState(completed));
+    storeOperationState(state, completed);
   }
 }
 
@@ -2811,6 +2920,7 @@ export async function createFixtureRepositoryHarnessV1(
     manifest: undefined as never,
     directories,
     operations: new Map(),
+    operationsByRegistration: new Map(),
     registrations: new Map(),
     issuedPermits: new Set(),
     activeNamedChecks: new Map(),
@@ -2866,6 +2976,7 @@ export async function recoverFixtureRepositoryHarnessV1(
       ),
       directories,
       operations: new Map(),
+      operationsByRegistration: new Map(),
       registrations: new Map(),
       issuedPermits: new Set(),
       activeNamedChecks: new Map(),
@@ -2928,6 +3039,16 @@ async function createRepository(
     state.directories.repositories,
     registrationDigest,
   );
+  if (hasTargetCollision(repositoryPath)) {
+    return operationConflictObservation(state, {
+      operationId: request.operationId,
+      registrationId: request.registrationId,
+      operationKind: "create-repository",
+      purpose: "principal-candidate",
+      requestDigest,
+      diagnosticCode: "workspace-collision",
+    });
+  }
   return executeOperationWithLedger(state, {
     operationId: request.operationId,
     kind: "create-repository",
@@ -2938,19 +3059,26 @@ async function createRepository(
       registrationId: request.registrationId,
     },
     effect: () => {
-      runGit(state, state.rootPath, [
-        "init",
-        "--object-format=sha256",
-        "--initial-branch=fixture-main",
-        repositoryPath,
-      ]);
+      runGit(
+        state,
+        state.rootPath,
+        [
+          "init",
+          "--object-format=sha256",
+          "--initial-branch=fixture-main",
+          repositoryPath,
+        ],
+        { failureCode: "outcome-unknown" },
+      );
       for (const file of files) {
         writeFixtureFile(
           join(repositoryPath, fixtureFileRelativePath(file)),
           file,
         );
       }
-      runGit(state, repositoryPath, ["add", "--all", "--"]);
+      runGit(state, repositoryPath, ["add", "--all", "--"], {
+        failureCode: "outcome-unknown",
+      });
       runGit(
         state,
         repositoryPath,
@@ -2970,6 +3098,7 @@ async function createRepository(
             GIT_COMMITTER_EMAIL: "fixture.invalid",
             GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
           },
+          failureCode: "outcome-unknown",
         },
       );
       const observation = observeRepositoryState(state, repositoryPath);
@@ -3051,6 +3180,16 @@ async function createBareRemote(
     state.directories.remotes,
     `${registrationDigest}.git`,
   );
+  if (hasTargetCollision(remotePath)) {
+    return operationConflictObservation(state, {
+      operationId: request.operationId,
+      registrationId: request.registrationId,
+      operationKind: "create-bare-remote",
+      purpose: "fixture-remote",
+      requestDigest,
+      diagnosticCode: "workspace-collision",
+    });
+  }
   return executeOperationWithLedger(state, {
     operationId: request.operationId,
     kind: "create-bare-remote",
@@ -3062,13 +3201,18 @@ async function createBareRemote(
       sourceRegistrationId: request.sourceRegistrationId,
     },
     effect: () => {
-      runGit(state, state.rootPath, [
-        "init",
-        "--bare",
-        "--object-format=sha256",
-        "--initial-branch=fixture-main",
-        remotePath,
-      ]);
+      runGit(
+        state,
+        state.rootPath,
+        [
+          "init",
+          "--bare",
+          "--object-format=sha256",
+          "--initial-branch=fixture-main",
+          remotePath,
+        ],
+        { failureCode: "outcome-unknown" },
+      );
       runGit(
         state,
         source.path,
@@ -3078,7 +3222,10 @@ async function createBareRemote(
           remotePath,
           "refs/heads/fixture-main:refs/heads/fixture-main",
         ],
-        { allowFileProtocol: true },
+        {
+          allowFileProtocol: true,
+          failureCode: "outcome-unknown",
+        },
       );
       const registration = createRegistrationState(state, {
         registrationId: request.registrationId,
@@ -3173,6 +3320,16 @@ async function createWorktree(
     registrationId: request.registrationId,
   });
   const worktreePath = join(state.directories.worktrees, registrationDigest);
+  if (hasTargetCollision(worktreePath)) {
+    return operationConflictObservation(state, {
+      operationId: request.operationId,
+      registrationId: request.registrationId,
+      operationKind: "create-worktree",
+      purpose: request.role,
+      requestDigest,
+      diagnosticCode: "workspace-collision",
+    });
+  }
   return executeOperationWithLedger(state, {
     operationId: request.operationId,
     kind: "create-worktree",
@@ -3188,13 +3345,12 @@ async function createWorktree(
       candidateTree: request.candidateTree,
     },
     effect: () => {
-      runGit(state, source.path, [
-        "worktree",
-        "add",
-        "--detach",
-        worktreePath,
-        request.candidateCommit,
-      ]);
+      runGit(
+        state,
+        source.path,
+        ["worktree", "add", "--detach", worktreePath, request.candidateCommit],
+        { failureCode: "outcome-unknown" },
+      );
       const observation = observeRepositoryState(state, worktreePath);
       const registration = createRegistrationState(state, {
         registrationId: request.registrationId,
@@ -3323,18 +3479,27 @@ async function removeWorktree(
       diagnosticCode: "registration-conflict",
     });
   }
-  if (registration.cleanupBlockedReason !== null) {
+  const requestDigest = computeFixtureRepositoryRequestDigestV1({
+    policyId: state.policyState.publicPolicy.policyId,
+    operationId,
+    registrationId,
+    sourceRegistrationId: registration.sourceRegistrationId,
+  });
+  const retentionDiagnostic = registrationRetentionDiagnostic(
+    state,
+    registrationId,
+  );
+  if (retentionDiagnostic ?? registration.cleanupBlockedReason) {
     return operationConflictObservation(state, {
       operationId,
       registrationId,
       operationKind: "remove-worktree",
       purpose: registration.role,
-      requestDigest: computeFixtureRepositoryRequestDigestV1({
-        policyId: state.policyState.publicPolicy.policyId,
-        operationId,
-        registrationId,
-      }),
-      diagnosticCode: registration.cleanupBlockedReason,
+      requestDigest,
+      diagnosticCode:
+        retentionDiagnostic ??
+        registration.cleanupBlockedReason ??
+        "outcome-unknown",
     });
   }
   if (
@@ -3346,20 +3511,10 @@ async function removeWorktree(
       registrationId,
       operationKind: "remove-worktree",
       purpose: registration.role,
-      requestDigest: computeFixtureRepositoryRequestDigestV1({
-        policyId: state.policyState.publicPolicy.policyId,
-        operationId,
-        registrationId,
-      }),
+      requestDigest,
       diagnosticCode: "live-agent-ambiguous",
     });
   }
-  const requestDigest = computeFixtureRepositoryRequestDigestV1({
-    policyId: state.policyState.publicPolicy.policyId,
-    operationId,
-    registrationId,
-    sourceRegistrationId: registration.sourceRegistrationId,
-  });
   try {
     const replay = maybeReplay<FixtureRepositoryObservationV1>(
       state,
@@ -3469,7 +3624,10 @@ async function removeWorktree(
         state,
         registration.path,
         ["worktree", "remove", "--force", registration.path],
-        { allowClosed: true },
+        {
+          allowClosed: true,
+          failureCode: "outcome-unknown",
+        },
       );
       registration.state = "removed";
       registration.generation += 1;

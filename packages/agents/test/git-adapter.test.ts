@@ -97,11 +97,69 @@ function createTrustedParent(): string {
   return path;
 }
 
-function createPolicy(parent: string) {
+function createControlledGit(parent: string): {
+  readonly executable: string;
+  readonly controlPath: string;
+} {
+  const controlPath = join(parent, "git-control.json");
+  const executable = join(parent, "controlled-git.mjs");
+  writeFileSync(
+    controlPath,
+    JSON.stringify({ matchSequence: null, stderr: null }),
+    "utf8",
+  );
+  writeFileSync(
+    executable,
+    [
+      `#!${JSON.stringify(process.execPath).slice(1, -1)}`,
+      'import { readFileSync } from "node:fs";',
+      'import { spawnSync } from "node:child_process";',
+      `const realGit = ${JSON.stringify(gitExecutable())};`,
+      `const controlPath = ${JSON.stringify(controlPath)};`,
+      "const args = process.argv.slice(2);",
+      "const control = JSON.parse(readFileSync(controlPath, 'utf8'));",
+      "const matchSequence = Array.isArray(control.matchSequence) ? control.matchSequence : null;",
+      "const matches = matchSequence !== null && args.some((_, start) => matchSequence.every((value, index) => args[start + index] === value));",
+      "if (matches) {",
+      '  if (typeof control.stderr === "string") process.stderr.write(control.stderr);',
+      '  process.exit(typeof control.exitCode === "number" ? control.exitCode : 1);',
+      "}",
+      'const result = spawnSync(realGit, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });',
+      "if (result.stdout) process.stdout.write(result.stdout);",
+      "if (result.stderr) process.stderr.write(result.stderr);",
+      "if (result.error) {",
+      '  process.stderr.write(String(result.error?.message ?? "spawn failed"));',
+      "  process.exit(111);",
+      "}",
+      "process.exit(result.status ?? 1);",
+    ].join("\n"),
+    { encoding: "utf8", mode: 0o755 },
+  );
+  chmodSync(executable, 0o755);
+  return { executable, controlPath };
+}
+
+function setControlledGitFailure(
+  controlPath: string,
+  matchSequence: readonly string[] | null,
+  stderr: string,
+  exitCode = 1,
+): void {
+  writeFileSync(
+    controlPath,
+    JSON.stringify({ matchSequence, stderr, exitCode }),
+    "utf8",
+  );
+}
+
+function createPolicy(
+  parent: string,
+  options?: { readonly gitExecutablePath?: string },
+) {
   return createTrustedFixtureGitPolicyV1({
     policyId: "policy-1",
     trustedParent: parent,
-    gitExecutable: gitExecutable(),
+    gitExecutable: options?.gitExecutablePath ?? gitExecutable(),
     gitExecPath: gitExecPath(),
     namedChecks: [
       {
@@ -130,8 +188,11 @@ function createPolicy(parent: string) {
   });
 }
 
-async function createHarnessWithRepository(parent = createTrustedParent()) {
-  const policy = createPolicy(parent);
+async function createHarnessWithRepository(
+  parent = createTrustedParent(),
+  options?: { readonly gitExecutablePath?: string },
+) {
+  const policy = createPolicy(parent, options);
   const harness = await createFixtureRepositoryHarnessV1(policy, {
     runId: "run-1",
     taskId: "task-1",
@@ -150,6 +211,22 @@ async function createHarnessWithRepository(parent = createTrustedParent()) {
     ],
   });
   return { parent, policy, harness, repository };
+}
+
+async function expectRedactedBoundaryError(
+  action: () => Promise<unknown>,
+  expectedMessage: RegExp,
+  leakText: string,
+): Promise<void> {
+  try {
+    await action();
+    throw new Error("expected operation to reject");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    expect(message).toMatch(expectedMessage);
+    expect(message).not.toContain(leakText);
+    expect(message).not.toContain("/tmp/");
+  }
 }
 
 describe("git adapter", () => {
@@ -394,6 +471,355 @@ describe("git adapter", () => {
 
     rmSync(parent, { recursive: true, force: true });
   });
+
+  it("retains incomplete named-check evidence through remove, recover, and cleanup", async () => {
+    const parent = createTrustedParent();
+    const policy = createPolicy(parent);
+    const harness = await createFixtureRepositoryHarnessV1(policy, {
+      runId: "run-incomplete-guard-1",
+      taskId: "task-incomplete-guard-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    });
+    const repository = await harness.createRepository({
+      operationId: "repo-incomplete-guard-1",
+      registrationId: "repo-incomplete-guard-main",
+      files: [
+        {
+          pathComponents: ["named-check-fixture.txt"],
+          mode: "100644",
+          content: new TextEncoder().encode("original\n"),
+        },
+      ],
+    });
+    await harness.createWorktree({
+      operationId: "worktree-incomplete-guard-1",
+      registrationId: "check-incomplete-guard-1",
+      sourceRegistrationId: "repo-incomplete-guard-main",
+      role: "named-check",
+      checkId: "fixture-pass",
+      candidateCommit: repository.post!.headCommit,
+      candidateTree: repository.post!.headTree,
+    });
+    const described = __testOnlyDescribeFixtureHarnessV1(harness);
+    const checkPath = described.registrations.find(
+      (entry) => entry.registrationId === "check-incomplete-guard-1",
+    )?.path;
+    expect(checkPath).toBeDefined();
+
+    __testOnlySetFixtureFaultV1(harness, "named-check:after-effect-observed");
+    await expect(
+      harness.runNamedCheckV1({
+        operationId: "named-check-incomplete-guard-1",
+        registrationId: "check-incomplete-guard-1",
+        checkId: "fixture-pass",
+        attempt: 1,
+      }),
+    ).rejects.toThrow(/fixture injected fault/i);
+
+    const removal = await harness.removeWorktree(
+      "cleanup-incomplete-guard-1",
+      "check-incomplete-guard-1",
+    );
+    expect(removal.outcome).toBe("blocked");
+    expect(removal.diagnostic?.code).toBe("outcome-unknown");
+    expect(existsSync(checkPath!)).toBe(true);
+
+    await harness.close();
+    await expect(harness.cleanup()).rejects.toThrow(
+      /recovery-required evidence/i,
+    );
+    expect(existsSync(described.rootPath)).toBe(true);
+
+    const recovered = await recoverFixtureRepositoryHarnessV1(policy, {
+      runId: "run-incomplete-guard-1",
+      taskId: "task-incomplete-guard-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    });
+    const recoveredRemoval = await recovered.removeWorktree(
+      "cleanup-incomplete-guard-2",
+      "check-incomplete-guard-1",
+    );
+    expect(recoveredRemoval.outcome).toBe("blocked");
+    expect(recoveredRemoval.diagnostic?.code).toBe("outcome-unknown");
+
+    await recovered.close();
+    await expect(recovered.cleanup()).rejects.toThrow(
+      /mutation or unknown evidence/i,
+    );
+    expect(existsSync(described.rootPath)).toBe(true);
+    expect(existsSync(checkPath!)).toBe(true);
+
+    rmSync(parent, { recursive: true, force: true });
+  }, 20_000);
+
+  it("preflights collisions and redacts git failures across public APIs", async () => {
+    const parent = createTrustedParent();
+    const { executable, controlPath } = createControlledGit(parent);
+    const leakText = `TOPSECRET-LEAK ${join(parent, "should-not-leak")}`;
+
+    const collisionPolicy = createPolicy(parent, {
+      gitExecutablePath: executable,
+    });
+    const collisionHarness = await createFixtureRepositoryHarnessV1(
+      collisionPolicy,
+      {
+        runId: "run-git-collision-1",
+        taskId: "task-git-collision-1",
+        expectedBaseCommit: "a".repeat(64),
+        expectedBaseTree: "b".repeat(64),
+      },
+    );
+    const collisionRoot =
+      __testOnlyDescribeFixtureHarnessV1(collisionHarness).rootPath;
+
+    setControlledGitFailure(controlPath, ["init"], leakText);
+    const repositoryCollisionDigest = registrationDigestV1({
+      registrationId: "repo-collision-main",
+    });
+    writeFileSync(
+      join(collisionRoot, "repositories", repositoryCollisionDigest),
+      "collision\n",
+      "utf8",
+    );
+    const repositoryCollision = await collisionHarness.createRepository({
+      operationId: "repo-collision-1",
+      registrationId: "repo-collision-main",
+      files: [
+        {
+          pathComponents: ["named-check-fixture.txt"],
+          mode: "100644",
+          content: new TextEncoder().encode("original\n"),
+        },
+      ],
+    });
+    expect(repositoryCollision.outcome).toBe("blocked");
+    expect(repositoryCollision.diagnostic?.code).toBe("workspace-collision");
+
+    setControlledGitFailure(controlPath, null, leakText);
+    const collisionRepository = await collisionHarness.createRepository({
+      operationId: "repo-collision-2",
+      registrationId: "repo-collision-source",
+      files: [
+        {
+          pathComponents: ["named-check-fixture.txt"],
+          mode: "100644",
+          content: new TextEncoder().encode("original\n"),
+        },
+      ],
+    });
+    expect(collisionRepository.outcome).toBe("applied");
+
+    setControlledGitFailure(controlPath, ["init"], leakText);
+    const remoteCollisionDigest = registrationDigestV1({
+      registrationId: "remote-collision-main",
+    });
+    writeFileSync(
+      join(collisionRoot, "remotes", `${remoteCollisionDigest}.git`),
+      "collision\n",
+      "utf8",
+    );
+    const remoteCollision = await collisionHarness.createBareRemote({
+      operationId: "remote-collision-1",
+      registrationId: "remote-collision-main",
+      sourceRegistrationId: "repo-collision-source",
+    });
+    expect(remoteCollision.outcome).toBe("blocked");
+    expect(remoteCollision.diagnostic?.code).toBe("workspace-collision");
+
+    setControlledGitFailure(controlPath, ["worktree", "add"], leakText);
+    const worktreeCollisionDigest = registrationDigestV1({
+      registrationId: "worktree-collision-main",
+    });
+    writeFileSync(
+      join(collisionRoot, "worktrees", worktreeCollisionDigest),
+      "collision\n",
+      "utf8",
+    );
+    const worktreeCollision = await collisionHarness.createWorktree({
+      operationId: "worktree-collision-1",
+      registrationId: "worktree-collision-main",
+      sourceRegistrationId: "repo-collision-source",
+      role: "named-check",
+      checkId: "fixture-pass",
+      candidateCommit: collisionRepository.post!.headCommit,
+      candidateTree: collisionRepository.post!.headTree,
+    });
+    expect(worktreeCollision.outcome).toBe("blocked");
+    expect(worktreeCollision.diagnostic?.code).toBe("workspace-collision");
+
+    const createRepositoryParent = createTrustedParent();
+    const createRepositoryGit = createControlledGit(createRepositoryParent);
+    setControlledGitFailure(
+      createRepositoryGit.controlPath,
+      ["commit"],
+      leakText,
+    );
+    const createRepositoryHarness = await createFixtureRepositoryHarnessV1(
+      createPolicy(createRepositoryParent, {
+        gitExecutablePath: createRepositoryGit.executable,
+      }),
+      {
+        runId: "run-git-failure-repo-1",
+        taskId: "task-git-failure-repo-1",
+        expectedBaseCommit: "a".repeat(64),
+        expectedBaseTree: "b".repeat(64),
+      },
+    );
+    await expectRedactedBoundaryError(
+      () =>
+        createRepositoryHarness.createRepository({
+          operationId: "repo-failure-1",
+          registrationId: "repo-failure-main",
+          files: [
+            {
+              pathComponents: ["named-check-fixture.txt"],
+              mode: "100644",
+              content: new TextEncoder().encode("original\n"),
+            },
+          ],
+        }),
+      /outcome is unknown/i,
+      leakText,
+    );
+
+    const createBareRemoteParent = createTrustedParent();
+    const createBareRemoteGit = createControlledGit(createBareRemoteParent);
+    const createBareRemoteHarness = await createHarnessWithRepository(
+      createBareRemoteParent,
+      { gitExecutablePath: createBareRemoteGit.executable },
+    );
+    setControlledGitFailure(
+      createBareRemoteGit.controlPath,
+      ["push"],
+      leakText,
+    );
+    await expectRedactedBoundaryError(
+      () =>
+        createBareRemoteHarness.harness.createBareRemote({
+          operationId: "remote-failure-1",
+          registrationId: "remote-failure-main",
+          sourceRegistrationId: "repo-main",
+        }),
+      /outcome is unknown/i,
+      leakText,
+    );
+
+    const createWorktreeParent = createTrustedParent();
+    const createWorktreeGit = createControlledGit(createWorktreeParent);
+    const createWorktreeHarness = await createHarnessWithRepository(
+      createWorktreeParent,
+      { gitExecutablePath: createWorktreeGit.executable },
+    );
+    setControlledGitFailure(
+      createWorktreeGit.controlPath,
+      ["worktree", "add"],
+      leakText,
+    );
+    await expectRedactedBoundaryError(
+      () =>
+        createWorktreeHarness.harness.createWorktree({
+          operationId: "worktree-failure-1",
+          registrationId: "worktree-failure-main",
+          sourceRegistrationId: "repo-main",
+          role: "named-check",
+          checkId: "fixture-pass",
+          candidateCommit: createWorktreeHarness.repository.post!.headCommit,
+          candidateTree: createWorktreeHarness.repository.post!.headTree,
+        }),
+      /outcome is unknown/i,
+      leakText,
+    );
+
+    const inspectParent = createTrustedParent();
+    const inspectGit = createControlledGit(inspectParent);
+    const inspectHarness = await createHarnessWithRepository(inspectParent, {
+      gitExecutablePath: inspectGit.executable,
+    });
+    setControlledGitFailure(inspectGit.controlPath, ["status"], leakText);
+    await expectRedactedBoundaryError(
+      () => inspectHarness.harness.inspectWorktrees("inspect-failure-1"),
+      /repository identity drift/i,
+      leakText,
+    );
+
+    const removeParent = createTrustedParent();
+    const removeGit = createControlledGit(removeParent);
+    const removeHarness = await createHarnessWithRepository(removeParent, {
+      gitExecutablePath: removeGit.executable,
+    });
+    await removeHarness.harness.createWorktree({
+      operationId: "worktree-remove-failure-1",
+      registrationId: "check-remove-failure-1",
+      sourceRegistrationId: "repo-main",
+      role: "named-check",
+      checkId: "fixture-pass",
+      candidateCommit: removeHarness.repository.post!.headCommit,
+      candidateTree: removeHarness.repository.post!.headTree,
+    });
+    setControlledGitFailure(
+      removeGit.controlPath,
+      ["worktree", "remove", "--force"],
+      leakText,
+    );
+    await expectRedactedBoundaryError(
+      () =>
+        removeHarness.harness.removeWorktree(
+          "cleanup-remove-failure-1",
+          "check-remove-failure-1",
+        ),
+      /outcome is unknown/i,
+      leakText,
+    );
+
+    const namedCheckParent = createTrustedParent();
+    const namedCheckGit = createControlledGit(namedCheckParent);
+    const namedCheckHarness = await createHarnessWithRepository(
+      namedCheckParent,
+      { gitExecutablePath: namedCheckGit.executable },
+    );
+    await namedCheckHarness.harness.createWorktree({
+      operationId: "worktree-named-check-failure-1",
+      registrationId: "check-named-check-failure-1",
+      sourceRegistrationId: "repo-main",
+      role: "named-check",
+      checkId: "fixture-pass",
+      candidateCommit: namedCheckHarness.repository.post!.headCommit,
+      candidateTree: namedCheckHarness.repository.post!.headTree,
+    });
+    setControlledGitFailure(namedCheckGit.controlPath, ["status"], leakText);
+    await expectRedactedBoundaryError(
+      () =>
+        namedCheckHarness.harness.issueNamedCheckPermitV1({
+          operationId: "named-check-permit-failure-1",
+          registrationId: "check-named-check-failure-1",
+          checkId: "fixture-pass",
+          attempt: 1,
+        }),
+      /repository identity drift/i,
+      leakText,
+    );
+    await expectRedactedBoundaryError(
+      () =>
+        namedCheckHarness.harness.runNamedCheckV1({
+          operationId: "named-check-failure-1",
+          registrationId: "check-named-check-failure-1",
+          checkId: "fixture-pass",
+          attempt: 1,
+        }),
+      /repository identity drift/i,
+      leakText,
+    );
+
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(createRepositoryParent, { recursive: true, force: true });
+    rmSync(createBareRemoteHarness.parent, { recursive: true, force: true });
+    rmSync(createWorktreeHarness.parent, { recursive: true, force: true });
+    rmSync(inspectHarness.parent, { recursive: true, force: true });
+    rmSync(removeHarness.parent, { recursive: true, force: true });
+    rmSync(namedCheckHarness.parent, { recursive: true, force: true });
+  }, 45_000);
 
   it("rejects duplicate same-run roots and ambiguous recovery matches", async () => {
     const parent = createTrustedParent();
