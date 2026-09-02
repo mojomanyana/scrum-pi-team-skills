@@ -21,7 +21,33 @@ export * from "./controller-snapshot-v2.js";
 export * from "./controller-transition-v2.js";
 export * from "./controller-store-v2.js";
 export * from "./controller-store-receipt-v2.js";
-export * from "./git-check-fixtures.js";
+export {
+  CLEAN_REPOSITORY_DIGESTS_V1,
+  FIXTURE_DIAGNOSTIC_MESSAGES_V1,
+  FIXTURE_REPOSITORY_OBSERVATION_CONTRACT_V1,
+  GIT_CHECK_FIXTURE_CONTRACT_VERSION_V1,
+  NAMED_CHECK_RESULT_CONTRACT_V1,
+  canonicalizeGitCheckFixtureValueV1,
+  computeFixtureRepositoryObservationDigestV1,
+  computeFixtureRepositoryRequestDigestV1,
+  computeGitCheckFixtureDigestV1,
+  computeNamedCheckRequestDigestV1,
+  computeNamedCheckResultDigestV1,
+  createFixtureDiagnosticV1,
+  isObjectId,
+  isSafeId,
+  isTimestamp,
+  parseFixtureRepositoryObservationV1,
+  parseNamedCheckResultV1,
+  validateFixtureRepositoryObservationV1,
+  validateNamedCheckResultV1,
+  type FixtureDiagnosticCodeV1,
+  type FixtureDiagnosticV1,
+  type FixtureRepositoryObservationV1,
+  type GitCheckFixtureDigestDomainV1,
+  type NamedCheckResultV1,
+  type RepositoryStateV1,
+} from "./git-check-fixtures.js";
 
 export interface ExecutionContext {
   process: "local-pi";

@@ -22,9 +22,9 @@
   "properties": {
     "contract": { "const": "spts.fixture-repository-observation" },
     "version": { "const": "1.0.0" },
-    "runId": { "type": "string" },
-    "operationId": { "type": "string" },
-    "registrationId": { "type": "string" },
+    "runId": { "$ref": "#/$defs/safeId" },
+    "operationId": { "$ref": "#/$defs/safeId" },
+    "registrationId": { "$ref": "#/$defs/safeId" },
     "operationKind": {
       "enum": [
         "create-repository",
@@ -44,18 +44,22 @@
       ]
     },
     "sequence": { "type": "integer", "minimum": 1, "maximum": 1000000 },
-    "observedAt": { "type": "string" },
+    "observedAt": { "$ref": "#/$defs/timestamp" },
     "repositoryIdentity": {
       "type": "object",
       "additionalProperties": false,
       "required": ["commonDirectoryDigest", "objectFormat"],
       "properties": {
-        "commonDirectoryDigest": { "type": "string" },
+        "commonDirectoryDigest": { "$ref": "#/$defs/digest" },
         "objectFormat": { "enum": ["sha1", "sha256"] }
       }
     },
-    "pre": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/state" }] },
-    "post": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/state" }] },
+    "pre": {
+      "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/repositoryState" }]
+    },
+    "post": {
+      "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/repositoryState" }]
+    },
     "outcome": {
       "enum": [
         "applied",
@@ -67,24 +71,66 @@
       ]
     },
     "diagnostic": {
-      "anyOf": [
-        { "type": "null" },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["code", "message"],
-          "properties": {
-            "code": { "type": "string" },
-            "message": { "type": "string" }
-          }
-        }
-      ]
+      "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/diagnostic" }]
     },
-    "requestDigest": { "type": "string" },
-    "observationDigest": { "type": "string" }
+    "requestDigest": { "$ref": "#/$defs/digest" },
+    "observationDigest": { "$ref": "#/$defs/digest" }
   },
   "$defs": {
-    "state": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "objectId": {
+      "type": "string",
+      "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "input-introspection-failed",
+            "input-limit-exceeded",
+            "contract-invalid",
+            "credential-content-denied",
+            "fixture-policy-unavailable",
+            "platform-unsupported",
+            "trusted-root-invalid",
+            "run-identity-conflict",
+            "registration-conflict",
+            "workspace-collision",
+            "repository-identity-drift",
+            "candidate-identity-drift",
+            "workspace-dirty",
+            "live-agent-ambiguous",
+            "operation-replay-conflict",
+            "limit-exhausted",
+            "cancelled",
+            "check-not-allowed",
+            "spawn-failed",
+            "check-timed-out",
+            "workspace-mutated",
+            "outcome-unknown",
+            "storage-unavailable"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 192 }
+      }
+    },
+    "repositoryState": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -103,19 +149,24 @@
         "worktreeSetDigest"
       ],
       "properties": {
-        "headCommit": { "type": "string" },
-        "headTree": { "type": "string" },
-        "branch": { "anyOf": [{ "type": "null" }, { "type": "string" }] },
+        "headCommit": { "$ref": "#/$defs/objectId" },
+        "headTree": { "$ref": "#/$defs/objectId" },
+        "branch": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1, "maxLength": 256 }
+          ]
+        },
         "detached": { "type": "boolean" },
         "clean": { "type": "boolean" },
-        "indexDigest": { "type": "string" },
-        "trackedWorktreeDigest": { "type": "string" },
-        "untrackedSetDigest": { "type": "string" },
-        "ignoredSetDigest": { "type": "string" },
-        "conflictSetDigest": { "type": "string" },
-        "submoduleSetDigest": { "type": "string" },
-        "filesystemSentinelDigest": { "type": "string" },
-        "worktreeSetDigest": { "type": "string" }
+        "indexDigest": { "$ref": "#/$defs/digest" },
+        "trackedWorktreeDigest": { "$ref": "#/$defs/digest" },
+        "untrackedSetDigest": { "$ref": "#/$defs/digest" },
+        "ignoredSetDigest": { "$ref": "#/$defs/digest" },
+        "conflictSetDigest": { "$ref": "#/$defs/digest" },
+        "submoduleSetDigest": { "$ref": "#/$defs/digest" },
+        "filesystemSentinelDigest": { "$ref": "#/$defs/digest" },
+        "worktreeSetDigest": { "$ref": "#/$defs/digest" }
       }
     }
   }

@@ -13,9 +13,23 @@
     "objectFormat": "sha256"
   },
   "pre": null,
-  "post": null,
+  "post": {
+    "headCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "headTree": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "branch": "fixture-main",
+    "detached": false,
+    "clean": true,
+    "indexDigest": "93eb4bb5c3f3dee149ce91ec8182d5fee795e66594bd9c08374c90533e8c4ffc",
+    "trackedWorktreeDigest": "365219ad1f7cfa1c8c3f1ce5c94916caf552abc7530fde70bbd752361acde37e",
+    "untrackedSetDigest": "d9b1ad9c7a296cd25e81b4394b9a7030501791b4bcdc737f745761e08183db52",
+    "ignoredSetDigest": "d74c14de7713958d02a1f989413c841b14be616a4aa4fc053291514558070636",
+    "conflictSetDigest": "516a81ce3a97228ce0bf1bd95e5bcaf1f5a855403f5f86ae3185c636748b05b8",
+    "submoduleSetDigest": "853eb18b783179f3b26dcea2202b0053034d54bcc8d1ea88abbcce98098b92ee",
+    "filesystemSentinelDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "worktreeSetDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
   "outcome": "applied",
   "diagnostic": null,
-  "requestDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "observationDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  "requestDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "observationDigest": "fb9c0c9ffb75cced257dfe87dfc6328728b2a455950ac799764ac77eaca787c8"
 }
