@@ -216,6 +216,20 @@ async function createHarnessWithRepository(
   return { parent, policy, harness, repository };
 }
 
+function replaceDirectoryAtSamePath(path: string): {
+  readonly beforeInode: number;
+  readonly afterInode: number;
+} {
+  const snapshotPath = `${path}-snapshot`;
+  const beforeInode = statSync(path).ino;
+  cpSync(path, snapshotPath, { recursive: true });
+  rmSync(path, { recursive: true, force: false });
+  cpSync(snapshotPath, path, { recursive: true });
+  rmSync(snapshotPath, { recursive: true, force: true });
+  const afterInode = statSync(path).ino;
+  return Object.freeze({ beforeInode, afterInode });
+}
+
 async function expectRedactedBoundaryError(
   action: () => Promise<unknown>,
   expectedMessage: RegExp,
@@ -435,6 +449,16 @@ describe("git adapter", () => {
           commonDirectoryDigest: "d".repeat(64),
           workspacePathDigest: "e".repeat(64),
           adminDirectoryDigest: "f".repeat(64),
+          rootIdentity: {
+            pathDigest: "1".repeat(64),
+            device: 1,
+            inode: 2,
+            uid: 3,
+            gid: 4,
+            mode: 0o700,
+            nlink: 5,
+            mountDigest: "2".repeat(64),
+          },
           state: "retained",
           generation: 1,
           previousDigest: null,
@@ -612,6 +636,58 @@ describe("git adapter", () => {
       }
     }
   }, 20_000);
+
+  it("blocks replaced create-repository recovery postconditions", async () => {
+    const parent = createTrustedParent();
+    const policy = createPolicy(parent);
+    const options = {
+      runId: "run-replaced-repo-recovery-1",
+      taskId: "task-replaced-repo-recovery-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    };
+    const request = {
+      operationId: "repo-replaced-recovery-1",
+      registrationId: "repo-replaced-recovery-main",
+      files: [
+        {
+          pathComponents: ["named-check-fixture.txt"],
+          mode: "100644" as const,
+          content: new TextEncoder().encode("original\n"),
+        },
+      ],
+    };
+    const harness = await createFixtureRepositoryHarnessV1(policy, options);
+    try {
+      __testOnlySetFixtureFaultV1(
+        harness,
+        "create-repository:after-effect-observed",
+      );
+      await expect(harness.createRepository(request)).rejects.toThrow(
+        /fixture injected fault/i,
+      );
+      const repoPath = __testOnlyDescribeFixtureHarnessV1(
+        harness,
+      ).registrations.find(
+        (entry) => entry.registrationId === request.registrationId,
+      )?.path;
+      expect(repoPath).toBeDefined();
+      const replacement = replaceDirectoryAtSamePath(repoPath!);
+      expect(replacement.afterInode).not.toBe(replacement.beforeInode);
+      await harness.close();
+
+      const recovered = await recoverFixtureRepositoryHarnessV1(
+        policy,
+        options,
+      );
+      const replay = await recovered.createRepository(request);
+      expect(replay.outcome).toBe("blocked");
+      expect(replay.diagnostic?.code).toBe("outcome-unknown");
+      expect(replay.post).toBeNull();
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it("blocks tampered create-repository recovery postconditions", async () => {
     const request = {

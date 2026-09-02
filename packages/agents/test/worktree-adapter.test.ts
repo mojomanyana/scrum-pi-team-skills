@@ -1,10 +1,12 @@
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -123,6 +125,20 @@ function createPolicy(parent: string) {
   });
 }
 
+function replaceDirectoryAtSamePath(path: string): {
+  readonly beforeInode: number;
+  readonly afterInode: number;
+} {
+  const snapshotPath = `${path}-snapshot`;
+  const beforeInode = statSync(path).ino;
+  cpSync(path, snapshotPath, { recursive: true });
+  rmSync(path, { recursive: true, force: false });
+  cpSync(snapshotPath, path, { recursive: true });
+  rmSync(snapshotPath, { recursive: true, force: true });
+  const afterInode = statSync(path).ino;
+  return Object.freeze({ beforeInode, afterInode });
+}
+
 describe("worktree adapter", () => {
   it("blocks dirty worktree removal and retains evidence", async () => {
     const parent = mkdtempSync(
@@ -238,6 +254,80 @@ describe("worktree adapter", () => {
 
     await harness.close();
     rmSync(parent, { recursive: true, force: true });
+  }, 15_000);
+
+  it("blocks worktree root-field drift and same-path replacement during removal", async () => {
+    const parent = mkdtempSync(
+      join(tmpdir(), "fixture-worktrees-root-drift-parent-"),
+    );
+    chmodSync(parent, 0o700);
+    const policy = createPolicy(parent);
+    const harness = await createFixtureRepositoryHarnessV1(policy, {
+      runId: "run-worktree-root-drift-1",
+      taskId: "task-worktree-root-drift-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    });
+
+    try {
+      const repository = await harness.createRepository({
+        operationId: "repo-root-drift-1",
+        registrationId: "repo-root-drift-main",
+        files: [
+          {
+            pathComponents: ["named-check-fixture.txt"],
+            mode: "100644",
+            content: new TextEncoder().encode("original\n"),
+          },
+        ],
+      });
+
+      const worktree = await harness.createWorktree({
+        operationId: "worktree-root-drift-1",
+        registrationId: "check-root-drift-1",
+        sourceRegistrationId: "repo-root-drift-main",
+        role: "named-check",
+        checkId: "fixture-pass",
+        candidateCommit: repository.post!.headCommit,
+        candidateTree: repository.post!.headTree,
+      });
+      expect(worktree.outcome).toBe("applied");
+
+      const worktreePath = __testOnlyDescribeFixtureHarnessV1(
+        harness,
+      ).registrations.find(
+        (entry) => entry.registrationId === "check-root-drift-1",
+      )?.path;
+      expect(worktreePath).toBeDefined();
+
+      const originalMode = statSync(worktreePath!).mode & 0o777;
+      const driftMode = originalMode === 0o700 ? 0o755 : 0o700;
+      chmodSync(worktreePath!, driftMode);
+      const modeRemoval = await harness.removeWorktree(
+        "cleanup-root-drift-mode-1",
+        "check-root-drift-1",
+      );
+      expect(modeRemoval.outcome).toBe("blocked");
+      expect(modeRemoval.diagnostic?.code).toBe("repository-identity-drift");
+      expect(existsSync(worktreePath!)).toBe(true);
+
+      chmodSync(worktreePath!, originalMode);
+      const replacement = replaceDirectoryAtSamePath(worktreePath!);
+      expect(replacement.afterInode).not.toBe(replacement.beforeInode);
+      const replacementRemoval = await harness.removeWorktree(
+        "cleanup-root-drift-replaced-1",
+        "check-root-drift-1",
+      );
+      expect(replacementRemoval.outcome).toBe("blocked");
+      expect(replacementRemoval.diagnostic?.code).toBe(
+        "repository-identity-drift",
+      );
+      expect(existsSync(worktreePath!)).toBe(true);
+
+      await harness.close();
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
   }, 15_000);
 
   it("detects linked admin-dir mutation and blocks cleanup", async () => {
@@ -517,6 +607,126 @@ describe("worktree adapter", () => {
       }
     }
   }, 60_000);
+
+  it("blocks replaced remote and worktree recovery after effect-observed faults", async () => {
+    const remoteParent = createTrustedParent();
+    const remotePolicy = createPolicy(remoteParent);
+    const remoteOptions = {
+      runId: "run-remote-replaced-1",
+      taskId: "task-remote-replaced-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    };
+    const remoteHarness = await createFixtureRepositoryHarnessV1(
+      remotePolicy,
+      remoteOptions,
+    );
+    try {
+      await remoteHarness.createRepository({
+        operationId: "repo-remote-replaced-1",
+        registrationId: "repo-main",
+        files: [
+          {
+            pathComponents: ["named-check-fixture.txt"],
+            mode: "100644",
+            content: new TextEncoder().encode("original\n"),
+          },
+        ],
+      });
+      const remoteRequest = {
+        operationId: "remote-replaced-1",
+        registrationId: "remote-main",
+        sourceRegistrationId: "repo-main",
+      };
+      __testOnlySetFixtureFaultV1(
+        remoteHarness,
+        "create-bare-remote:after-effect-observed",
+      );
+      await expect(
+        remoteHarness.createBareRemote(remoteRequest),
+      ).rejects.toThrow(/fixture injected fault/i);
+      const remotePath = __testOnlyDescribeFixtureHarnessV1(
+        remoteHarness,
+      ).registrations.find(
+        (entry) => entry.registrationId === "remote-main",
+      )?.path;
+      expect(remotePath).toBeDefined();
+      const replacement = replaceDirectoryAtSamePath(remotePath!);
+      expect(replacement.afterInode).not.toBe(replacement.beforeInode);
+      await remoteHarness.close();
+
+      const recovered = await recoverFixtureRepositoryHarnessV1(
+        remotePolicy,
+        remoteOptions,
+      );
+      const replay = await recovered.createBareRemote(remoteRequest);
+      expect(replay.outcome).toBe("blocked");
+      expect(replay.diagnostic?.code).toBe("outcome-unknown");
+    } finally {
+      rmSync(remoteParent, { recursive: true, force: true });
+    }
+
+    const worktreeParent = createTrustedParent();
+    const worktreePolicy = createPolicy(worktreeParent);
+    const worktreeOptions = {
+      runId: "run-worktree-replaced-1",
+      taskId: "task-worktree-replaced-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    };
+    const worktreeHarness = await createFixtureRepositoryHarnessV1(
+      worktreePolicy,
+      worktreeOptions,
+    );
+    try {
+      const repository = await worktreeHarness.createRepository({
+        operationId: "repo-worktree-replaced-1",
+        registrationId: "repo-main",
+        files: [
+          {
+            pathComponents: ["named-check-fixture.txt"],
+            mode: "100644",
+            content: new TextEncoder().encode("original\n"),
+          },
+        ],
+      });
+      const worktreeRequest = {
+        operationId: "worktree-replaced-1",
+        registrationId: "check-main",
+        sourceRegistrationId: "repo-main",
+        role: "named-check" as const,
+        checkId: "fixture-pass",
+        candidateCommit: repository.post!.headCommit,
+        candidateTree: repository.post!.headTree,
+      };
+      __testOnlySetFixtureFaultV1(
+        worktreeHarness,
+        "create-worktree:after-effect-observed",
+      );
+      await expect(
+        worktreeHarness.createWorktree(worktreeRequest),
+      ).rejects.toThrow(/fixture injected fault/i);
+      const worktreePath = __testOnlyDescribeFixtureHarnessV1(
+        worktreeHarness,
+      ).registrations.find(
+        (entry) => entry.registrationId === "check-main",
+      )?.path;
+      expect(worktreePath).toBeDefined();
+      const replacement = replaceDirectoryAtSamePath(worktreePath!);
+      expect(replacement.afterInode).not.toBe(replacement.beforeInode);
+      await worktreeHarness.close();
+
+      const recovered = await recoverFixtureRepositoryHarnessV1(
+        worktreePolicy,
+        worktreeOptions,
+      );
+      const replay = await recovered.createWorktree(worktreeRequest);
+      expect(replay.outcome).toBe("blocked");
+      expect(replay.diagnostic?.code).toBe("outcome-unknown");
+    } finally {
+      rmSync(worktreeParent, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("blocks drifted remote and worktree recovery after effect-observed faults", async () => {
     const remoteParent = createTrustedParent();

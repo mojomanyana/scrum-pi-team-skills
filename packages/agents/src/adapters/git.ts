@@ -63,6 +63,7 @@ import {
   type CreateBareRemoteRequestV1,
   type CreateRepositoryRequestV1,
   type FixtureFileV1,
+  type FixtureRootIdentityProofV1,
   type FixtureWorktreeRoleV1,
   type RegisterWorktreeRequestV1,
 } from "./worktrees.js";
@@ -225,6 +226,8 @@ interface DirectoryIdentityV1 {
   readonly uid: number;
   readonly gid: number;
   readonly mode: number;
+  readonly nlink: number;
+  readonly mountDigest: string;
 }
 
 interface GitProcessResultV1 {
@@ -243,6 +246,7 @@ interface RegistrationStateV1 {
   readonly commonDirectory: string;
   readonly adminDirectory: string;
   readonly commonDirectoryDigest: string;
+  readonly rootIdentity: FixtureRootIdentityProofV1;
   readonly sourceCommonDirectoryDigest: string | null;
   readonly commonConfigDigest: string;
   candidateCommit: string | null;
@@ -636,6 +640,56 @@ function walkWithoutSymlinks(path: string): void {
   }
 }
 
+function decodeMountInfoField(value: string): string {
+  return value.replace(/\\([0-7]{3})/gu, (_match, octal) =>
+    String.fromCharCode(Number.parseInt(octal, 8)),
+  );
+}
+
+function mountPointContainsPath(mountPoint: string, path: string): boolean {
+  return mountPoint === "/"
+    ? path.startsWith("/")
+    : path === mountPoint || path.startsWith(`${mountPoint}/`);
+}
+
+function mountDigestForPath(path: string): string {
+  const realpath = realpathSync(path);
+  const mountinfo = readFileSync("/proc/self/mountinfo", "utf8");
+  let bestMatch: {
+    readonly mountPoint: string;
+    readonly digest: string;
+  } | null = null;
+  for (const line of mountinfo.split("\n")) {
+    if (line.length === 0) continue;
+    const separator = line.indexOf(" - ");
+    if (separator === -1) continue;
+    const leftFields = line.slice(0, separator).split(" ");
+    const rightFields = line.slice(separator + 3).split(" ");
+    if (leftFields.length < 5 || rightFields.length < 2) continue;
+    const mountPoint = decodeMountInfoField(leftFields[4]!);
+    if (!mountPointContainsPath(mountPoint, realpath)) continue;
+    const digest = computeGitCheckFixtureDigestV1(
+      "spts.fixture-common-directory/1.0.0",
+      {
+        mountId: leftFields[0],
+        parentMountId: leftFields[1],
+        mountDevice: leftFields[2],
+        root: decodeMountInfoField(leftFields[3]!),
+        mountPoint,
+        filesystemType: rightFields[0],
+        source: decodeMountInfoField(rightFields[1]!),
+      },
+    );
+    if (bestMatch === null || mountPoint.length > bestMatch.mountPoint.length) {
+      bestMatch = { mountPoint, digest };
+    }
+  }
+  if (bestMatch === null) {
+    throw new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1["trusted-root-invalid"]);
+  }
+  return bestMatch.digest;
+}
+
 function snapshotDirectoryIdentity(path: string): DirectoryIdentityV1 {
   walkWithoutSymlinks(path);
   const stat = lstatSync(path);
@@ -655,6 +709,8 @@ function snapshotDirectoryIdentity(path: string): DirectoryIdentityV1 {
     uid: stat.uid,
     gid: stat.gid,
     mode: stat.mode,
+    nlink: stat.nlink,
+    mountDigest: mountDigestForPath(path),
   });
 }
 
@@ -694,7 +750,8 @@ function sameDirectoryIdentity(
     left.inode === right.inode &&
     left.uid === right.uid &&
     left.gid === right.gid &&
-    left.mode === right.mode
+    left.mode === right.mode &&
+    left.mountDigest === right.mountDigest
   );
 }
 
@@ -861,13 +918,116 @@ function registrationPathDigest(registrationDigest: string): string {
   return digestRelativePathV1([registrationDigest]);
 }
 
+function relativePathComponentsFromRoot(
+  state: HarnessStateV1,
+  path: string,
+): readonly string[] {
+  if (!containsPath(state.rootPath, path)) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
+  const relativePath = relative(state.rootPath, path);
+  const components = relativePath.split(sep).filter(Boolean);
+  if (components.length === 0) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
+  return Object.freeze(components);
+}
+
+function snapshotTargetRootIdentity(
+  state: HarnessStateV1,
+  path: string,
+): FixtureRootIdentityProofV1 {
+  const identity = snapshotDirectoryIdentity(path);
+  return Object.freeze({
+    pathDigest: digestRelativePathV1(
+      relativePathComponentsFromRoot(state, path),
+    ),
+    device: identity.device,
+    inode: identity.inode,
+    uid: identity.uid,
+    gid: identity.gid,
+    mode: identity.mode,
+    nlink: identity.nlink,
+    mountDigest: identity.mountDigest,
+  });
+}
+
+function sameTargetRootIdentity(
+  left: FixtureRootIdentityProofV1,
+  right: FixtureRootIdentityProofV1,
+): boolean {
+  return (
+    left.pathDigest === right.pathDigest &&
+    left.device === right.device &&
+    left.inode === right.inode &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink &&
+    left.mountDigest === right.mountDigest
+  );
+}
+
+function registrationRootIdentityMatches(
+  state: HarnessStateV1,
+  registration: RegistrationStateV1,
+): boolean {
+  try {
+    return sameTargetRootIdentity(
+      registration.rootIdentity,
+      snapshotTargetRootIdentity(state, registration.path),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function readStoredTargetRootIdentity(
+  value: unknown,
+): FixtureRootIdentityProofV1 {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw recoveryIntegrityError();
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.pathDigest !== "string" ||
+    !SHA256_HEX_PATTERN.test(record.pathDigest) ||
+    !Number.isSafeInteger(record.device) ||
+    !Number.isSafeInteger(record.inode) ||
+    !Number.isSafeInteger(record.uid) ||
+    !Number.isSafeInteger(record.gid) ||
+    !Number.isSafeInteger(record.mode) ||
+    !Number.isSafeInteger(record.nlink) ||
+    typeof record.mountDigest !== "string" ||
+    !SHA256_HEX_PATTERN.test(record.mountDigest)
+  ) {
+    throw recoveryIntegrityError();
+  }
+  return Object.freeze({
+    pathDigest: record.pathDigest,
+    device: record.device as number,
+    inode: record.inode as number,
+    uid: record.uid as number,
+    gid: record.gid as number,
+    mode: record.mode as number,
+    nlink: record.nlink as number,
+    mountDigest: record.mountDigest,
+  });
+}
+
 function directoryDigest(identity: DirectoryIdentityV1): string {
   return computeGitCheckFixtureDigestV1("spts.fixture-common-directory/1.0.0", {
     realpath: identity.realpath,
     device: identity.device,
     inode: identity.inode,
     uid: identity.uid,
+    gid: identity.gid,
     mode: identity.mode,
+    mountDigest: identity.mountDigest,
   });
 }
 
@@ -877,7 +1037,10 @@ function rootDigest(identity: DirectoryIdentityV1, runDigest: string): string {
     device: identity.device,
     inode: identity.inode,
     uid: identity.uid,
+    gid: identity.gid,
     mode: identity.mode,
+    nlink: identity.nlink,
+    mountDigest: identity.mountDigest,
     runDigest,
   });
 }
@@ -1514,21 +1677,35 @@ function digestFileContent(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-function walkTree(rootPath: string, prefix = ""): unknown[] {
-  const entries = readdirSync(rootPath, { withFileTypes: true }).sort(
-    (left, right) => left.name.localeCompare(right.name),
-  );
-  const observations: unknown[] = [];
-  for (const entry of entries) {
-    const absolute = join(rootPath, entry.name);
-    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
-    const stat = lstatSync(absolute);
-    if (stat.isSymbolicLink() || !(stat.isDirectory() || stat.isFile())) {
-      throw new TypeError(
-        FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
-      );
-    }
-    observations.push({
+function snapshotTreeEntry(
+  path: string,
+  relativePath: string,
+): {
+  readonly stat: ReturnType<typeof lstatSync>;
+  readonly observation: {
+    readonly pathDigest: string;
+    readonly type: "directory" | "file";
+    readonly mode: number;
+    readonly uid: number;
+    readonly gid: number;
+    readonly device: number;
+    readonly inode: number;
+    readonly nlink: number;
+    readonly size: number;
+    readonly ctimeMicros: number;
+    readonly mtimeMicros: number;
+    readonly contentDigest: string | null;
+  };
+} {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !(stat.isDirectory() || stat.isFile())) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
+  return {
+    stat,
+    observation: {
       pathDigest: pathDigestForRelative(relativePath),
       type: stat.isDirectory() ? "directory" : "file",
       mode: stat.mode,
@@ -1540,38 +1717,59 @@ function walkTree(rootPath: string, prefix = ""): unknown[] {
       size: stat.size,
       ctimeMicros: Math.trunc(stat.ctimeMs * 1_000),
       mtimeMicros: Math.trunc(stat.mtimeMs * 1_000),
-      contentDigest: stat.isFile() ? digestFileContent(absolute) : null,
-    });
-    if (stat.isDirectory())
-      observations.push(...walkTree(absolute, relativePath));
+      contentDigest: stat.isFile() ? digestFileContent(path) : null,
+    },
+  };
+}
+
+function walkTree(rootPath: string, prefix = ""): unknown[] {
+  const rootEntry = snapshotTreeEntry(rootPath, prefix);
+  const rootStat = rootEntry.stat!;
+  if (!rootStat.isDirectory()) {
+    return [rootEntry.observation];
+  }
+  const entries = readdirSync(rootPath, { withFileTypes: true }).sort(
+    (left, right) => left.name.localeCompare(right.name),
+  );
+  const observations: unknown[] = [rootEntry.observation];
+  for (const entry of entries) {
+    const absolute = join(rootPath, entry.name);
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+    observations.push(...walkTree(absolute, relativePath));
   }
   return observations;
 }
 
 function walkStableTree(rootPath: string, prefix = ""): unknown[] {
+  const rootEntry = snapshotTreeEntry(rootPath, prefix);
+  const rootStat = rootEntry.stat!;
+  if (!rootStat.isDirectory()) {
+    return [
+      {
+        pathDigest: rootEntry.observation.pathDigest,
+        type: rootEntry.observation.type,
+        mode: rootEntry.observation.mode,
+        size: rootEntry.observation.size,
+        contentDigest: rootEntry.observation.contentDigest,
+      },
+    ];
+  }
   const entries = readdirSync(rootPath, { withFileTypes: true }).sort(
     (left, right) => left.name.localeCompare(right.name),
   );
-  const observations: unknown[] = [];
+  const observations: unknown[] = [
+    {
+      pathDigest: rootEntry.observation.pathDigest,
+      type: rootEntry.observation.type,
+      mode: rootEntry.observation.mode,
+      size: rootEntry.observation.size,
+      contentDigest: rootEntry.observation.contentDigest,
+    },
+  ];
   for (const entry of entries) {
     const absolute = join(rootPath, entry.name);
     const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
-    const stat = lstatSync(absolute);
-    if (stat.isSymbolicLink() || !(stat.isDirectory() || stat.isFile())) {
-      throw new TypeError(
-        FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
-      );
-    }
-    observations.push({
-      pathDigest: pathDigestForRelative(relativePath),
-      type: stat.isDirectory() ? "directory" : "file",
-      mode: stat.mode,
-      size: stat.size,
-      contentDigest: stat.isFile() ? digestFileContent(absolute) : null,
-    });
-    if (stat.isDirectory()) {
-      observations.push(...walkStableTree(absolute, relativePath));
-    }
+    observations.push(...walkStableTree(absolute, relativePath));
   }
   return observations;
 }
@@ -2193,6 +2391,7 @@ function writeRegistrationRecord(
         "spts.fixture-common-directory/1.0.0",
         registration.adminDirectory,
       ),
+      rootIdentity: registration.rootIdentity,
       state: registration.state,
       generation: registration.generation,
       previousDigest,
@@ -2408,6 +2607,7 @@ function createRegistrationState(
     commonDirectoryDigest: directoryDigest(
       snapshotDirectoryIdentity(input.commonDirectory),
     ),
+    rootIdentity: snapshotTargetRootIdentity(state, input.path),
     sourceCommonDirectoryDigest: input.sourceCommonDirectoryDigest,
     commonConfigDigest:
       configState?.digest ??
@@ -4107,6 +4307,7 @@ function loadRegistrationState(state: HarnessStateV1): void {
       commonDirectory,
       adminDirectory,
       commonDirectoryDigest: record.commonDirectoryDigest,
+      rootIdentity: readStoredTargetRootIdentity(record.rootIdentity),
       sourceCommonDirectoryDigest: null,
       commonConfigDigest:
         configState?.digest ??
@@ -4345,7 +4546,17 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
         continue;
       }
       const expectedPostcondition = repositoryRecoveryPostcondition(operation);
+      const registration = state.registrations.get(tuple.registrationId);
       const exactMatch =
+        registration !== undefined &&
+        registration.role === "principal-candidate" &&
+        registration.state === "retained" &&
+        registration.sourceRegistrationId === null &&
+        registration.candidateCommit === observation.state.headCommit &&
+        registration.candidateTree === observation.state.headTree &&
+        registration.commonDirectoryDigest ===
+          observation.repositoryIdentity.commonDirectoryDigest &&
+        registrationRootIdentityMatches(state, registration) &&
         configState !== null &&
         configState.bare === false &&
         configState.digest === request.expectedConfigDigest &&
@@ -4466,6 +4677,7 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
           registration.sourceRegistrationId === request.sourceRegistrationId &&
           registration.candidateCommit === request.expectedCommit &&
           registration.candidateTree === request.expectedTree &&
+          registrationRootIdentityMatches(state, registration) &&
           registration.commonDirectoryDigest ===
             observation.repositoryIdentity.commonDirectoryDigest &&
           configState !== null &&
@@ -4592,6 +4804,7 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
         const exactMatch =
           registration !== undefined &&
           registrationMatchesWorktreeRequest(registration, request, "active") &&
+          registrationRootIdentityMatches(state, registration) &&
           configState !== null &&
           !configState.bare &&
           configState.digest === request.expectedConfigDigest &&
@@ -4701,6 +4914,7 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
               request,
               "active",
             ) &&
+            registrationRootIdentityMatches(state, registration) &&
             source !== undefined &&
             source.commonDirectoryDigest ===
               request.expectedCommonDirectoryDigest &&
@@ -5286,6 +5500,16 @@ async function createBareRemote(
     });
   }
   const source = sourceRegistration(state, request.sourceRegistrationId);
+  if (!registrationRootIdentityMatches(state, source)) {
+    return operationConflictObservation(state, {
+      operationId: request.operationId,
+      registrationId: request.registrationId,
+      operationKind: "create-bare-remote",
+      purpose: "fixture-remote",
+      requestDigest,
+      diagnosticCode: "repository-identity-drift",
+    });
+  }
   const registrationDigest = registrationDigestV1({
     registrationId: request.registrationId,
   });
@@ -5413,6 +5637,16 @@ async function createWorktree(
     });
   }
   const source = sourceRegistration(state, request.sourceRegistrationId);
+  if (!registrationRootIdentityMatches(state, source)) {
+    return operationConflictObservation(state, {
+      operationId: request.operationId,
+      registrationId: request.registrationId,
+      operationKind: "create-worktree",
+      purpose: request.role,
+      requestDigest,
+      diagnosticCode: "repository-identity-drift",
+    });
+  }
   if (
     candidateTreeForCommit(state, source, request.candidateCommit) !==
     request.candidateTree
@@ -5524,6 +5758,24 @@ async function inspectWorktrees(
       diagnosticCode: "operation-replay-conflict",
     });
   }
+  if (!registrationRootIdentityMatches(state, rootRegistration)) {
+    return createObservation(state, {
+      operationId,
+      registrationId: rootRegistration.registrationId,
+      operationKind: "inspect-worktrees",
+      purpose: "principal-candidate",
+      sequence: currentSequence(state),
+      repositoryIdentity: {
+        commonDirectoryDigest: rootRegistration.commonDirectoryDigest,
+        objectFormat: "sha256",
+      },
+      pre: null,
+      post: null,
+      outcome: "blocked",
+      diagnostic: createFixtureDiagnosticV1("repository-identity-drift"),
+      requestDigest,
+    });
+  }
   return executeOperationWithLedger(state, {
     operationId,
     kind: "inspect-worktrees",
@@ -5604,6 +5856,24 @@ async function removeWorktree(
         registrationId,
       }),
       diagnosticCode: "registration-conflict",
+    });
+  }
+  if (!registrationRootIdentityMatches(state, registration)) {
+    return createObservation(state, {
+      operationId,
+      registrationId,
+      operationKind: "remove-worktree",
+      purpose: registration.role,
+      sequence: currentSequence(state),
+      repositoryIdentity: {
+        commonDirectoryDigest: registration.commonDirectoryDigest,
+        objectFormat: "sha256",
+      },
+      pre: null,
+      post: null,
+      outcome: "blocked",
+      diagnostic: createFixtureDiagnosticV1("repository-identity-drift"),
+      requestDigest,
     });
   }
   const retentionDiagnostic = registrationRetentionDiagnostic(
@@ -5767,6 +6037,11 @@ async function issueHarnessNamedCheckPermitV1(
     throw new TypeError("named check attempt is invalid");
   }
   const registration = sourceRegistration(state, request.registrationId);
+  if (!registrationRootIdentityMatches(state, registration)) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
   if (
     registration.role !== "named-check" ||
     registration.checkId !== request.checkId ||
@@ -5834,6 +6109,9 @@ async function runHarnessNamedCheckV1(
   validateSafeId("registrationId", request.registrationId);
   validateSafeId("checkId", request.checkId);
   const registration = sourceRegistration(state, request.registrationId);
+  if (!registrationRootIdentityMatches(state, registration)) {
+    return conflictResult("repository-identity-drift");
+  }
   if (
     registration.candidateCommit === null ||
     registration.candidateTree === null

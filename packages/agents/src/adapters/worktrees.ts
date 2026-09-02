@@ -37,6 +37,17 @@ export interface RegisterWorktreeRequestV1 {
   readonly candidateTree: string;
 }
 
+export interface FixtureRootIdentityProofV1 {
+  readonly pathDigest: string;
+  readonly device: number;
+  readonly inode: number;
+  readonly uid: number;
+  readonly gid: number;
+  readonly mode: number;
+  readonly nlink: number;
+  readonly mountDigest: string;
+}
+
 export interface FixtureRegistrationRecordV1 {
   readonly contract: "spts.fixture-registration-record";
   readonly version: "1.0.0";
@@ -50,6 +61,7 @@ export interface FixtureRegistrationRecordV1 {
   readonly commonDirectoryDigest: string;
   readonly workspacePathDigest: string;
   readonly adminDirectoryDigest: string;
+  readonly rootIdentity: FixtureRootIdentityProofV1;
   readonly state: "active" | "cleanup-pending" | "retained" | "removed";
   readonly generation: number;
   readonly previousDigest: string | null;
@@ -63,6 +75,7 @@ export interface ObservedWorkspaceStateV1 {
 
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
 const WINDOWS_RESERVED = new Set([
   "con",
   "prn",
@@ -117,6 +130,45 @@ function validateObjectId(label: string, value: unknown): string {
     throw new TypeError(`${label} is invalid`);
   }
   return value;
+}
+
+function validateDigest(label: string, value: unknown): string {
+  if (typeof value !== "string" || !SHA256_HEX_PATTERN.test(value)) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return value;
+}
+
+function validateSafeInteger(label: string, value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return value;
+}
+
+function validateFixtureRootIdentityProof(
+  value: unknown,
+): FixtureRootIdentityProofV1 {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("rootIdentity is invalid");
+  }
+  const rootIdentity = value as Record<string, unknown>;
+  return Object.freeze({
+    pathDigest: validateDigest(
+      "rootIdentity.pathDigest",
+      rootIdentity.pathDigest,
+    ),
+    device: validateSafeInteger("rootIdentity.device", rootIdentity.device),
+    inode: validateSafeInteger("rootIdentity.inode", rootIdentity.inode),
+    uid: validateSafeInteger("rootIdentity.uid", rootIdentity.uid),
+    gid: validateSafeInteger("rootIdentity.gid", rootIdentity.gid),
+    mode: validateSafeInteger("rootIdentity.mode", rootIdentity.mode),
+    nlink: validateSafeInteger("rootIdentity.nlink", rootIdentity.nlink),
+    mountDigest: validateDigest(
+      "rootIdentity.mountDigest",
+      rootIdentity.mountDigest,
+    ),
+  });
 }
 
 function validateFixtureComponent(component: unknown): string {
@@ -265,6 +317,7 @@ export function createRegistrationRecordV1(input: {
   readonly commonDirectoryDigest: string;
   readonly workspacePathDigest: string;
   readonly adminDirectoryDigest: string;
+  readonly rootIdentity: FixtureRootIdentityProofV1;
   readonly state: FixtureRegistrationRecordV1["state"];
   readonly generation: number;
   readonly previousDigest: string | null;
@@ -279,6 +332,7 @@ export function createRegistrationRecordV1(input: {
   }
   if (input.candidateTree !== null)
     validateObjectId("candidateTree", input.candidateTree);
+  const rootIdentity = validateFixtureRootIdentityProof(input.rootIdentity);
   const registrationDigest = registrationDigestV1({
     registrationId: input.registrationId,
   });
@@ -295,6 +349,7 @@ export function createRegistrationRecordV1(input: {
     commonDirectoryDigest: input.commonDirectoryDigest,
     workspacePathDigest: input.workspacePathDigest,
     adminDirectoryDigest: input.adminDirectoryDigest,
+    rootIdentity,
     state: input.state,
     generation: input.generation,
     previousDigest: input.previousDigest,
