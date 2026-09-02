@@ -775,22 +775,30 @@ export async function runExactNamedCheckV1(
   })();
 
   state.status = "observing";
-  const afterObservation = await Promise.resolve(state.observeAfter()).catch(
-    () => ({
-      workspaceTree: state.before.workspaceTree,
-      sentinelDigest: state.before.sentinelDigest,
-    }),
-  );
-  const workspaceTreeAfter = validateObjectId(
-    "workspaceTreeAfter",
-    afterObservation.workspaceTree,
-  );
+  let afterObservation:
+    NamedCheckWorkspaceObservationV1 | { readonly failed: true };
+  try {
+    afterObservation = await Promise.resolve(state.observeAfter());
+  } catch {
+    afterObservation = { failed: true };
+  }
+  const observationFailed = "failed" in afterObservation;
+  const observedWorkspace: NamedCheckWorkspaceObservationV1 | null =
+    observationFailed
+      ? null
+      : (afterObservation as NamedCheckWorkspaceObservationV1);
+  const workspaceTreeAfter =
+    observedWorkspace === null
+      ? state.before.workspaceTree
+      : validateObjectId("workspaceTreeAfter", observedWorkspace.workspaceTree);
   const sentinelChanged =
+    observedWorkspace !== null &&
     state.before.sentinelDigest !== undefined &&
-    afterObservation.sentinelDigest !== undefined &&
-    state.before.sentinelDigest !== afterObservation.sentinelDigest;
+    observedWorkspace.sentinelDigest !== undefined &&
+    state.before.sentinelDigest !== observedWorkspace.sentinelDigest;
   const mutated =
-    workspaceTreeAfter !== state.before.workspaceTree || sentinelChanged;
+    !observationFailed &&
+    (workspaceTreeAfter !== state.before.workspaceTree || sentinelChanged);
   const completedAt = clock.now();
   const elapsedMs = Math.max(
     0,
@@ -799,10 +807,10 @@ export async function runExactNamedCheckV1(
 
   let outcome: NamedCheckResultV1["outcome"];
   let diagnostic: NamedCheckResultV1["diagnostic"] = null;
-  if (!absent) {
+  if (!absent || observationFailed) {
     outcome = "outcome-unknown";
     diagnostic = createFixtureDiagnosticV1("outcome-unknown");
-    state.status = "recovery-required";
+    state.status = observationFailed ? "completed" : "recovery-required";
   } else if (mutated) {
     outcome = "mutation-detected";
     diagnostic = createFixtureDiagnosticV1("workspace-mutated");

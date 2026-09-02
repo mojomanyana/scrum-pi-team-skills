@@ -368,6 +368,72 @@ describe("named-check-runner", () => {
     descendantWorkspace.cleanup();
   });
 
+  it("fails closed when observeAfter throws or rejects", async () => {
+    const authority = createAuthority();
+
+    const syncWorkspace = createWorkspace();
+    const syncPermit = issueNamedCheckPermitV1(
+      authority,
+      {
+        operationId: "check-observe-sync-1",
+        runId: "run-1",
+        registrationId: "reg-observe-sync",
+        checkId: "fixture-pass",
+        attempt: 1,
+        candidateCommit: "a".repeat(64),
+        candidateTree: "b".repeat(64),
+        workspaceIdentityToken: {},
+        requestDigest: "5".repeat(64),
+      },
+      {
+        cwd: syncWorkspace.root,
+        homeDirectory: join(syncWorkspace.root, "home"),
+        beforeObservation: workspaceObservation(syncWorkspace.root),
+        observeAfter: () => {
+          const secret = ["api_key", "sk-secret"].join("=");
+          throw new Error(`boom observeAfter secret ${secret}`);
+        },
+      },
+    );
+    const syncResult = await runExactNamedCheckV1({ permit: syncPermit });
+    const syncValue = requireValid(syncResult);
+    expect(syncValue.outcome).toBe("outcome-unknown");
+    expect(syncValue.diagnostic?.code).toBe("outcome-unknown");
+    expect(JSON.stringify(syncValue)).not.toContain("sk-secret");
+    syncWorkspace.cleanup();
+
+    const asyncWorkspace = createWorkspace();
+    const asyncPermit = issueNamedCheckPermitV1(
+      authority,
+      {
+        operationId: "check-observe-async-1",
+        runId: "run-1",
+        registrationId: "reg-observe-async",
+        checkId: "fixture-pass",
+        attempt: 1,
+        candidateCommit: "a".repeat(64),
+        candidateTree: "b".repeat(64),
+        workspaceIdentityToken: {},
+        requestDigest: "6".repeat(64),
+      },
+      {
+        cwd: asyncWorkspace.root,
+        homeDirectory: join(asyncWorkspace.root, "home"),
+        beforeObservation: workspaceObservation(asyncWorkspace.root),
+        observeAfter: async () => {
+          const secret = ["api_key", "sk-secret"].join("=");
+          throw new Error(`boom observeAfter secret ${secret}`);
+        },
+      },
+    );
+    const asyncResult = await runExactNamedCheckV1({ permit: asyncPermit });
+    const asyncValue = requireValid(asyncResult);
+    expect(asyncValue.outcome).toBe("outcome-unknown");
+    expect(asyncValue.diagnostic?.code).toBe("outcome-unknown");
+    expect(JSON.stringify(asyncValue)).not.toContain("sk-secret");
+    asyncWorkspace.cleanup();
+  });
+
   it("supports sticky cancellation and output overflow without leaking raw output", async () => {
     const authority = createAuthority();
 

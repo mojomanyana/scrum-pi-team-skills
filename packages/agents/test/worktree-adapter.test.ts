@@ -1,4 +1,10 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -199,9 +205,18 @@ describe("worktree adapter", () => {
 
     const removed = await harness.removeWorktree("cleanup-check-1", "check-1");
     expect(removed.outcome).toBe("applied");
+    const removedVerifier = await harness.removeWorktree(
+      "cleanup-verify-1",
+      "verify-1",
+    );
+    expect(removedVerifier.outcome).toBe("applied");
 
     await harness.close();
-    await harness.cleanup();
+    const rootPath = described.rootPath;
+    await expect(harness.cleanup()).rejects.toThrow(
+      /cleanup|retain|mutat|unknown/i,
+    );
+    expect(existsSync(rootPath)).toBe(true);
     rmSync(parent, { recursive: true, force: true });
   }, 15_000);
 });

@@ -1,9 +1,11 @@
 import {
   chmodSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +15,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   __testOnlyDescribeFixtureHarnessV1,
+  __testOnlySetFixtureFaultV1,
   createFixtureRepositoryHarnessV1,
   createTrustedFixtureGitPolicyV1,
   isTrustedFixtureGitPolicyV1,
@@ -110,6 +113,28 @@ function createPolicy(parent: string) {
     ],
     limits: fixtureLimits(),
   });
+}
+
+async function createHarnessWithRepository(parent = createTrustedParent()) {
+  const policy = createPolicy(parent);
+  const harness = await createFixtureRepositoryHarnessV1(policy, {
+    runId: "run-1",
+    taskId: "task-1",
+    expectedBaseCommit: "a".repeat(64),
+    expectedBaseTree: "b".repeat(64),
+  });
+  const repository = await harness.createRepository({
+    operationId: "repo-1",
+    registrationId: "repo-main",
+    files: [
+      {
+        pathComponents: ["named-check-fixture.txt"],
+        mode: "100644",
+        content: new TextEncoder().encode("original\n"),
+      },
+    ],
+  });
+  return { parent, policy, harness, repository };
 }
 
 describe("git adapter", () => {
@@ -239,7 +264,180 @@ describe("git adapter", () => {
         .sort(),
     ).toEqual(["remote-main", "repo-main"]);
 
+    await recovered.close();
     await recovered.cleanup();
     rmSync(parent, { recursive: true, force: true });
   });
+
+  it("fails named-check replay conflicts closed instead of fabricating valid results", async () => {
+    const { parent, harness, repository } = await createHarnessWithRepository();
+    await harness.createWorktree({
+      operationId: "worktree-check-replay-1",
+      registrationId: "check-replay-1",
+      sourceRegistrationId: "repo-main",
+      role: "named-check",
+      checkId: "fixture-pass",
+      candidateCommit: repository.post!.headCommit,
+      candidateTree: repository.post!.headTree,
+    });
+    const first = await harness.runNamedCheckV1({
+      operationId: "check-op",
+      registrationId: "check-replay-1",
+      checkId: "fixture-pass",
+      attempt: 1,
+    });
+    expect(first.valid).toBe(true);
+    const conflict = await harness.runNamedCheckV1({
+      operationId: "check-op",
+      registrationId: "check-replay-1",
+      checkId: "fixture-pass",
+      attempt: 2,
+    });
+    expect(conflict.valid).toBe(false);
+    if (!conflict.valid) {
+      expect(conflict.errors[0]?.code).toBe("operation-replay-conflict");
+    }
+    rmSync(parent, { recursive: true, force: true });
+  });
+
+  it("rejects undeclared git config before later operations", async () => {
+    const { parent, harness } = await createHarnessWithRepository();
+    const described = __testOnlyDescribeFixtureHarnessV1(harness);
+    const repoPath = described.registrations.find(
+      (entry) => entry.registrationId === "repo-main",
+    )?.path;
+    expect(repoPath).toBeDefined();
+    writeFileSync(
+      join(repoPath!, ".git", "config"),
+      `${readFileSync(join(repoPath!, ".git", "config"), "utf8")}\n[alias]\n\tzzz = status\n`,
+      "utf8",
+    );
+    await expect(harness.inspectWorktrees("inspect-alias-1")).rejects.toThrow(
+      /repository identity drift/i,
+    );
+    rmSync(parent, { recursive: true, force: true });
+  });
+
+  it("writes staged immutable ledger records and recovers prepared or unknown operations", async () => {
+    const parent = createTrustedParent();
+    const policy = createPolicy(parent);
+    const harness = await createFixtureRepositoryHarnessV1(policy, {
+      runId: "run-ledger-1",
+      taskId: "task-ledger-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    });
+    const repo = await harness.createRepository({
+      operationId: "repo-ledger-1",
+      registrationId: "repo-ledger-main",
+      files: [
+        {
+          pathComponents: ["README.md"],
+          mode: "100644",
+          content: new TextEncoder().encode("fixture\n"),
+        },
+      ],
+    });
+    expect(repo.outcome).toBe("applied");
+    const described = __testOnlyDescribeFixtureHarnessV1(harness);
+    const operationRoots = readdirSync(
+      join(described.rootPath, "metadata", "operations"),
+    );
+    const stageFiles = readdirSync(
+      join(described.rootPath, "metadata", "operations", operationRoots[0]!),
+    ).sort();
+    expect(stageFiles).toEqual([
+      "000001-prepared.json",
+      "000002-effect-started.json",
+      "000003-effect-observed.json",
+      "000004-completed.json",
+    ]);
+
+    __testOnlySetFixtureFaultV1(harness, "create-repository:after-prepared");
+    await expect(
+      harness.createRepository({
+        operationId: "repo-ledger-prepared",
+        registrationId: "repo-ledger-prepared",
+        files: [
+          {
+            pathComponents: ["file.txt"],
+            mode: "100644",
+            content: new TextEncoder().encode("x"),
+          },
+        ],
+      }),
+    ).rejects.toThrow(/fixture injected fault/i);
+    const recoveredPrepared = await recoverFixtureRepositoryHarnessV1(policy, {
+      runId: "run-ledger-1",
+      taskId: "task-ledger-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    });
+    const preparedReplay = await recoveredPrepared.createRepository({
+      operationId: "repo-ledger-prepared",
+      registrationId: "repo-ledger-prepared",
+      files: [
+        {
+          pathComponents: ["file.txt"],
+          mode: "100644",
+          content: new TextEncoder().encode("x"),
+        },
+      ],
+    });
+    expect(preparedReplay.outcome).toBe("not-applied");
+
+    const recoveredDesc = __testOnlyDescribeFixtureHarnessV1(recoveredPrepared);
+    const repoMainPath = recoveredDesc.registrations.find(
+      (entry) => entry.registrationId === "repo-ledger-main",
+    )?.path;
+    const headCommit = spawnSync(
+      gitExecutable(),
+      ["-C", repoMainPath!, "rev-parse", "HEAD^{commit}"],
+      { encoding: "utf8" },
+    ).stdout.trim();
+    const headTree = spawnSync(
+      gitExecutable(),
+      ["-C", repoMainPath!, "rev-parse", "HEAD^{tree}"],
+      { encoding: "utf8" },
+    ).stdout.trim();
+    await recoveredPrepared.createWorktree({
+      operationId: "worktree-ledger-check",
+      registrationId: "check-ledger-1",
+      sourceRegistrationId: "repo-ledger-main",
+      role: "named-check",
+      checkId: "fixture-pass",
+      candidateCommit: headCommit,
+      candidateTree: headTree,
+    });
+    __testOnlySetFixtureFaultV1(
+      recoveredPrepared,
+      "named-check:after-effect-started",
+    );
+    await expect(
+      recoveredPrepared.runNamedCheckV1({
+        operationId: "named-check-ledger-1",
+        registrationId: "check-ledger-1",
+        checkId: "fixture-pass",
+        attempt: 1,
+      }),
+    ).rejects.toThrow(/fixture injected fault/i);
+    const recoveredUnknown = await recoverFixtureRepositoryHarnessV1(policy, {
+      runId: "run-ledger-1",
+      taskId: "task-ledger-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    });
+    const unknown = await recoveredUnknown.runNamedCheckV1({
+      operationId: "named-check-ledger-1",
+      registrationId: "check-ledger-1",
+      checkId: "fixture-pass",
+      attempt: 1,
+    });
+    expect(unknown.valid).toBe(true);
+    if (unknown.valid) {
+      expect(unknown.value.outcome).toBe("outcome-unknown");
+      expect(unknown.value.diagnostic?.code).toBe("outcome-unknown");
+    }
+    rmSync(parent, { recursive: true, force: true });
+  }, 20_000);
 });
