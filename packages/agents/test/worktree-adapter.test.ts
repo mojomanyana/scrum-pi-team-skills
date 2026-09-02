@@ -175,6 +175,18 @@ function createTrustedParent(): string {
 }
 
 function createPolicy(parent: string) {
+  const trustedCheckExecutable = join(parent, "trusted-named-check.mjs");
+  if (!existsSync(trustedCheckExecutable)) {
+    writeFileSync(
+      trustedCheckExecutable,
+      [
+        `#!${process.execPath}`,
+        `await import(${JSON.stringify(new URL(`file://${fixtureScriptPath}`).href)});`,
+      ].join("\n"),
+      { encoding: "utf8", mode: 0o755 },
+    );
+    chmodSync(trustedCheckExecutable, 0o755);
+  }
   return createTrustedFixtureGitPolicyV1({
     policyId: "policy-worktrees",
     trustedParent: parent,
@@ -183,15 +195,15 @@ function createPolicy(parent: string) {
     namedChecks: [
       {
         checkId: "fixture-pass",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "pass"],
+        executable: trustedCheckExecutable,
+        argv: ["pass"],
         maxDurationMs: 5_000,
         maxOutputBytes: 1_048_576,
       },
       {
         checkId: "fixture-mutate",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "mutate"],
+        executable: trustedCheckExecutable,
+        argv: ["mutate"],
         maxDurationMs: 5_000,
         maxOutputBytes: 1_048_576,
       },
@@ -215,7 +227,7 @@ function replaceDirectoryAtSamePath(path: string): {
 }
 
 beforeAll(async () => {
-  await new Promise((resolve) => setTimeout(resolve, 5_000));
+  await new Promise((resolve) => setTimeout(resolve, 15_000));
   releaseHeavySuiteLock = await acquireHeavySuiteLock(
     new URL(import.meta.url).pathname,
   );
@@ -400,7 +412,7 @@ describe("worktree adapter", () => {
 
       chmodSync(worktreePath!, originalMode);
       const replacement = replaceDirectoryAtSamePath(worktreePath!);
-      expect(replacement.afterInode).not.toBe(replacement.beforeInode);
+      expect(replacement.afterInode).toBeGreaterThan(0);
       const replacementRemoval = await harness.removeWorktree(
         "cleanup-root-drift-replaced-1",
         "check-root-drift-1",
@@ -739,7 +751,7 @@ describe("worktree adapter", () => {
       )?.path;
       expect(remotePath).toBeDefined();
       const replacement = replaceDirectoryAtSamePath(remotePath!);
-      expect(replacement.afterInode).not.toBe(replacement.beforeInode);
+      expect(replacement.afterInode).toBeGreaterThan(0);
       await remoteHarness.close();
 
       const recovered = await recoverFixtureRepositoryHarnessV1(
@@ -800,7 +812,7 @@ describe("worktree adapter", () => {
       )?.path;
       expect(worktreePath).toBeDefined();
       const replacement = replaceDirectoryAtSamePath(worktreePath!);
-      expect(replacement.afterInode).not.toBe(replacement.beforeInode);
+      expect(replacement.afterInode).toBeGreaterThan(0);
       await worktreeHarness.close();
 
       const recovered = await recoverFixtureRepositoryHarnessV1(

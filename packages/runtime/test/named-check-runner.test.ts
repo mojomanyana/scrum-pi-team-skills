@@ -2,6 +2,7 @@ import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -35,6 +36,20 @@ import {
 
 const fixtureScriptPath = new URL("./fixtures/named-check.mjs", import.meta.url)
   .pathname;
+const trustedCheckRoot = mkdtempSync(
+  join(tmpdir(), "named-check-trusted-executable-"),
+);
+chmodSync(trustedCheckRoot, 0o700);
+const trustedCheckExecutable = join(trustedCheckRoot, "named-check.mjs");
+writeFileSync(
+  trustedCheckExecutable,
+  [
+    `#!${process.execPath}`,
+    `await import(${JSON.stringify(new URL(`file://${fixtureScriptPath}`).href)});`,
+  ].join("\n"),
+  { encoding: "utf8", mode: 0o755 },
+);
+chmodSync(trustedCheckExecutable, 0o755);
 const emptyDigest = createHash("sha256").digest("hex");
 const candidateCommit = "a".repeat(64);
 const candidateTree = "b".repeat(64);
@@ -157,50 +172,50 @@ function createAuthority() {
     checks: [
       {
         checkId: "fixture-pass",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "pass"],
+        executable: trustedCheckExecutable,
+        argv: ["pass"],
         maxDurationMs: 5_000,
         maxOutputBytes: 1_048_576,
       },
       {
         checkId: "fixture-fail",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "fail"],
+        executable: trustedCheckExecutable,
+        argv: ["fail"],
         maxDurationMs: 5_000,
         maxOutputBytes: 1_048_576,
       },
       {
         checkId: "fixture-mutate",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "mutate"],
+        executable: trustedCheckExecutable,
+        argv: ["mutate"],
         maxDurationMs: 5_000,
         maxOutputBytes: 1_048_576,
       },
       {
         checkId: "fixture-mutate-restore",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "mutate-restore"],
+        executable: trustedCheckExecutable,
+        argv: ["mutate-restore"],
         maxDurationMs: 5_000,
         maxOutputBytes: 1_048_576,
       },
       {
         checkId: "fixture-hang",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "hang"],
+        executable: trustedCheckExecutable,
+        argv: ["hang"],
         maxDurationMs: 250,
         maxOutputBytes: 1_048_576,
       },
       {
         checkId: "fixture-descendant",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "spawn-descendant"],
+        executable: trustedCheckExecutable,
+        argv: ["spawn-descendant"],
         maxDurationMs: 1_000,
         maxOutputBytes: 1_048_576,
       },
       {
         checkId: "fixture-overflow",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "emit-overflow"],
+        executable: trustedCheckExecutable,
+        argv: ["emit-overflow"],
         maxDurationMs: 5_000,
         maxOutputBytes: 16 * 1024,
       },
@@ -379,7 +394,7 @@ function createScriptedProcessAdapter(
 }
 
 beforeAll(async () => {
-  await new Promise((resolve) => setTimeout(resolve, 5_000));
+  await new Promise((resolve) => setTimeout(resolve, 15_000));
   releaseHeavySuiteLock = await acquireHeavySuiteLock(
     new URL(import.meta.url).pathname,
   );
@@ -388,6 +403,7 @@ beforeAll(async () => {
 afterAll(() => {
   releaseHeavySuiteLock?.();
   releaseHeavySuiteLock = undefined;
+  rmSync(trustedCheckRoot, { recursive: true, force: true });
 });
 
 describe("named-check-runner", () => {
@@ -440,8 +456,8 @@ describe("named-check-runner", () => {
     expect(value.workspaceTreeAfter).toBe(candidateTree);
     expect(value.stdoutDigest).not.toBe(emptyDigest);
     expect(captured).toMatchObject({
-      executable: process.execPath,
-      argv: [fixtureScriptPath, "pass"],
+      executable: trustedCheckExecutable,
+      argv: ["pass"],
       options: {
         cwd: workspace.root,
         shell: false,
