@@ -303,6 +303,43 @@ interface CreateRepositoryOperationRequestV1 {
   readonly expectedBranch: "fixture-main";
 }
 
+interface CreateBareRemoteOperationRequestV1 {
+  readonly registrationId: string;
+  readonly sourceRegistrationId: string;
+  readonly expectedConfigDigest: string;
+  readonly expectedObjectFormat: "sha256";
+  readonly expectedBranch: "fixture-main";
+  readonly expectedCommit: string;
+  readonly expectedTree: string;
+  readonly expectedSourceCommonDirectoryDigest: string;
+}
+
+interface CreateWorktreeOperationRequestV1 {
+  readonly registrationId: string;
+  readonly sourceRegistrationId: string;
+  readonly role: FixtureWorktreeRoleV1;
+  readonly checkId: string | null;
+  readonly candidateCommit: string;
+  readonly candidateTree: string;
+  readonly expectedConfigDigest: string;
+  readonly expectedObjectFormat: "sha256";
+  readonly expectedDetached: true;
+  readonly expectedCommonDirectoryDigest: string;
+}
+
+interface RemoveWorktreeOperationRequestV1 {
+  readonly registrationId: string;
+  readonly sourceRegistrationId: string;
+  readonly role: Exclude<FixtureWorktreeRoleV1, "principal-candidate">;
+  readonly checkId: string | null;
+  readonly candidateCommit: string;
+  readonly candidateTree: string;
+  readonly expectedConfigDigest: string;
+  readonly expectedObjectFormat: "sha256";
+  readonly expectedDetached: true;
+  readonly expectedCommonDirectoryDigest: string;
+}
+
 interface OperationStateV1 {
   readonly operationId: string;
   readonly kind: OperationKindV1;
@@ -847,8 +884,8 @@ function createRootManifest(state: HarnessStateV1): RootManifestV1 {
   });
 }
 
-function createRunDirectories(rootPath: string): HarnessStateV1["directories"] {
-  const directories = {
+function buildRunDirectories(rootPath: string): HarnessStateV1["directories"] {
+  return {
     home: join(rootPath, "home"),
     hooksDisabled: join(rootPath, "hooks-disabled"),
     repositories: join(rootPath, "repositories"),
@@ -860,6 +897,10 @@ function createRunDirectories(rootPath: string): HarnessStateV1["directories"] {
     operations: join(rootPath, "metadata", "operations"),
     registrations: join(rootPath, "metadata", "registrations"),
   };
+}
+
+function createRunDirectories(rootPath: string): HarnessStateV1["directories"] {
+  const directories = buildRunDirectories(rootPath);
   for (const directory of ROOT_DIR_NAMES) {
     mkdirSync(join(rootPath, directory), { recursive: true, mode: 0o700 });
   }
@@ -879,6 +920,62 @@ function deriveRunDigest(
     expectedBaseCommit: options.expectedBaseCommit,
     expectedBaseTree: options.expectedBaseTree,
   });
+}
+
+function recoveryIntegrityError(): TypeError {
+  return new TypeError(
+    "fixture recovery requires intact immutable ledger evidence",
+  );
+}
+
+function assertExactEntrySet(
+  directoryPath: string,
+  expected: Readonly<Record<string, "file" | "directory">>,
+): void {
+  const entries = readdirSync(directoryPath, { withFileTypes: true }).sort(
+    (left, right) => left.name.localeCompare(right.name),
+  );
+  const expectedNames = Object.keys(expected).sort((left, right) =>
+    left.localeCompare(right),
+  );
+  if (entries.length !== expectedNames.length) throw recoveryIntegrityError();
+  for (const entry of entries) {
+    const expectedType = expected[entry.name];
+    if (!expectedType) throw recoveryIntegrityError();
+    const stat = lstatSync(join(directoryPath, entry.name));
+    if (stat.isSymbolicLink()) throw recoveryIntegrityError();
+    if (
+      (expectedType === "directory" && !stat.isDirectory()) ||
+      (expectedType === "file" && !stat.isFile())
+    ) {
+      throw recoveryIntegrityError();
+    }
+  }
+}
+
+function validateRecoveryRootTopology(
+  rootPath: string,
+  directories: HarnessStateV1["directories"],
+): void {
+  assertExactEntrySet(
+    rootPath,
+    Object.freeze(
+      Object.fromEntries(
+        ROOT_DIR_NAMES.map((name) => [name, "directory"] as const),
+      ),
+    ),
+  );
+  assertExactEntrySet(
+    directories.metadata,
+    Object.freeze({
+      [ROOT_MANIFEST_FILE]: "file",
+      operations: "directory",
+      registrations: "directory",
+    }),
+  );
+  snapshotDirectoryIdentity(directories.transactions);
+  snapshotDirectoryIdentity(directories.operations);
+  snapshotDirectoryIdentity(directories.registrations);
 }
 
 function findMatchingHarnessRoots(
@@ -1524,6 +1621,21 @@ function parseWorktreeList(
   return worktrees;
 }
 
+function worktreeSetContainsPath(
+  state: HarnessStateV1,
+  sourcePath: string,
+  worktreePath: string,
+  allowClosed = false,
+): boolean {
+  const pathDigest = pathDigestForRelative(worktreePath);
+  return parseWorktreeList(state, sourcePath, allowClosed).some(
+    (entry) =>
+      typeof entry === "object" &&
+      entry !== null &&
+      (entry as { readonly pathDigest?: unknown }).pathDigest === pathDigest,
+  );
+}
+
 function countGitObjects(
   state: HarnessStateV1,
   cwd: string,
@@ -1668,6 +1780,33 @@ function observeRepositoryState(
       ),
       worktreeSetDigest,
     }),
+  };
+}
+
+function observeBareRepositoryState(
+  state: HarnessStateV1,
+  cwd: string,
+  allowClosed = false,
+): {
+  readonly repositoryIdentity: FixtureRepositoryObservationV1["repositoryIdentity"];
+  readonly headCommit: string;
+  readonly headTree: string;
+  readonly branch: string | null;
+} {
+  assertHostileStateAbsent(state, cwd, allowClosed);
+  countGitObjects(state, cwd, allowClosed);
+  return {
+    repositoryIdentity: {
+      commonDirectoryDigest: directoryDigest(snapshotDirectoryIdentity(cwd)),
+      objectFormat: readObjectFormat(state, cwd, allowClosed),
+    },
+    headCommit: runGit(state, cwd, ["rev-parse", "--verify", "HEAD^{commit}"], {
+      allowClosed,
+    }).stdout.trim(),
+    headTree: runGit(state, cwd, ["rev-parse", "HEAD^{tree}"], {
+      allowClosed,
+    }).stdout.trim(),
+    branch: readBranch(state, cwd, allowClosed),
   };
 }
 
@@ -1878,6 +2017,27 @@ function createObservation(
     ...unsigned,
     observationDigest: computeFixtureRepositoryObservationDigestV1(unsigned),
   });
+}
+
+function completeRecoveredOperation(
+  state: HarnessStateV1,
+  operation: OperationStateV1,
+  result: unknown,
+): void {
+  const completed = writeOperationStage(state, {
+    operationId: operation.operationId,
+    kind: operation.kind,
+    registrationId: operation.registrationId,
+    registrationDigest: operation.registrationDigest,
+    requestDigest: operation.requestDigest,
+    request: operation.request,
+    sequence: 4,
+    stage: "completed",
+    priorRecordDigest: operation.latestRecordDigest,
+    terminalState: terminalStateForResult(result),
+    result,
+  });
+  storeOperationState(state, completed);
 }
 
 function conflictResult(
@@ -2259,6 +2419,241 @@ function createRepositoryRecoveryConflict(
       repositoryIdentity,
     }),
   });
+}
+
+function readWorktreeRole(value: unknown): FixtureWorktreeRoleV1 | null {
+  return value === "principal-candidate" ||
+    value === "independent-verifier" ||
+    value === "named-check"
+    ? value
+    : null;
+}
+
+function createBareRemoteOperationRequest(
+  request: CreateBareRemoteRequestV1,
+  source: RegistrationStateV1,
+): CreateBareRemoteOperationRequestV1 {
+  if (source.candidateCommit === null || source.candidateTree === null) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["registration-conflict"],
+    );
+  }
+  return Object.freeze({
+    registrationId: request.registrationId,
+    sourceRegistrationId: request.sourceRegistrationId,
+    expectedConfigDigest: expectedGitConfigDigest(true),
+    expectedObjectFormat: "sha256",
+    expectedBranch: "fixture-main",
+    expectedCommit: source.candidateCommit,
+    expectedTree: source.candidateTree,
+    expectedSourceCommonDirectoryDigest: source.commonDirectoryDigest,
+  });
+}
+
+function readCreateBareRemoteOperationRequest(
+  value: unknown,
+): CreateBareRemoteOperationRequestV1 | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const request = value as Record<string, unknown>;
+  if (
+    typeof request.registrationId !== "string" ||
+    !SAFE_ID_PATTERN.test(request.registrationId) ||
+    typeof request.sourceRegistrationId !== "string" ||
+    !SAFE_ID_PATTERN.test(request.sourceRegistrationId) ||
+    request.expectedConfigDigest !== expectedGitConfigDigest(true) ||
+    request.expectedObjectFormat !== "sha256" ||
+    request.expectedBranch !== "fixture-main" ||
+    typeof request.expectedCommit !== "string" ||
+    !OBJECT_ID_PATTERN.test(request.expectedCommit) ||
+    typeof request.expectedTree !== "string" ||
+    !OBJECT_ID_PATTERN.test(request.expectedTree) ||
+    typeof request.expectedSourceCommonDirectoryDigest !== "string" ||
+    !SHA256_HEX_PATTERN.test(request.expectedSourceCommonDirectoryDigest)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    registrationId: request.registrationId,
+    sourceRegistrationId: request.sourceRegistrationId,
+    expectedConfigDigest: request.expectedConfigDigest,
+    expectedObjectFormat: request.expectedObjectFormat,
+    expectedBranch: request.expectedBranch,
+    expectedCommit: request.expectedCommit,
+    expectedTree: request.expectedTree,
+    expectedSourceCommonDirectoryDigest:
+      request.expectedSourceCommonDirectoryDigest,
+  });
+}
+
+function createWorktreeOperationRequest(
+  request: RegisterWorktreeRequestV1,
+  source: RegistrationStateV1,
+): CreateWorktreeOperationRequestV1 {
+  return Object.freeze({
+    registrationId: request.registrationId,
+    sourceRegistrationId: request.sourceRegistrationId,
+    role: request.role,
+    checkId: request.checkId,
+    candidateCommit: request.candidateCommit,
+    candidateTree: request.candidateTree,
+    expectedConfigDigest: expectedGitConfigDigest(false),
+    expectedObjectFormat: "sha256",
+    expectedDetached: true,
+    expectedCommonDirectoryDigest: source.commonDirectoryDigest,
+  });
+}
+
+function readCreateWorktreeOperationRequest(
+  value: unknown,
+): CreateWorktreeOperationRequestV1 | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const request = value as Record<string, unknown>;
+  const role = readWorktreeRole(request.role);
+  if (
+    typeof request.registrationId !== "string" ||
+    !SAFE_ID_PATTERN.test(request.registrationId) ||
+    typeof request.sourceRegistrationId !== "string" ||
+    !SAFE_ID_PATTERN.test(request.sourceRegistrationId) ||
+    role === null ||
+    role === "principal-candidate" ||
+    (request.checkId !== null &&
+      (typeof request.checkId !== "string" ||
+        !SAFE_ID_PATTERN.test(request.checkId))) ||
+    typeof request.candidateCommit !== "string" ||
+    !OBJECT_ID_PATTERN.test(request.candidateCommit) ||
+    typeof request.candidateTree !== "string" ||
+    !OBJECT_ID_PATTERN.test(request.candidateTree) ||
+    request.expectedConfigDigest !== expectedGitConfigDigest(false) ||
+    request.expectedObjectFormat !== "sha256" ||
+    request.expectedDetached !== true ||
+    typeof request.expectedCommonDirectoryDigest !== "string" ||
+    !SHA256_HEX_PATTERN.test(request.expectedCommonDirectoryDigest)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    registrationId: request.registrationId,
+    sourceRegistrationId: request.sourceRegistrationId,
+    role,
+    checkId: request.checkId,
+    candidateCommit: request.candidateCommit,
+    candidateTree: request.candidateTree,
+    expectedConfigDigest: request.expectedConfigDigest,
+    expectedObjectFormat: request.expectedObjectFormat,
+    expectedDetached: request.expectedDetached,
+    expectedCommonDirectoryDigest: request.expectedCommonDirectoryDigest,
+  });
+}
+
+function createRemoveWorktreeOperationRequest(
+  registration: RegistrationStateV1,
+): RemoveWorktreeOperationRequestV1 {
+  if (
+    registration.sourceRegistrationId === null ||
+    registration.role === "principal-candidate" ||
+    registration.role === "fixture-remote" ||
+    registration.candidateCommit === null ||
+    registration.candidateTree === null
+  ) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["registration-conflict"],
+    );
+  }
+  return Object.freeze({
+    registrationId: registration.registrationId,
+    sourceRegistrationId: registration.sourceRegistrationId,
+    role: registration.role,
+    checkId: registration.checkId,
+    candidateCommit: registration.candidateCommit,
+    candidateTree: registration.candidateTree,
+    expectedConfigDigest: expectedGitConfigDigest(false),
+    expectedObjectFormat: "sha256",
+    expectedDetached: true,
+    expectedCommonDirectoryDigest: registration.commonDirectoryDigest,
+  });
+}
+
+function readRemoveWorktreeOperationRequest(
+  value: unknown,
+): RemoveWorktreeOperationRequestV1 | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const request = value as Record<string, unknown>;
+  const role = readWorktreeRole(request.role);
+  if (
+    typeof request.registrationId !== "string" ||
+    !SAFE_ID_PATTERN.test(request.registrationId) ||
+    typeof request.sourceRegistrationId !== "string" ||
+    !SAFE_ID_PATTERN.test(request.sourceRegistrationId) ||
+    role === null ||
+    role === "principal-candidate" ||
+    (request.checkId !== null &&
+      (typeof request.checkId !== "string" ||
+        !SAFE_ID_PATTERN.test(request.checkId))) ||
+    typeof request.candidateCommit !== "string" ||
+    !OBJECT_ID_PATTERN.test(request.candidateCommit) ||
+    typeof request.candidateTree !== "string" ||
+    !OBJECT_ID_PATTERN.test(request.candidateTree) ||
+    request.expectedConfigDigest !== expectedGitConfigDigest(false) ||
+    request.expectedObjectFormat !== "sha256" ||
+    request.expectedDetached !== true ||
+    typeof request.expectedCommonDirectoryDigest !== "string" ||
+    !SHA256_HEX_PATTERN.test(request.expectedCommonDirectoryDigest)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    registrationId: request.registrationId,
+    sourceRegistrationId: request.sourceRegistrationId,
+    role,
+    checkId: request.checkId,
+    candidateCommit: request.candidateCommit,
+    candidateTree: request.candidateTree,
+    expectedConfigDigest: request.expectedConfigDigest,
+    expectedObjectFormat: request.expectedObjectFormat,
+    expectedDetached: request.expectedDetached,
+    expectedCommonDirectoryDigest: request.expectedCommonDirectoryDigest,
+  });
+}
+
+function createRecoveryUnknownObservation(
+  state: HarnessStateV1,
+  operation: OperationStateV1,
+  registrationId: string,
+  operationKind: FixtureRepositoryObservationV1["operationKind"],
+  purpose: FixtureRepositoryObservationV1["purpose"],
+  repositoryIdentity?: FixtureRepositoryObservationV1["repositoryIdentity"],
+): FixtureRepositoryObservationV1 {
+  return operationConflictObservation(state, {
+    operationId: operation.operationId,
+    registrationId,
+    operationKind,
+    purpose,
+    requestDigest: operation.requestDigest,
+    diagnosticCode: "outcome-unknown",
+    repositoryIdentity,
+  });
+}
+
+function registrationMatchesWorktreeRequest(
+  registration: RegistrationStateV1,
+  request: CreateWorktreeOperationRequestV1 | RemoveWorktreeOperationRequestV1,
+  expectedState: RegistrationStateV1["state"],
+): boolean {
+  return (
+    registration.state === expectedState &&
+    registration.role === request.role &&
+    registration.sourceRegistrationId === request.sourceRegistrationId &&
+    registration.checkId === request.checkId &&
+    registration.candidateCommit === request.candidateCommit &&
+    registration.candidateTree === request.candidateTree &&
+    registration.commonDirectoryDigest === request.expectedCommonDirectoryDigest
+  );
 }
 
 function requestDigestForRepository(
@@ -3121,16 +3516,23 @@ function loadRegistrationState(state: HarnessStateV1): void {
         : record.role === "principal-candidate"
           ? join(state.directories.repositories, digest)
           : join(state.directories.worktrees, digest);
-    const commonDirectory = existsSync(path)
-      ? record.role === "fixture-remote"
-        ? path
-        : readGitCommonDir(state, path)
-      : path;
-    const adminDirectory = existsSync(path)
-      ? record.role === "fixture-remote"
-        ? path
-        : readGitAbsoluteDir(state, path)
-      : path;
+    let commonDirectory = path;
+    let adminDirectory = path;
+    if (existsSync(path)) {
+      try {
+        commonDirectory =
+          record.role === "fixture-remote"
+            ? path
+            : readGitCommonDir(state, path);
+        adminDirectory =
+          record.role === "fixture-remote"
+            ? path
+            : readGitAbsoluteDir(state, path);
+      } catch {
+        commonDirectory = path;
+        adminDirectory = path;
+      }
+    }
     let configState: {
       readonly digest: string;
       readonly bare: boolean;
@@ -3165,21 +3567,131 @@ function loadRegistrationState(state: HarnessStateV1): void {
   }
 }
 
-function loadOperationStates(state: HarnessStateV1): void {
-  if (!existsSync(state.directories.operations)) return;
-  for (const operationDigestValue of readdirSync(
-    state.directories.operations,
-  )) {
-    const directory = join(state.directories.operations, operationDigestValue);
-    if (!statSync(directory).isDirectory()) continue;
-    const records = readdirSync(directory)
-      .filter((entry) => entry.endsWith(".json"))
-      .sort()
-      .map((entry) => loadStageRecord(join(directory, entry)));
-    if (records.length === 0) continue;
-    const latest = records.at(-1)!;
-    storeOperationState(state, latest);
+function validateLoadedOperationRecords(
+  state: HarnessStateV1,
+  operationDigestValue: string,
+  filenames: readonly string[],
+  records: readonly OperationStageRecordV1[],
+): void {
+  const expectedPrefix: readonly OperationStageV1[] = [
+    "prepared",
+    "effect-started",
+    "effect-observed",
+  ];
+  if (records.length === 0 || records.length > 4) {
+    throw recoveryIntegrityError();
   }
+  const expectedPairs: Array<readonly [number, OperationStageV1]> = [];
+  for (let index = 0; index < records.length; index += 1) {
+    if (
+      index === records.length - 1 &&
+      records.length > 1 &&
+      records[index]!.stage === "completed"
+    ) {
+      expectedPairs.push([4, "completed"]);
+      break;
+    }
+    if (index >= expectedPrefix.length) {
+      throw recoveryIntegrityError();
+    }
+    expectedPairs.push([index + 1, expectedPrefix[index]!]);
+  }
+  if (expectedPairs.length !== records.length || expectedPairs[0]?.[0] !== 1) {
+    throw recoveryIntegrityError();
+  }
+  let priorRecordDigest: string | null = null;
+  const first = records[0]!;
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!;
+    const [expectedSequence, expectedStage] = expectedPairs[index]!;
+    if (
+      filenames[index] !== stageFilename(expectedSequence, expectedStage) ||
+      record.runDigest !== state.runDigest ||
+      record.manifestDigest !== state.manifest.manifestDigest ||
+      record.operationDigest !== operationDigestValue ||
+      record.operationDigest !==
+        operationDigest(state.runDigest, record.operationId) ||
+      record.sequence !== expectedSequence ||
+      record.stage !== expectedStage ||
+      record.kind !== first.kind ||
+      record.registrationId !== first.registrationId ||
+      record.registrationDigest !== first.registrationDigest ||
+      record.requestDigest !== first.requestDigest ||
+      canonicalizeGitCheckFixtureValueV1(record.request) !==
+        canonicalizeGitCheckFixtureValueV1(first.request) ||
+      record.priorRecordDigest !== priorRecordDigest ||
+      (record.result === null) !== (record.resultDigest === null) ||
+      (record.result !== null &&
+        record.resultDigest !== stageResultDigest(record.result))
+    ) {
+      throw recoveryIntegrityError();
+    }
+    priorRecordDigest = record.recordDigest;
+  }
+}
+
+function validateTransactionHints(state: HarnessStateV1): void {
+  const entries = readdirSync(state.directories.transactions, {
+    withFileTypes: true,
+  }).sort((left, right) => left.name.localeCompare(right.name));
+  const expectedNames = [...state.operations.values()]
+    .map((operation) => ({
+      name: `${operationDigest(state.runDigest, operation.operationId)}.head`,
+      operation,
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  if (entries.length !== expectedNames.length) throw recoveryIntegrityError();
+  for (const [index, entry] of entries.entries()) {
+    const expected = expectedNames[index];
+    if (!expected || entry.name !== expected.name) {
+      throw recoveryIntegrityError();
+    }
+    const stat = lstatSync(join(state.directories.transactions, entry.name));
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw recoveryIntegrityError();
+    }
+    const hint = readCanonicalJson<{
+      readonly sequence: number;
+      readonly recordDigest: string;
+    }>(join(state.directories.transactions, entry.name));
+    if (
+      hint.sequence !== expected.operation.latestSequence ||
+      hint.recordDigest !== expected.operation.latestRecordDigest
+    ) {
+      throw recoveryIntegrityError();
+    }
+  }
+}
+
+function loadOperationStates(state: HarnessStateV1): void {
+  const operationEntries = readdirSync(state.directories.operations, {
+    withFileTypes: true,
+  }).sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of operationEntries) {
+    const directory = join(state.directories.operations, entry.name);
+    const stat = lstatSync(directory);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw recoveryIntegrityError();
+    }
+    const filenames = readdirSync(directory).sort((left, right) =>
+      left.localeCompare(right),
+    );
+    if (
+      filenames.length === 0 ||
+      filenames.some((filename) => !filename.endsWith(".json"))
+    ) {
+      throw recoveryIntegrityError();
+    }
+    const records = filenames.map((filename) =>
+      loadStageRecord(join(directory, filename)),
+    );
+    validateLoadedOperationRecords(state, entry.name, filenames, records);
+    storeOperationState(state, records.at(-1)!);
+  }
+  if (state.registrations.size > 0 && state.operations.size === 0) {
+    throw recoveryIntegrityError();
+  }
+  validateTransactionHints(state);
 }
 
 function recoverIncompleteOperations(state: HarnessStateV1): void {
@@ -3333,6 +3845,369 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
         result,
       });
       storeOperationState(state, completed);
+      continue;
+    }
+    if (operation.kind === "create-bare-remote") {
+      const request = readCreateBareRemoteOperationRequest(operation.request);
+      const remotePath = join(
+        state.directories.remotes,
+        `${tuple.registrationDigest}.git`,
+      );
+      const registration = state.registrations.get(tuple.registrationId);
+      if (!existsSync(remotePath)) {
+        const result =
+          operation.latestStage === "prepared" && registration === undefined
+            ? createObservation(state, {
+                operationId: operation.operationId,
+                registrationId: tuple.registrationId,
+                operationKind: "create-bare-remote",
+                purpose: "fixture-remote",
+                sequence: currentSequence(state),
+                repositoryIdentity: {
+                  commonDirectoryDigest: computeGitCheckFixtureDigestV1(
+                    "spts.fixture-common-directory/1.0.0",
+                    remotePath,
+                  ),
+                  objectFormat: "sha256",
+                },
+                pre: null,
+                post: null,
+                outcome: "not-applied",
+                diagnostic: null,
+                requestDigest: operation.requestDigest,
+              })
+            : createRecoveryUnknownObservation(
+                state,
+                operation,
+                tuple.registrationId,
+                "create-bare-remote",
+                "fixture-remote",
+              );
+        completeRecoveredOperation(state, operation, result);
+        continue;
+      }
+      if (!request) {
+        completeRecoveredOperation(
+          state,
+          operation,
+          createRecoveryUnknownObservation(
+            state,
+            operation,
+            tuple.registrationId,
+            "create-bare-remote",
+            "fixture-remote",
+          ),
+        );
+        continue;
+      }
+      try {
+        const configState = validateExactGitConfig(remotePath);
+        const observation = observeBareRepositoryState(state, remotePath, true);
+        const source = state.registrations.get(request.sourceRegistrationId);
+        const exactMatch =
+          registration !== undefined &&
+          registration.state === "retained" &&
+          registration.role === "fixture-remote" &&
+          registration.sourceRegistrationId === request.sourceRegistrationId &&
+          registration.candidateCommit === request.expectedCommit &&
+          registration.candidateTree === request.expectedTree &&
+          registration.commonDirectoryDigest ===
+            observation.repositoryIdentity.commonDirectoryDigest &&
+          configState !== null &&
+          configState.bare &&
+          configState.digest === request.expectedConfigDigest &&
+          observation.repositoryIdentity.objectFormat ===
+            request.expectedObjectFormat &&
+          observation.branch === request.expectedBranch &&
+          observation.headCommit === request.expectedCommit &&
+          observation.headTree === request.expectedTree &&
+          source?.commonDirectoryDigest ===
+            request.expectedSourceCommonDirectoryDigest;
+        const result = exactMatch
+          ? createObservation(state, {
+              operationId: operation.operationId,
+              registrationId: tuple.registrationId,
+              operationKind: "create-bare-remote",
+              purpose: "fixture-remote",
+              sequence: currentSequence(state),
+              repositoryIdentity: observation.repositoryIdentity,
+              pre: null,
+              post: null,
+              outcome: "already-applied",
+              diagnostic: null,
+              requestDigest: operation.requestDigest,
+            })
+          : createRecoveryUnknownObservation(
+              state,
+              operation,
+              tuple.registrationId,
+              "create-bare-remote",
+              "fixture-remote",
+              observation.repositoryIdentity,
+            );
+        completeRecoveredOperation(state, operation, result);
+      } catch {
+        completeRecoveredOperation(
+          state,
+          operation,
+          createRecoveryUnknownObservation(
+            state,
+            operation,
+            tuple.registrationId,
+            "create-bare-remote",
+            "fixture-remote",
+          ),
+        );
+      }
+      continue;
+    }
+    if (operation.kind === "create-worktree") {
+      const request = readCreateWorktreeOperationRequest(operation.request);
+      const worktreePath = join(
+        state.directories.worktrees,
+        tuple.registrationDigest,
+      );
+      const registration = state.registrations.get(tuple.registrationId);
+      if (!existsSync(worktreePath)) {
+        const result =
+          operation.latestStage === "prepared" && registration === undefined
+            ? createObservation(state, {
+                operationId: operation.operationId,
+                registrationId: tuple.registrationId,
+                operationKind: "create-worktree",
+                purpose: request?.role ?? "named-check",
+                sequence: currentSequence(state),
+                repositoryIdentity: {
+                  commonDirectoryDigest:
+                    request?.expectedCommonDirectoryDigest ??
+                    computeGitCheckFixtureDigestV1(
+                      "spts.fixture-common-directory/1.0.0",
+                      worktreePath,
+                    ),
+                  objectFormat: "sha256",
+                },
+                pre: null,
+                post: null,
+                outcome: "not-applied",
+                diagnostic: null,
+                requestDigest: operation.requestDigest,
+              })
+            : createRecoveryUnknownObservation(
+                state,
+                operation,
+                tuple.registrationId,
+                "create-worktree",
+                request?.role ?? "named-check",
+              );
+        completeRecoveredOperation(state, operation, result);
+        continue;
+      }
+      if (!request) {
+        completeRecoveredOperation(
+          state,
+          operation,
+          createRecoveryUnknownObservation(
+            state,
+            operation,
+            tuple.registrationId,
+            "create-worktree",
+            "named-check",
+          ),
+        );
+        continue;
+      }
+      try {
+        const configState = validateExactGitConfig(worktreePath);
+        const observation = observeRepositoryState(state, worktreePath, true);
+        const source = state.registrations.get(request.sourceRegistrationId);
+        const exactMatch =
+          registration !== undefined &&
+          registrationMatchesWorktreeRequest(registration, request, "active") &&
+          configState !== null &&
+          !configState.bare &&
+          configState.digest === request.expectedConfigDigest &&
+          observation.repositoryIdentity.commonDirectoryDigest ===
+            request.expectedCommonDirectoryDigest &&
+          observation.repositoryIdentity.objectFormat ===
+            request.expectedObjectFormat &&
+          observation.state.branch === null &&
+          observation.state.detached === request.expectedDetached &&
+          observation.state.clean &&
+          observation.state.headCommit === request.candidateCommit &&
+          observation.state.headTree === request.candidateTree &&
+          source !== undefined &&
+          source.commonDirectoryDigest ===
+            request.expectedCommonDirectoryDigest &&
+          worktreeSetContainsPath(state, source.path, worktreePath, true);
+        const result = exactMatch
+          ? createObservation(state, {
+              operationId: operation.operationId,
+              registrationId: tuple.registrationId,
+              operationKind: "create-worktree",
+              purpose: request.role,
+              sequence: currentSequence(state),
+              repositoryIdentity: observation.repositoryIdentity,
+              pre: null,
+              post: observation.state,
+              outcome: "already-applied",
+              diagnostic: null,
+              requestDigest: operation.requestDigest,
+            })
+          : createRecoveryUnknownObservation(
+              state,
+              operation,
+              tuple.registrationId,
+              "create-worktree",
+              request.role,
+              observation.repositoryIdentity,
+            );
+        completeRecoveredOperation(state, operation, result);
+      } catch {
+        completeRecoveredOperation(
+          state,
+          operation,
+          createRecoveryUnknownObservation(
+            state,
+            operation,
+            tuple.registrationId,
+            "create-worktree",
+            request.role,
+          ),
+        );
+      }
+      continue;
+    }
+    if (operation.kind === "remove-worktree") {
+      const request = readRemoveWorktreeOperationRequest(operation.request);
+      const registration = state.registrations.get(tuple.registrationId);
+      const source = request
+        ? state.registrations.get(request.sourceRegistrationId)
+        : undefined;
+      const worktreePath = join(
+        state.directories.worktrees,
+        tuple.registrationDigest,
+      );
+      const effectObserved =
+        operation.result as FixtureRepositoryObservationV1 | null;
+      if (!request) {
+        completeRecoveredOperation(
+          state,
+          operation,
+          createRecoveryUnknownObservation(
+            state,
+            operation,
+            tuple.registrationId,
+            "remove-worktree",
+            "named-check",
+          ),
+        );
+        continue;
+      }
+      const adminPath =
+        source === undefined
+          ? null
+          : join(source.commonDirectory, "worktrees", tuple.registrationDigest);
+      if (operation.latestStage === "prepared") {
+        try {
+          const observation = observeRepositoryState(state, worktreePath, true);
+          const configState = validateExactGitConfig(worktreePath);
+          const exactMatch =
+            registration !== undefined &&
+            registrationMatchesWorktreeRequest(
+              registration,
+              request,
+              "active",
+            ) &&
+            source !== undefined &&
+            source.commonDirectoryDigest ===
+              request.expectedCommonDirectoryDigest &&
+            configState !== null &&
+            !configState.bare &&
+            configState.digest === request.expectedConfigDigest &&
+            observation.repositoryIdentity.commonDirectoryDigest ===
+              request.expectedCommonDirectoryDigest &&
+            observation.repositoryIdentity.objectFormat ===
+              request.expectedObjectFormat &&
+            observation.state.branch === null &&
+            observation.state.detached === request.expectedDetached &&
+            observation.state.clean &&
+            observation.state.headCommit === request.candidateCommit &&
+            observation.state.headTree === request.candidateTree &&
+            worktreeSetContainsPath(state, source.path, worktreePath, true);
+          const result = exactMatch
+            ? createObservation(state, {
+                operationId: operation.operationId,
+                registrationId: tuple.registrationId,
+                operationKind: "remove-worktree",
+                purpose: request.role,
+                sequence: currentSequence(state),
+                repositoryIdentity: observation.repositoryIdentity,
+                pre: observation.state,
+                post: observation.state,
+                outcome: "not-applied",
+                diagnostic: null,
+                requestDigest: operation.requestDigest,
+              })
+            : createRecoveryUnknownObservation(
+                state,
+                operation,
+                tuple.registrationId,
+                "remove-worktree",
+                request.role,
+                observation.repositoryIdentity,
+              );
+          completeRecoveredOperation(state, operation, result);
+        } catch {
+          completeRecoveredOperation(
+            state,
+            operation,
+            createRecoveryUnknownObservation(
+              state,
+              operation,
+              tuple.registrationId,
+              "remove-worktree",
+              request.role,
+            ),
+          );
+        }
+        continue;
+      }
+      const exactAbsent =
+        registration !== undefined &&
+        registrationMatchesWorktreeRequest(registration, request, "removed") &&
+        source !== undefined &&
+        source.commonDirectoryDigest ===
+          request.expectedCommonDirectoryDigest &&
+        !existsSync(worktreePath) &&
+        adminPath !== null &&
+        !existsSync(adminPath) &&
+        !worktreeSetContainsPath(state, source.path, worktreePath, true);
+      const result = exactAbsent
+        ? createObservation(state, {
+            operationId: operation.operationId,
+            registrationId: tuple.registrationId,
+            operationKind: "remove-worktree",
+            purpose: request.role,
+            sequence: currentSequence(state),
+            repositoryIdentity: effectObserved?.repositoryIdentity ?? {
+              commonDirectoryDigest: request.expectedCommonDirectoryDigest,
+              objectFormat: "sha256",
+            },
+            pre: effectObserved?.pre ?? null,
+            post: null,
+            outcome: "already-applied",
+            diagnostic: null,
+            requestDigest: operation.requestDigest,
+          })
+        : createRecoveryUnknownObservation(
+            state,
+            operation,
+            tuple.registrationId,
+            "remove-worktree",
+            request.role,
+            effectObserved?.repositoryIdentity,
+          );
+      completeRecoveredOperation(state, operation, result);
       continue;
     }
     if (operation.kind === "named-check") {
@@ -3606,34 +4481,46 @@ export async function recoverFixtureRepositoryHarnessV1(
     );
   }
   for (const rootPath of candidates) {
-    const directories = createRunDirectories(rootPath);
-    const state: HarnessStateV1 = {
-      policyState,
-      runId: options.runId,
-      taskId: options.taskId,
-      expectedBaseCommit: options.expectedBaseCommit,
-      expectedBaseTree: options.expectedBaseTree,
-      runDigest,
-      rootPath,
-      rootIdentity: snapshotDirectoryIdentity(rootPath),
-      manifest: readCanonicalJson<RootManifestV1>(
-        join(directories.metadata, ROOT_MANIFEST_FILE),
-      ),
-      directories,
-      operations: new Map(),
-      operationsByRegistration: new Map(),
-      registrations: new Map(),
-      issuedPermits: new Set(),
-      activeNamedChecks: new Map(),
-      faultPoint: null,
-      status: "active",
-    };
-    if (state.manifest.runDigest !== runDigest) continue;
-    validateRootManifest(state.manifest, state);
-    loadRegistrationState(state);
-    loadOperationStates(state);
-    recoverIncompleteOperations(state);
-    return createHarnessObject(policy, state);
+    try {
+      const directories = buildRunDirectories(rootPath);
+      validateRecoveryRootTopology(rootPath, directories);
+      const state: HarnessStateV1 = {
+        policyState,
+        runId: options.runId,
+        taskId: options.taskId,
+        expectedBaseCommit: options.expectedBaseCommit,
+        expectedBaseTree: options.expectedBaseTree,
+        runDigest,
+        rootPath,
+        rootIdentity: snapshotDirectoryIdentity(rootPath),
+        manifest: readCanonicalJson<RootManifestV1>(
+          join(directories.metadata, ROOT_MANIFEST_FILE),
+        ),
+        directories,
+        operations: new Map(),
+        operationsByRegistration: new Map(),
+        registrations: new Map(),
+        issuedPermits: new Set(),
+        activeNamedChecks: new Map(),
+        faultPoint: null,
+        status: "active",
+      };
+      if (state.manifest.runDigest !== runDigest) continue;
+      validateRootManifest(state.manifest, state);
+      loadRegistrationState(state);
+      loadOperationStates(state);
+      recoverIncompleteOperations(state);
+      return createHarnessObject(policy, state);
+    } catch (error) {
+      if (
+        error instanceof TypeError &&
+        error.message ===
+          FIXTURE_DIAGNOSTIC_MESSAGES_V1["run-identity-conflict"]
+      ) {
+        throw error;
+      }
+      throw recoveryIntegrityError();
+    }
   }
   throw new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1["storage-unavailable"]);
 }
@@ -3839,10 +4726,7 @@ async function createBareRemote(
     registrationId: request.registrationId,
     registrationDigest,
     requestDigest,
-    request: {
-      registrationId: request.registrationId,
-      sourceRegistrationId: request.sourceRegistrationId,
-    },
+    request: createBareRemoteOperationRequest(request, source),
     effect: () => {
       runGit(
         state,
@@ -3979,14 +4863,7 @@ async function createWorktree(
     registrationId: request.registrationId,
     registrationDigest,
     requestDigest,
-    request: {
-      registrationId: request.registrationId,
-      sourceRegistrationId: request.sourceRegistrationId,
-      role: request.role,
-      checkId: request.checkId,
-      candidateCommit: request.candidateCommit,
-      candidateTree: request.candidateTree,
-    },
+    request: createWorktreeOperationRequest(request, source),
     effect: () => {
       runGit(
         state,
@@ -4101,6 +4978,30 @@ async function removeWorktree(
   ensureHarnessState(state);
   validateSafeId("operationId", operationId);
   validateSafeId("registrationId", registrationId);
+  const existingRegistration = state.registrations.get(registrationId);
+  const requestDigest = computeFixtureRepositoryRequestDigestV1({
+    policyId: state.policyState.publicPolicy.policyId,
+    operationId,
+    registrationId,
+    sourceRegistrationId: existingRegistration?.sourceRegistrationId ?? null,
+  });
+  try {
+    const replay = maybeReplay<FixtureRepositoryObservationV1>(
+      state,
+      operationId,
+      requestDigest,
+    );
+    if (replay) return replay;
+  } catch {
+    return operationConflictObservation(state, {
+      operationId,
+      registrationId,
+      operationKind: "remove-worktree",
+      purpose: existingRegistration?.role ?? "named-check",
+      requestDigest,
+      diagnosticCode: "operation-replay-conflict",
+    });
+  }
   const registration = sourceRegistration(state, registrationId);
   if (
     registration.role === "principal-candidate" ||
@@ -4122,12 +5023,6 @@ async function removeWorktree(
       diagnosticCode: "registration-conflict",
     });
   }
-  const requestDigest = computeFixtureRepositoryRequestDigestV1({
-    policyId: state.policyState.publicPolicy.policyId,
-    operationId,
-    registrationId,
-    sourceRegistrationId: registration.sourceRegistrationId,
-  });
   const retentionDiagnostic = registrationRetentionDiagnostic(
     state,
     registrationId,
@@ -4156,23 +5051,6 @@ async function removeWorktree(
       purpose: registration.role,
       requestDigest,
       diagnosticCode: "live-agent-ambiguous",
-    });
-  }
-  try {
-    const replay = maybeReplay<FixtureRepositoryObservationV1>(
-      state,
-      operationId,
-      requestDigest,
-    );
-    if (replay) return replay;
-  } catch {
-    return operationConflictObservation(state, {
-      operationId,
-      registrationId,
-      operationKind: "remove-worktree",
-      purpose: registration.role,
-      requestDigest,
-      diagnosticCode: "operation-replay-conflict",
     });
   }
   let pre;
@@ -4255,10 +5133,7 @@ async function removeWorktree(
     registrationId,
     registrationDigest: registration.registrationDigest,
     requestDigest,
-    request: {
-      registrationId,
-      sourceRegistrationId: registration.sourceRegistrationId,
-    },
+    request: createRemoveWorktreeOperationRequest(registration),
     effect: () => {
       registration.state = "cleanup-pending";
       registration.generation += 1;
