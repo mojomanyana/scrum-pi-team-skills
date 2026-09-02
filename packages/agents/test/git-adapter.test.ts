@@ -321,6 +321,7 @@ async function expectRedactedBoundaryError(
 }
 
 beforeAll(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 5_000));
   releaseHeavySuiteLock = await acquireHeavySuiteLock(
     new URL(import.meta.url).pathname,
   );
