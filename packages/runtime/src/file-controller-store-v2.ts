@@ -2932,10 +2932,42 @@ function lockCurrentTransaction(options: {
   };
 }
 
+function requireProductionAncestorBoundary(
+  rootPath: string,
+  expectedOwner: number,
+): void {
+  const parsed = parse(rootPath);
+  let current = parsed.root;
+  for (const component of rootPath
+    .slice(parsed.root.length)
+    .split(sep)
+    .filter(Boolean)) {
+    const stat = lstatSync(current);
+    if (
+      !stat.isDirectory() ||
+      stat.isSymbolicLink() ||
+      stat.uid !== expectedOwner ||
+      (stat.mode & 0o022) !== 0
+    ) {
+      throw new StoreDeniedError("permission-denied");
+    }
+    current = join(current, component);
+  }
+  const root = lstatSync(rootPath);
+  if (
+    !root.isDirectory() ||
+    root.isSymbolicLink() ||
+    root.uid !== expectedOwner ||
+    (root.mode & 0o777) !== 0o700
+  ) {
+    throw new StoreDeniedError("permission-denied");
+  }
+}
+
 async function openStoreInternal(
   bootstrapInput: unknown,
   options: ControllerStoreTestingOptionsV2 | undefined,
-  productionRefusal: boolean,
+  enforceProductionBoundary: boolean,
 ): Promise<ControllerStoreResultV2<ControllerStoreV2>> {
   let bootstrap: ControllerStoreBootstrapV2;
   let keyBytes: Buffer | null = null;
@@ -2947,8 +2979,16 @@ async function openStoreInternal(
     }
     return denied("invalid-bootstrap");
   }
-  if (productionRefusal) {
-    return denied("permission-denied");
+  if (enforceProductionBoundary) {
+    try {
+      requireProductionAncestorBoundary(
+        bootstrap.rootPath,
+        bootstrap.deploymentAttestation.expectedUid,
+      );
+    } catch (error) {
+      if (error instanceof StoreDeniedError) return denied(error.code);
+      return denied("permission-denied");
+    }
   }
   try {
     keyBytes = keyBytesFromProvider(bootstrap);
@@ -3002,8 +3042,25 @@ async function openStoreInternal(
       }
       if (existsSync(transactionPath(runDir))) {
         requirePrivateDirectory(transactionPath(runDir));
-        if (existsSync(journalPath(runDir)))
-          readJournalEnvelope(runDir, bootstrap.keyProvider.keyId, keyBytes);
+        const allowedTransactionEntries = new Set([
+          JOURNAL_FILE,
+          RECORDS_FILE,
+          RECEIPT_FILE,
+          OPERATION_FILE,
+          TEMP_HEAD_FILE,
+        ]);
+        for (const transactionEntry of readdirSync(transactionPath(runDir), {
+          withFileTypes: true,
+        })) {
+          if (
+            !transactionEntry.isFile() ||
+            !allowedTransactionEntries.has(transactionEntry.name)
+          ) {
+            throw new StoreIntegrityError();
+          }
+        }
+        if (!existsSync(journalPath(runDir))) throw new StoreIntegrityError();
+        readJournalEnvelope(runDir, bootstrap.keyProvider.keyId, keyBytes);
         if (existsSync(recordsPath(runDir)))
           readAuthenticatedRecord({
             path: recordsPath(runDir),
@@ -3031,6 +3088,11 @@ async function openStoreInternal(
       }
     }
   } catch (error) {
+    try {
+      keyBytes?.fill(0);
+    } catch {
+      // Best-effort cleanup of the private opening copy.
+    }
     if (error instanceof StoreDeniedError) {
       return denied(error.code);
     }
@@ -3733,7 +3795,7 @@ export async function openControllerStoreV2(
     if (error instanceof StoreDeniedError) return denied(error.code);
     return denied("invalid-bootstrap");
   }
-  return denied("permission-denied");
+  return openStoreInternal(bootstrapInput, undefined, true);
 }
 
 export async function openControllerStoreV2ForTesting(
