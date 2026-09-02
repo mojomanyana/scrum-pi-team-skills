@@ -1,6 +1,8 @@
 import {
   chmodSync,
   cpSync,
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -23,6 +25,10 @@ import {
   recoverFixtureRepositoryHarnessV1,
   type FixtureLimitsV1,
 } from "../src/adapters/git.js";
+import {
+  createRegistrationRecordV1,
+  registrationDigestV1,
+} from "../src/adapters/worktrees.js";
 import { runExactNamedCheckV1 } from "@scrum-pi-team-skills/runtime";
 
 const fixtureScriptPath = new URL(
@@ -276,6 +282,116 @@ describe("git adapter", () => {
 
     await recovered.close();
     await recovered.cleanup();
+    rmSync(parent, { recursive: true, force: true });
+  });
+
+  it("blocks duplicate bare-remote registration ids before any effect", async () => {
+    const { parent, harness } = await createHarnessWithRepository();
+    const described = __testOnlyDescribeFixtureHarnessV1(harness);
+    const registrationDigest = registrationDigestV1({
+      registrationId: "repo-main",
+    });
+    const remotePath = join(
+      described.rootPath,
+      "remotes",
+      `${registrationDigest}.git`,
+    );
+
+    const remote = await harness.createBareRemote({
+      operationId: "remote-duplicate-registration-1",
+      registrationId: "repo-main",
+      sourceRegistrationId: "repo-main",
+    });
+    expect(remote.outcome).toBe("blocked");
+    expect(remote.diagnostic?.code).toBe("registration-conflict");
+    expect(existsSync(remotePath)).toBe(false);
+
+    rmSync(parent, { recursive: true, force: true });
+  });
+
+  it("redacts bare-remote storage collisions and retains recovery evidence", async () => {
+    const parent = createTrustedParent();
+    const policy = createPolicy(parent);
+    const harness = await createFixtureRepositoryHarnessV1(policy, {
+      runId: "run-remote-storage-1",
+      taskId: "task-remote-storage-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    });
+    const repository = await harness.createRepository({
+      operationId: "repo-remote-storage-1",
+      registrationId: "repo-remote-storage-main",
+      files: [
+        {
+          pathComponents: ["named-check-fixture.txt"],
+          mode: "100644",
+          content: new TextEncoder().encode("original\n"),
+        },
+      ],
+    });
+    expect(repository.outcome).toBe("applied");
+
+    const described = __testOnlyDescribeFixtureHarnessV1(harness);
+    const registrationDigest = registrationDigestV1({
+      registrationId: "remote-storage-main",
+    });
+    const registrationDir = join(
+      described.rootPath,
+      "metadata",
+      "registrations",
+      registrationDigest,
+    );
+    mkdirSync(registrationDir, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(registrationDir, "1.json"),
+      JSON.stringify(
+        createRegistrationRecordV1({
+          registrationId: "remote-storage-main",
+          sourceRegistrationId: "repo-remote-storage-main",
+          role: "fixture-remote",
+          checkId: null,
+          candidateCommit: repository.post!.headCommit,
+          candidateTree: repository.post!.headTree,
+          commonDirectoryDigest: "d".repeat(64),
+          workspacePathDigest: "e".repeat(64),
+          adminDirectoryDigest: "f".repeat(64),
+          state: "retained",
+          generation: 1,
+          previousDigest: null,
+        }),
+      ),
+      "utf8",
+    );
+
+    await expect(
+      harness.createBareRemote({
+        operationId: "remote-storage-collision-1",
+        registrationId: "remote-storage-main",
+        sourceRegistrationId: "repo-remote-storage-main",
+      }),
+    ).rejects.toThrow(/storage unavailable/i);
+
+    const remotePath = join(
+      described.rootPath,
+      "remotes",
+      `${registrationDigest}.git`,
+    );
+    expect(existsSync(remotePath)).toBe(true);
+
+    const recovered = await recoverFixtureRepositoryHarnessV1(policy, {
+      runId: "run-remote-storage-1",
+      taskId: "task-remote-storage-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    });
+    const replay = await recovered.createBareRemote({
+      operationId: "remote-storage-collision-1",
+      registrationId: "remote-storage-main",
+      sourceRegistrationId: "repo-remote-storage-main",
+    });
+    expect(replay.outcome).toBe("blocked");
+    expect(replay.diagnostic?.code).toBe("outcome-unknown");
+
     rmSync(parent, { recursive: true, force: true });
   });
 

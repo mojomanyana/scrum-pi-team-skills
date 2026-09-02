@@ -1379,10 +1379,45 @@ function walkTree(rootPath: string, prefix = ""): unknown[] {
   return observations;
 }
 
+function walkStableTree(rootPath: string, prefix = ""): unknown[] {
+  const entries = readdirSync(rootPath, { withFileTypes: true }).sort(
+    (left, right) => left.name.localeCompare(right.name),
+  );
+  const observations: unknown[] = [];
+  for (const entry of entries) {
+    const absolute = join(rootPath, entry.name);
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const stat = lstatSync(absolute);
+    if (stat.isSymbolicLink() || !(stat.isDirectory() || stat.isFile())) {
+      throw new TypeError(
+        FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+      );
+    }
+    observations.push({
+      pathDigest: pathDigestForRelative(relativePath),
+      type: stat.isDirectory() ? "directory" : "file",
+      mode: stat.mode,
+      size: stat.size,
+      contentDigest: stat.isFile() ? digestFileContent(absolute) : null,
+    });
+    if (stat.isDirectory()) {
+      observations.push(...walkStableTree(absolute, relativePath));
+    }
+  }
+  return observations;
+}
+
 function workspaceOnlySentinelDigest(path: string): string {
   return computeGitCheckFixtureDigestV1(
     "spts.fixture-filesystem-sentinel/1.0.0",
     walkTree(path),
+  );
+}
+
+function adminOnlySentinelDigest(path: string): string {
+  return computeGitCheckFixtureDigestV1(
+    "spts.fixture-filesystem-sentinel/1.0.0",
+    walkStableTree(path, "__admin__"),
   );
 }
 
@@ -1392,6 +1427,7 @@ function toNamedCheckRepositoryObservation(
     readonly state: RepositoryStateV1;
   },
   workspacePath: string,
+  adminPath: string,
 ): NamedCheckRepositoryObservationV1 {
   return Object.freeze({
     repositoryIdentity: Object.freeze({
@@ -1401,6 +1437,7 @@ function toNamedCheckRepositoryObservation(
     }),
     state: observation.state,
     workspaceSentinelDigest: workspaceOnlySentinelDigest(workspacePath),
+    adminSentinelDigest: adminOnlySentinelDigest(adminPath),
   });
 }
 
@@ -1627,6 +1664,10 @@ function stageResultDigest(result: unknown): string {
   );
 }
 
+function storageUnavailableError(): TypeError {
+  return new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1["storage-unavailable"]);
+}
+
 function writeOperationStage(
   state: HarnessStateV1,
   input: {
@@ -1643,42 +1684,46 @@ function writeOperationStage(
     readonly result: unknown | null;
   },
 ): OperationStageRecordV1 {
-  const operationDir = operationDirectory(state, input.operationId);
-  mkdirSync(operationDir, { recursive: true, mode: 0o700 });
-  const resultDigest =
-    input.result === null ? null : stageResultDigest(input.result);
-  const unsigned: Omit<OperationStageRecordV1, "recordDigest"> = {
-    contract: "spts.fixture-operation-record",
-    version: "1.0.0",
-    runDigest: state.runDigest,
-    manifestDigest: state.manifest.manifestDigest,
-    operationId: input.operationId,
-    operationDigest: operationDigest(state.runDigest, input.operationId),
-    sequence: input.sequence,
-    stage: input.stage,
-    kind: input.kind,
-    registrationId: input.registrationId,
-    registrationDigest: input.registrationDigest,
-    requestDigest: input.requestDigest,
-    request: input.request,
-    priorRecordDigest: input.priorRecordDigest,
-    terminalState: input.terminalState,
-    resultDigest,
-    result: input.result,
-  };
-  const record: OperationStageRecordV1 = Object.freeze({
-    ...unsigned,
-    recordDigest: recordDigestForStage(unsigned),
-  });
-  writeCanonicalFileImmutable(
-    join(operationDir, stageFilename(input.sequence, input.stage)),
-    record,
-  );
-  writeCanonicalFileMutable(operationHintPath(state, input.operationId), {
-    sequence: input.sequence,
-    recordDigest: record.recordDigest,
-  });
-  return record;
+  try {
+    const operationDir = operationDirectory(state, input.operationId);
+    mkdirSync(operationDir, { recursive: true, mode: 0o700 });
+    const resultDigest =
+      input.result === null ? null : stageResultDigest(input.result);
+    const unsigned: Omit<OperationStageRecordV1, "recordDigest"> = {
+      contract: "spts.fixture-operation-record",
+      version: "1.0.0",
+      runDigest: state.runDigest,
+      manifestDigest: state.manifest.manifestDigest,
+      operationId: input.operationId,
+      operationDigest: operationDigest(state.runDigest, input.operationId),
+      sequence: input.sequence,
+      stage: input.stage,
+      kind: input.kind,
+      registrationId: input.registrationId,
+      registrationDigest: input.registrationDigest,
+      requestDigest: input.requestDigest,
+      request: input.request,
+      priorRecordDigest: input.priorRecordDigest,
+      terminalState: input.terminalState,
+      resultDigest,
+      result: input.result,
+    };
+    const record: OperationStageRecordV1 = Object.freeze({
+      ...unsigned,
+      recordDigest: recordDigestForStage(unsigned),
+    });
+    writeCanonicalFileImmutable(
+      join(operationDir, stageFilename(input.sequence, input.stage)),
+      record,
+    );
+    writeCanonicalFileMutable(operationHintPath(state, input.operationId), {
+      sequence: input.sequence,
+      recordDigest: record.recordDigest,
+    });
+    return record;
+  } catch {
+    throw storageUnavailableError();
+  }
 }
 
 function loadStageRecord(path: string): OperationStageRecordV1 {
@@ -1689,40 +1734,44 @@ function writeRegistrationRecord(
   state: HarnessStateV1,
   registration: RegistrationStateV1,
 ): void {
-  const directory = join(
-    state.directories.registrations,
-    registration.registrationDigest,
-  );
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const previousDigest =
-    registration.generation > 1
-      ? readCanonicalJson<{ readonly recordDigest: string }>(
-          join(directory, `${registration.generation - 1}.json`),
-        ).recordDigest
-      : null;
-  const record = createRegistrationRecordV1({
-    registrationId: registration.registrationId,
-    sourceRegistrationId: registration.sourceRegistrationId,
-    role: registration.role,
-    checkId: registration.checkId,
-    candidateCommit: registration.candidateCommit,
-    candidateTree: registration.candidateTree,
-    commonDirectoryDigest: registration.commonDirectoryDigest,
-    workspacePathDigest: registrationPathDigest(
+  try {
+    const directory = join(
+      state.directories.registrations,
       registration.registrationDigest,
-    ),
-    adminDirectoryDigest: computeGitCheckFixtureDigestV1(
-      "spts.fixture-common-directory/1.0.0",
-      registration.adminDirectory,
-    ),
-    state: registration.state,
-    generation: registration.generation,
-    previousDigest,
-  });
-  writeCanonicalFileImmutable(
-    join(directory, `${registration.generation}.json`),
-    record,
-  );
+    );
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const previousDigest =
+      registration.generation > 1
+        ? readCanonicalJson<{ readonly recordDigest: string }>(
+            join(directory, `${registration.generation - 1}.json`),
+          ).recordDigest
+        : null;
+    const record = createRegistrationRecordV1({
+      registrationId: registration.registrationId,
+      sourceRegistrationId: registration.sourceRegistrationId,
+      role: registration.role,
+      checkId: registration.checkId,
+      candidateCommit: registration.candidateCommit,
+      candidateTree: registration.candidateTree,
+      commonDirectoryDigest: registration.commonDirectoryDigest,
+      workspacePathDigest: registrationPathDigest(
+        registration.registrationDigest,
+      ),
+      adminDirectoryDigest: computeGitCheckFixtureDigestV1(
+        "spts.fixture-common-directory/1.0.0",
+        registration.adminDirectory,
+      ),
+      state: registration.state,
+      generation: registration.generation,
+      previousDigest,
+    });
+    writeCanonicalFileImmutable(
+      join(directory, `${registration.generation}.json`),
+      record,
+    );
+  } catch {
+    throw storageUnavailableError();
+  }
 }
 
 function updateRegistrationCleanupState(
@@ -2937,8 +2986,8 @@ async function createRepository(
         candidateTree: observation.state.headTree,
         lifecycleState: "retained",
       });
-      state.registrations.set(request.registrationId, registration);
       writeRegistrationRecord(state, registration);
+      state.registrations.set(request.registrationId, registration);
       return createObservation(state, {
         operationId: request.operationId,
         registrationId: request.registrationId,
@@ -2982,6 +3031,16 @@ async function createBareRemote(
       purpose: "fixture-remote",
       requestDigest,
       diagnosticCode: "operation-replay-conflict",
+    });
+  }
+  if (state.registrations.has(request.registrationId)) {
+    return operationConflictObservation(state, {
+      operationId: request.operationId,
+      registrationId: request.registrationId,
+      operationKind: "create-bare-remote",
+      purpose: "fixture-remote",
+      requestDigest,
+      diagnosticCode: "registration-conflict",
     });
   }
   const source = sourceRegistration(state, request.sourceRegistrationId);
@@ -3034,8 +3093,8 @@ async function createBareRemote(
         candidateTree: source.candidateTree,
         lifecycleState: "retained",
       });
-      state.registrations.set(request.registrationId, registration);
       writeRegistrationRecord(state, registration);
+      state.registrations.set(request.registrationId, registration);
       return createObservation(state, {
         operationId: request.operationId,
         registrationId: request.registrationId,
@@ -3150,8 +3209,8 @@ async function createWorktree(
         candidateTree: request.candidateTree,
         lifecycleState: "active",
       });
-      state.registrations.set(request.registrationId, registration);
       writeRegistrationRecord(state, registration);
+      state.registrations.set(request.registrationId, registration);
       return createObservation(state, {
         operationId: request.operationId,
         registrationId: request.registrationId,
@@ -3474,11 +3533,13 @@ async function issueHarnessNamedCheckPermitV1(
     beforeObservation: toNamedCheckRepositoryObservation(
       observation,
       registration.path,
+      registration.adminDirectory,
     ),
     observeAfter: () =>
       toNamedCheckRepositoryObservation(
         observeRepositoryState(state, registration.path, true),
         registration.path,
+        registration.adminDirectory,
       ),
   };
   const permit = issueRuntimeNamedCheckPermitV1(

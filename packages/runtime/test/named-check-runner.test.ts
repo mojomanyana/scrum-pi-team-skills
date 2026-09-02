@@ -92,6 +92,7 @@ function workspaceObservation(
       ...overrides?.state,
     },
     workspaceSentinelDigest: sentinelDigest,
+    adminSentinelDigest: sentinelDigest,
     ...overrides,
   };
 }
@@ -322,6 +323,45 @@ describe("named-check-runner", () => {
 
     workspace.cleanup();
     evilRoot.cleanup();
+  });
+
+  it("treats admin sentinel drift as mutation-detected", async () => {
+    const workspace = createWorkspace();
+    const authority = createAuthority();
+    const before = workspaceObservation(workspace.root);
+    const permit = issueNamedCheckPermitV1(
+      authority,
+      {
+        operationId: "check-admin-sentinel-1",
+        runId: "run-1",
+        registrationId: "reg-admin-sentinel",
+        checkId: "fixture-pass",
+        attempt: 1,
+        candidateCommit: "a".repeat(64),
+        candidateTree: "b".repeat(64),
+        workspaceIdentityToken: bindWorkspaceExecution(workspace.root),
+        requestDigest: "9".repeat(64),
+      },
+      {
+        beforeObservation: before,
+        observeAfter: () => ({
+          repositoryIdentity: before.repositoryIdentity,
+          state: before.state,
+          workspaceSentinelDigest: before.workspaceSentinelDigest,
+          adminSentinelDigest: computeGitCheckFixtureDigestV1(
+            "spts.fixture-filesystem-sentinel/1.0.0",
+            [{ pathDigest: "admin" }],
+          ),
+        }),
+      },
+    );
+
+    const result = await runExactNamedCheckV1({ permit });
+    const value = requireValid(result);
+    expect(value.outcome).toBe("mutation-detected");
+    expect(value.diagnostic?.code).toBe("workspace-mutated");
+
+    workspace.cleanup();
   });
 
   it("treats index-only repository drift as mutation-detected", async () => {

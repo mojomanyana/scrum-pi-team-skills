@@ -67,6 +67,7 @@ export interface NamedCheckRepositoryObservationV1 {
   };
   readonly state: RepositoryStateV1;
   readonly workspaceSentinelDigest?: string;
+  readonly adminSentinelDigest?: string;
 }
 
 export interface IssueNamedCheckPermitV1Options {
@@ -352,6 +353,10 @@ function defaultObservationFor(
       "spts.fixture-filesystem-sentinel/1.0.0",
       [],
     ),
+    adminSentinelDigest: computeGitCheckFixtureDigestV1(
+      "spts.fixture-filesystem-sentinel/1.0.0",
+      [],
+    ),
   });
 }
 
@@ -404,6 +409,10 @@ function validateRepositoryObservation(
             "workspaceSentinelDigest",
             value.workspaceSentinelDigest,
           ),
+    adminSentinelDigest:
+      value.adminSentinelDigest === undefined
+        ? undefined
+        : validateDigest("adminSentinelDigest", value.adminSentinelDigest),
   });
 }
 
@@ -512,7 +521,8 @@ function observationsMatch(
 ): boolean {
   return (
     observationsMatchCore(before, after) &&
-    before.workspaceSentinelDigest === after.workspaceSentinelDigest
+    before.workspaceSentinelDigest === after.workspaceSentinelDigest &&
+    before.adminSentinelDigest === after.adminSentinelDigest
   );
 }
 

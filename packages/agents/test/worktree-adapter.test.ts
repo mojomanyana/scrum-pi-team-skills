@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { describe, expect, it } from "vitest";
@@ -226,6 +226,100 @@ describe("worktree adapter", () => {
     expect(driftRemoval.outcome).toBe("blocked");
     expect(driftRemoval.diagnostic?.code).toBe("repository-identity-drift");
     expect(existsSync(driftPath!)).toBe(true);
+
+    await harness.close();
+    rmSync(parent, { recursive: true, force: true });
+  }, 15_000);
+
+  it("detects linked admin-dir mutation and blocks cleanup", async () => {
+    const parent = mkdtempSync(
+      join(tmpdir(), "fixture-worktrees-admin-parent-"),
+    );
+    chmodSync(parent, 0o700);
+    const adminDriftScript = join(parent, "admin-drift-check.mjs");
+    writeFileSync(
+      adminDriftScript,
+      [
+        'import { readFileSync, writeFileSync } from "node:fs";',
+        'import { join, resolve } from "node:path";',
+        'const gitFile = readFileSync(join(process.cwd(), ".git"), "utf8").trim();',
+        'if (!gitFile.startsWith("gitdir: ")) process.exit(91);',
+        "const adminDir = resolve(process.cwd(), gitFile.slice(8));",
+        'writeFileSync(join(adminDir, "probe-marker.txt"), "marker\\n", "utf8");',
+        "process.exit(0);",
+      ].join("\n"),
+      "utf8",
+    );
+    const policy = createTrustedFixtureGitPolicyV1({
+      policyId: "policy-admin-drift",
+      trustedParent: parent,
+      gitExecutable: gitExecutable(),
+      gitExecPath: gitExecPath(),
+      namedChecks: [
+        {
+          checkId: "fixture-admin-drift",
+          executable: process.execPath,
+          argv: [adminDriftScript],
+          maxDurationMs: 5_000,
+          maxOutputBytes: 1_048_576,
+        },
+      ],
+      limits: fixtureLimits(),
+    });
+    const harness = await createFixtureRepositoryHarnessV1(policy, {
+      runId: "run-worktree-admin-1",
+      taskId: "task-worktree-admin-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    });
+
+    const repository = await harness.createRepository({
+      operationId: "repo-admin-1",
+      registrationId: "repo-admin-main",
+      files: [
+        {
+          pathComponents: ["named-check-fixture.txt"],
+          mode: "100644",
+          content: new TextEncoder().encode("original\n"),
+        },
+      ],
+    });
+    await harness.createWorktree({
+      operationId: "worktree-admin-1",
+      registrationId: "check-admin-1",
+      sourceRegistrationId: "repo-admin-main",
+      role: "named-check",
+      checkId: "fixture-admin-drift",
+      candidateCommit: repository.post!.headCommit,
+      candidateTree: repository.post!.headTree,
+    });
+    const described = __testOnlyDescribeFixtureHarnessV1(harness);
+    const checkPath = described.registrations.find(
+      (entry) => entry.registrationId === "check-admin-1",
+    )?.path;
+    expect(checkPath).toBeDefined();
+    const gitFile = readFileSync(join(checkPath!, ".git"), "utf8").trim();
+    const adminDir = resolve(checkPath!, gitFile.slice(8));
+    const markerPath = join(adminDir, "probe-marker.txt");
+
+    const result = await harness.runNamedCheckV1({
+      operationId: "named-check-admin-1",
+      registrationId: "check-admin-1",
+      checkId: "fixture-admin-drift",
+      attempt: 1,
+    });
+    const value = requireValid(result);
+    expect(value.outcome).toBe("mutation-detected");
+    expect(value.diagnostic?.code).toBe("workspace-mutated");
+    expect(existsSync(markerPath)).toBe(true);
+
+    const removal = await harness.removeWorktree(
+      "cleanup-admin-1",
+      "check-admin-1",
+    );
+    expect(removal.outcome).toBe("blocked");
+    expect(removal.diagnostic?.code).toBe("workspace-mutated");
+    expect(existsSync(checkPath!)).toBe(true);
 
     await harness.close();
     rmSync(parent, { recursive: true, force: true });
