@@ -3962,7 +3962,7 @@ async function openStoreInternal(
           renewNamespaceLock(bootstrap, held, keyBytes!, null);
           return directResult({
             kind: "recovery",
-            outcome: "new-head-preserved",
+            outcome: "committed-head-restored",
             status: state.status,
           });
         }

@@ -113,7 +113,7 @@ export interface CommittedControllerTransitionV2 {
 
 export interface RecoveredControllerRunV2 {
   readonly kind: "recovery";
-  readonly outcome: "ready" | "old-head-restored" | "new-head-preserved";
+  readonly outcome: "ready" | "old-head-restored" | "committed-head-restored";
   readonly status: Readonly<ReadyControllerStoreStatusV2>;
 }
 
