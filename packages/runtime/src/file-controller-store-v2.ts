@@ -1058,13 +1058,25 @@ function validateRecoveryOptions(value: unknown): ValidatedRecoveryOptionsV2 {
 }
 
 function keyBytesFromProvider(bootstrap: ControllerStoreBootstrapV2): Buffer {
-  const raw = bootstrap.keyProvider.acquire();
-  if (!(raw instanceof Uint8Array) || raw.byteLength < digestByteLength) {
-    throw new StoreDeniedError("key-unavailable");
+  let raw: Uint8Array | undefined;
+  try {
+    raw = bootstrap.keyProvider.acquire();
+    if (!(raw instanceof Uint8Array) || raw.byteLength !== digestByteLength) {
+      throw new StoreDeniedError("key-unavailable");
+    }
+    return Buffer.from(raw);
+  } finally {
+    try {
+      raw?.fill(0);
+    } catch {
+      // Best-effort release of caller-owned key bytes.
+    }
+    try {
+      bootstrap.keyProvider.release();
+    } catch {
+      // Provider cleanup never crosses the redacted public boundary.
+    }
   }
-  const key = Buffer.from(raw);
-  if (raw.byteLength > 0) raw.fill(0);
-  return key;
 }
 
 function writeManifest(
@@ -3037,11 +3049,6 @@ async function openStoreInternal(
       keyBytes?.fill(0);
     } catch {
       // Key zeroization is best-effort cleanup.
-    }
-    try {
-      bootstrap.keyProvider.release();
-    } catch {
-      // Cleanup failures do not expose secret material.
     }
   };
 
