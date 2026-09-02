@@ -1,10 +1,12 @@
 import {
   chmodSync,
+  closeSync,
   cpSync,
   existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -309,12 +311,17 @@ function replaceDirectoryAtSamePath(path: string): {
 } {
   const snapshotPath = `${path}-snapshot`;
   const beforeInode = statSync(path).ino;
-  cpSync(path, snapshotPath, { recursive: true });
-  rmSync(path, { recursive: true, force: false });
-  cpSync(snapshotPath, path, { recursive: true });
-  rmSync(snapshotPath, { recursive: true, force: true });
-  const afterInode = statSync(path).ino;
-  return Object.freeze({ beforeInode, afterInode });
+  const heldDirectory = openSync(path, "r");
+  try {
+    cpSync(path, snapshotPath, { recursive: true });
+    rmSync(path, { recursive: true, force: false });
+    cpSync(snapshotPath, path, { recursive: true });
+    rmSync(snapshotPath, { recursive: true, force: true });
+    const afterInode = statSync(path).ino;
+    return Object.freeze({ beforeInode, afterInode });
+  } finally {
+    closeSync(heldDirectory);
+  }
 }
 
 async function expectRedactedBoundaryError(

@@ -1,9 +1,11 @@
 import {
   chmodSync,
+  closeSync,
   cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   statSync,
@@ -218,12 +220,17 @@ function replaceDirectoryAtSamePath(path: string): {
 } {
   const snapshotPath = `${path}-snapshot`;
   const beforeInode = statSync(path).ino;
-  cpSync(path, snapshotPath, { recursive: true });
-  rmSync(path, { recursive: true, force: false });
-  cpSync(snapshotPath, path, { recursive: true });
-  rmSync(snapshotPath, { recursive: true, force: true });
-  const afterInode = statSync(path).ino;
-  return Object.freeze({ beforeInode, afterInode });
+  const heldDirectory = openSync(path, "r");
+  try {
+    cpSync(path, snapshotPath, { recursive: true });
+    rmSync(path, { recursive: true, force: false });
+    cpSync(snapshotPath, path, { recursive: true });
+    rmSync(snapshotPath, { recursive: true, force: true });
+    const afterInode = statSync(path).ino;
+    return Object.freeze({ beforeInode, afterInode });
+  } finally {
+    closeSync(heldDirectory);
+  }
 }
 
 beforeAll(async () => {
@@ -412,7 +419,7 @@ describe("worktree adapter", () => {
 
       chmodSync(worktreePath!, originalMode);
       const replacement = replaceDirectoryAtSamePath(worktreePath!);
-      expect(replacement.afterInode).toBeGreaterThan(0);
+      expect(replacement.afterInode).not.toBe(replacement.beforeInode);
       const replacementRemoval = await harness.removeWorktree(
         "cleanup-root-drift-replaced-1",
         "check-root-drift-1",
@@ -438,6 +445,7 @@ describe("worktree adapter", () => {
     writeFileSync(
       adminDriftScript,
       [
+        `#!${process.execPath}`,
         'import { readFileSync, writeFileSync } from "node:fs";',
         'import { join, resolve } from "node:path";',
         'const gitFile = readFileSync(join(process.cwd(), ".git"), "utf8").trim();',
@@ -446,8 +454,9 @@ describe("worktree adapter", () => {
         'writeFileSync(join(adminDir, "probe-marker.txt"), "marker\\n", "utf8");',
         "process.exit(0);",
       ].join("\n"),
-      "utf8",
+      { encoding: "utf8", mode: 0o755 },
     );
+    chmodSync(adminDriftScript, 0o755);
     const policy = createTrustedFixtureGitPolicyV1({
       policyId: "policy-admin-drift",
       trustedParent: parent,
@@ -456,8 +465,8 @@ describe("worktree adapter", () => {
       namedChecks: [
         {
           checkId: "fixture-admin-drift",
-          executable: process.execPath,
-          argv: [adminDriftScript],
+          executable: adminDriftScript,
+          argv: [],
           maxDurationMs: 5_000,
           maxOutputBytes: 1_048_576,
         },
@@ -751,7 +760,7 @@ describe("worktree adapter", () => {
       )?.path;
       expect(remotePath).toBeDefined();
       const replacement = replaceDirectoryAtSamePath(remotePath!);
-      expect(replacement.afterInode).toBeGreaterThan(0);
+      expect(replacement.afterInode).not.toBe(replacement.beforeInode);
       await remoteHarness.close();
 
       const recovered = await recoverFixtureRepositoryHarnessV1(
@@ -812,7 +821,7 @@ describe("worktree adapter", () => {
       )?.path;
       expect(worktreePath).toBeDefined();
       const replacement = replaceDirectoryAtSamePath(worktreePath!);
-      expect(replacement.afterInode).toBeGreaterThan(0);
+      expect(replacement.afterInode).not.toBe(replacement.beforeInode);
       await worktreeHarness.close();
 
       const recovered = await recoverFixtureRepositoryHarnessV1(
