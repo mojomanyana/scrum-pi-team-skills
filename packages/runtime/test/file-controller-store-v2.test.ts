@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -230,6 +231,9 @@ async function open(
   rootPath: string,
   options?: {
     readonly fault?: (point: string) => void;
+    readonly bootstrapFault?: (
+      point: "candidate-durable" | "namespace-published",
+    ) => void;
     readonly lockOwnerProbe?: () => "live" | "dead" | "ambiguous";
   },
 ): Promise<ControllerStoreV2> {
@@ -962,6 +966,160 @@ describe("authenticated file controller store v2", () => {
         message: "Controller store request denied.",
       },
     });
+  });
+
+  it("recovers an authenticated legacy manifest temp left by a complete bootstrap crash", async () => {
+    const root = privateRoot();
+    const original = await open(root);
+    await original.closeControllerStoreV2();
+    const manifest = join(
+      root,
+      "controller-store-v2",
+      namespaceDigest,
+      "manifest.json",
+    );
+    const legacyTemp = `${manifest}.tmp`;
+    const expected = readFileSync(manifest);
+    renameSync(manifest, legacyTemp);
+
+    const reopened = await openControllerStoreV2ForTesting(configuration(root));
+    expect(reopened.disposition).toBe("ok");
+    if (reopened.disposition === "ok") {
+      await reopened.value.closeControllerStoreV2();
+    }
+    expect(readFileSync(manifest)).toEqual(expected);
+    expect(existsSync(legacyTemp)).toBe(false);
+  });
+
+  it("retains a partial legacy manifest temp and fails bootstrap closed", async () => {
+    const root = privateRoot();
+    const original = await open(root);
+    await original.closeControllerStoreV2();
+    const manifest = join(
+      root,
+      "controller-store-v2",
+      namespaceDigest,
+      "manifest.json",
+    );
+    const legacyTemp = `${manifest}.tmp`;
+    const complete = readFileSync(manifest);
+    const partial = complete.subarray(0, Math.floor(complete.byteLength / 2));
+    renameSync(manifest, legacyTemp);
+    writeFileSync(legacyTemp, partial, { mode: 0o600 });
+
+    await expect(
+      openControllerStoreV2ForTesting(configuration(root)),
+    ).resolves.toMatchObject({
+      disposition: "denied",
+      diagnostic: { code: "integrity-failure" },
+    });
+    expect(existsSync(manifest)).toBe(false);
+    expect(readFileSync(legacyTemp)).toEqual(partial);
+  });
+
+  it("recovers a complete namespace candidate after bootstrap interruption", async () => {
+    const root = privateRoot();
+    let interrupted = false;
+    await expect(
+      openControllerStoreV2ForTesting(configuration(root), {
+        bootstrapFault(point) {
+          if (!interrupted && point === "candidate-durable") {
+            interrupted = true;
+            throw new Error("simulated-bootstrap-crash");
+          }
+        },
+      }),
+    ).resolves.toMatchObject({
+      disposition: "denied",
+      diagnostic: { code: "storage-unavailable" },
+    });
+
+    const namespace = join(root, "controller-store-v2", namespaceDigest);
+    const candidate = `${namespace}.candidate`;
+    expect(existsSync(namespace)).toBe(false);
+    expect(existsSync(join(candidate, "manifest.json"))).toBe(true);
+    expect(existsSync(join(candidate, "runs"))).toBe(true);
+
+    const reopened = await openControllerStoreV2ForTesting(configuration(root));
+    expect(reopened.disposition).toBe("ok");
+    if (reopened.disposition === "ok") {
+      await reopened.value.closeControllerStoreV2();
+    }
+    expect(existsSync(candidate)).toBe(false);
+    expect(existsSync(join(namespace, "manifest.json"))).toBe(true);
+  });
+
+  it("accepts an exact authenticated immutable collision without overwriting it", async () => {
+    const fixtureRoot = privateRoot();
+    const fixtureCreator = await open(fixtureRoot);
+    ok(await create(fixtureCreator));
+    await fixtureCreator.closeControllerStoreV2();
+    let fixtureInterrupted = false;
+    const fixtureWriter = await open(fixtureRoot, {
+      fault(point) {
+        if (!fixtureInterrupted && point === "journal-prepared") {
+          fixtureInterrupted = true;
+          throw new Error("capture-complete-record");
+        }
+      },
+    });
+    expect(await commit(fixtureWriter, initialSnapshot())).toMatchObject({
+      disposition: "denied",
+    });
+    await fixtureWriter.closeControllerStoreV2();
+    const completeRecord = readFileSync(
+      join(runPath(fixtureRoot), "transaction", "records.json"),
+    );
+
+    const root = privateRoot();
+    const creator = await open(root);
+    ok(await create(creator));
+    await creator.closeControllerStoreV2();
+    const records = join(runPath(root), "transaction", "records.json");
+    let collisionInode: number | undefined;
+    let stoppedAfterPublication = false;
+    const writer = await open(root, {
+      fault(point) {
+        if (point === "transaction-announced") {
+          writeFileSync(records, completeRecord, { mode: 0o600, flush: true });
+          collisionInode = statSync(records).ino;
+        }
+        if (!stoppedAfterPublication && point === "head-durable") {
+          stoppedAfterPublication = true;
+          throw new Error("retain-transaction-evidence");
+        }
+      },
+    });
+
+    expect(ok(await commit(writer, initialSnapshot()))).toMatchObject({
+      kind: "commit",
+      revision: 1,
+    });
+    expect(collisionInode).toBeDefined();
+    expect(statSync(records).ino).toBe(collisionInode);
+    expect(readFileSync(records)).toEqual(completeRecord);
+  });
+
+  it("retains a mismatching immutable collision and fails closed", async () => {
+    const root = privateRoot();
+    const creator = await open(root);
+    ok(await create(creator));
+    await creator.closeControllerStoreV2();
+    const records = join(runPath(root), "transaction", "records.json");
+    const collision = Buffer.from("partial-immutable-record", "utf8");
+    const writer = await open(root, {
+      fault(point) {
+        if (point === "transaction-announced") {
+          writeFileSync(records, collision, { mode: 0o600, flush: true });
+        }
+      },
+    });
+
+    await expect(commit(writer, initialSnapshot())).resolves.toMatchObject({
+      disposition: "denied",
+      diagnostic: { code: "integrity-failure" },
+    });
+    expect(readFileSync(records)).toEqual(collision);
   });
 
   it("creates an authenticated namespace manifest that rejects the wrong key even while empty", async () => {

@@ -58,6 +58,7 @@ import {
 } from "@scrum-pi-team-skills/contracts";
 
 const STORE_ROOT_DIRECTORY = "controller-store-v2";
+const NAMESPACE_CANDIDATE_SUFFIX = ".candidate";
 const MANIFEST_FILE = "manifest.json";
 const RUNS_DIRECTORY = "runs";
 const OPERATIONS_DIRECTORY = "operations";
@@ -107,6 +108,9 @@ export const CONTROLLER_STORE_FAULT_POINTS_V2 = Object.freeze([
 export interface ControllerStoreTestingOptionsV2 {
   readonly fault?: (
     point: (typeof CONTROLLER_STORE_FAULT_POINTS_V2)[number],
+  ) => void;
+  readonly bootstrapFault?: (
+    point: "candidate-durable" | "namespace-published",
   ) => void;
   readonly lockOwnerProbe?: () => "live" | "dead" | "ambiguous";
 }
@@ -574,6 +578,44 @@ function writeAllBytes(descriptor: number, buffer: Uint8Array): void {
   }
 }
 
+function readBoundedBytes(descriptor: number, maximumBytes: number): Buffer {
+  const bytes = Buffer.alloc(maximumBytes + 1);
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    let count: number;
+    try {
+      count = readSync(
+        descriptor,
+        bytes,
+        offset,
+        bytes.byteLength - offset,
+        null,
+      );
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as { code?: unknown }).code === "EINTR"
+      ) {
+        continue;
+      }
+      throw error;
+    }
+    if (
+      !Number.isSafeInteger(count) ||
+      count < 0 ||
+      count > bytes.byteLength - offset
+    ) {
+      throw new StoreUnexpectedError();
+    }
+    if (count === 0) break;
+    offset += count;
+  }
+  if (offset > maximumBytes) throw new StoreIntegrityError();
+  return bytes.subarray(0, offset);
+}
+
 function syncDirectory(path: string): void {
   const descriptor = openSync(path, constants.O_RDONLY);
   try {
@@ -618,16 +660,20 @@ function authenticateRecord(
     .digest("hex") as DigestSha256V2;
 }
 
-function writeAuthenticatedRecord<T extends StoreRecordBodyV2>(options: {
+interface AuthenticatedRecordOptionsV2<T extends StoreRecordBodyV2> {
   readonly path: string;
   readonly recordType: ControllerStoreRecordTypeV2;
   readonly keyId: string;
   readonly keyBytes: Uint8Array;
   readonly body: T;
-}): AuthenticatedStoreRecordEnvelopeV2<T> {
+}
+
+function authenticatedRecordEnvelope<T extends StoreRecordBodyV2>(
+  options: AuthenticatedRecordOptionsV2<T>,
+): AuthenticatedStoreRecordEnvelopeV2<T> {
   const body = cloneJsonValue<T>(options.body);
   const digest = recordDigest(body);
-  const envelope: AuthenticatedStoreRecordEnvelopeV2<T> = {
+  return {
     contractId: RECORD_CONTRACT_ID,
     schemaVersion: RECORD_SCHEMA_VERSION,
     recordType: options.recordType,
@@ -641,27 +687,15 @@ function writeAuthenticatedRecord<T extends StoreRecordBodyV2>(options: {
       options.keyBytes,
     ),
   };
-  atomicWriteCanonicalJson(options.path, envelope);
-  return envelope;
 }
 
-function readAuthenticatedRecord<T extends StoreRecordBodyV2>(options: {
-  readonly path: string;
-  readonly recordType: ControllerStoreRecordTypeV2;
-  readonly keyId: string;
-  readonly keyBytes: Uint8Array;
-  readonly maximumBytes: number;
-}): StoreFileReadResult<T> {
-  const descriptor = openPrivateFileForInspection(
-    options.path,
-    options.maximumBytes,
-  );
-  let text: string;
-  try {
-    text = readFileSync(descriptor, "utf8");
-  } finally {
-    closeSync(descriptor);
-  }
+function parseAuthenticatedRecord<T extends StoreRecordBodyV2>(
+  text: string,
+  options: Pick<
+    AuthenticatedRecordOptionsV2<T>,
+    "recordType" | "keyId" | "keyBytes"
+  >,
+): StoreFileReadResult<T> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
@@ -712,6 +746,92 @@ function readAuthenticatedRecord<T extends StoreRecordBodyV2>(options: {
     recordDigest: digest,
     authenticationTag,
   };
+}
+
+function writeMutableAuthenticatedRecord<T extends StoreRecordBodyV2>(
+  options: AuthenticatedRecordOptionsV2<T>,
+): AuthenticatedStoreRecordEnvelopeV2<T> {
+  const envelope = authenticatedRecordEnvelope(options);
+  atomicWriteCanonicalJson(options.path, envelope);
+  return envelope;
+}
+
+function requireMatchingImmutableRecord<T extends StoreRecordBodyV2>(
+  options: AuthenticatedRecordOptionsV2<T>,
+  expectedEnvelope: AuthenticatedStoreRecordEnvelopeV2<T>,
+  expectedBytes: Buffer,
+): void {
+  const descriptor = openPrivateFileForInspection(
+    options.path,
+    expectedBytes.byteLength,
+  );
+  try {
+    const existingBytes = readBoundedBytes(
+      descriptor,
+      expectedBytes.byteLength,
+    );
+    const existing = parseAuthenticatedRecord<T>(
+      existingBytes.toString("utf8"),
+      options,
+    );
+    if (
+      existing.recordDigest !== expectedEnvelope.recordDigest ||
+      existing.authenticationTag !== expectedEnvelope.authenticationTag ||
+      !existingBytes.equals(expectedBytes)
+    ) {
+      throw new StoreIntegrityError();
+    }
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  syncDirectory(parse(options.path).dir);
+}
+
+function writeImmutableAuthenticatedRecord<T extends StoreRecordBodyV2>(
+  options: AuthenticatedRecordOptionsV2<T>,
+): AuthenticatedStoreRecordEnvelopeV2<T> {
+  const envelope = authenticatedRecordEnvelope(options);
+  const expectedBytes = Buffer.from(
+    canonicalizeControllerStoreValueV2(envelope),
+    "utf8",
+  );
+  let descriptor: number;
+  try {
+    descriptor = openExclusivePrivateFile(options.path);
+  } catch (error) {
+    if (!hasFsCode(error, "EEXIST")) throw error;
+    requireMatchingImmutableRecord(options, envelope, expectedBytes);
+    return envelope;
+  }
+  try {
+    writeAllBytes(descriptor, expectedBytes);
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  syncDirectory(parse(options.path).dir);
+  return envelope;
+}
+
+function readAuthenticatedRecord<T extends StoreRecordBodyV2>(options: {
+  readonly path: string;
+  readonly recordType: ControllerStoreRecordTypeV2;
+  readonly keyId: string;
+  readonly keyBytes: Uint8Array;
+  readonly maximumBytes: number;
+}): StoreFileReadResult<T> {
+  const descriptor = openPrivateFileForInspection(
+    options.path,
+    options.maximumBytes,
+  );
+  let text: string;
+  try {
+    text = readFileSync(descriptor, "utf8");
+  } finally {
+    closeSync(descriptor);
+  }
+  return parseAuthenticatedRecord<T>(text, options);
 }
 
 function isStoreRootValid(path: string): boolean {
@@ -866,6 +986,10 @@ function namespaceDigest(
 
 function namespacePath(bootstrap: ControllerStoreBootstrapV2): string {
   return join(storeRootPath(bootstrap), namespaceDigest(bootstrap));
+}
+
+function namespaceCandidatePath(bootstrap: ControllerStoreBootstrapV2): string {
+  return `${namespacePath(bootstrap)}${NAMESPACE_CANDIDATE_SUFFIX}`;
 }
 
 function manifestPath(bootstrap: ControllerStoreBootstrapV2): string {
@@ -1084,9 +1208,10 @@ function keyBytesFromProvider(bootstrap: ControllerStoreBootstrapV2): Buffer {
 function writeManifest(
   bootstrap: ControllerStoreBootstrapV2,
   keyBytes: Uint8Array,
+  path = manifestPath(bootstrap),
 ): void {
-  writeAuthenticatedRecord<StoredManifestBodyV2>({
-    path: manifestPath(bootstrap),
+  writeImmutableAuthenticatedRecord<StoredManifestBodyV2>({
+    path,
     recordType: "store-manifest",
     keyId: bootstrap.keyProvider.keyId,
     keyBytes,
@@ -1097,9 +1222,10 @@ function writeManifest(
 function readManifest(
   bootstrap: ControllerStoreBootstrapV2,
   keyBytes: Uint8Array,
+  path = manifestPath(bootstrap),
 ): void {
   const manifest = readAuthenticatedRecord<StoredManifestBodyV2>({
-    path: manifestPath(bootstrap),
+    path,
     recordType: "store-manifest",
     keyId: bootstrap.keyProvider.keyId,
     keyBytes,
@@ -1111,6 +1237,81 @@ function readManifest(
   ) {
     throw new StoreIntegrityError();
   }
+}
+
+function readOrRecoverManifest(
+  bootstrap: ControllerStoreBootstrapV2,
+  keyBytes: Uint8Array,
+): void {
+  const path = manifestPath(bootstrap);
+  if (existsSync(path)) {
+    readManifest(bootstrap, keyBytes);
+    return;
+  }
+  const legacyTempPath = `${path}.tmp`;
+  if (!existsSync(legacyTempPath)) throw new StoreIntegrityError();
+  readManifest(bootstrap, keyBytes, legacyTempPath);
+  renameSync(legacyTempPath, path);
+  syncDirectory(namespacePath(bootstrap));
+  readManifest(bootstrap, keyBytes);
+}
+
+function requireCompleteNamespaceCandidate(
+  bootstrap: ControllerStoreBootstrapV2,
+  keyBytes: Uint8Array,
+): void {
+  const candidatePath = namespaceCandidatePath(bootstrap);
+  const candidateManifestPath = join(candidatePath, MANIFEST_FILE);
+  const candidateRunsPath = join(candidatePath, RUNS_DIRECTORY);
+  requirePrivateDirectory(candidatePath);
+  const entries = readdirSync(candidatePath, { withFileTypes: true });
+  if (
+    entries.length !== 2 ||
+    !entries.some((entry) => entry.name === MANIFEST_FILE && entry.isFile()) ||
+    !entries.some(
+      (entry) => entry.name === RUNS_DIRECTORY && entry.isDirectory(),
+    )
+  ) {
+    throw new StoreIntegrityError();
+  }
+  readManifest(bootstrap, keyBytes, candidateManifestPath);
+  requirePrivateDirectory(candidateRunsPath);
+  if (readdirSync(candidateRunsPath).length !== 0) {
+    throw new StoreIntegrityError();
+  }
+  syncDirectory(candidateRunsPath);
+  syncDirectory(candidatePath);
+}
+
+function bootstrapNamespace(
+  bootstrap: ControllerStoreBootstrapV2,
+  keyBytes: Uint8Array,
+  options: ControllerStoreTestingOptionsV2 | undefined,
+): void {
+  const storeRoot = storeRootPath(bootstrap);
+  const namespace = namespacePath(bootstrap);
+  const candidate = namespaceCandidatePath(bootstrap);
+  ensurePrivateDirectory(storeRoot);
+  if (existsSync(namespace)) {
+    if (existsSync(candidate)) throw new StoreIntegrityError();
+    requirePrivateDirectory(namespace);
+    readOrRecoverManifest(bootstrap, keyBytes);
+    return;
+  }
+
+  if (!existsSync(candidate)) {
+    ensurePrivateDirectory(candidate);
+    writeManifest(bootstrap, keyBytes, join(candidate, MANIFEST_FILE));
+    ensurePrivateDirectory(join(candidate, RUNS_DIRECTORY));
+    syncDirectory(candidate);
+  }
+  requireCompleteNamespaceCandidate(bootstrap, keyBytes);
+  options?.bootstrapFault?.("candidate-durable");
+  renameSync(candidate, namespace);
+  syncDirectory(storeRoot);
+  options?.bootstrapFault?.("namespace-published");
+  requirePrivateDirectory(namespace);
+  readManifest(bootstrap, keyBytes);
 }
 
 function readHeadEnvelope(
@@ -1417,7 +1618,7 @@ function writeHeadState(
     },
     snapshot,
   };
-  writeAuthenticatedRecord({
+  writeMutableAuthenticatedRecord({
     path: headPath(runPath),
     recordType: "head-pointer",
     keyId,
@@ -1437,7 +1638,7 @@ function writeOperationRecordFinal(
     | Readonly<CommittedControllerTransitionV2>,
 ): void {
   ensurePrivateDirectory(operationsPath(runPath));
-  writeAuthenticatedRecord({
+  writeImmutableAuthenticatedRecord({
     path: operationRecordPath(runPath, operationId),
     recordType: "operation-record",
     keyId,
@@ -1459,7 +1660,7 @@ function writeOperationRecordPending(
   requestDigest: DigestSha256V2,
   result: Readonly<CommittedControllerTransitionV2>,
 ): void {
-  writeAuthenticatedRecord({
+  writeImmutableAuthenticatedRecord({
     path: pendingOperationPath(runPath),
     recordType: "operation-record",
     keyId,
@@ -1479,7 +1680,7 @@ function writeTransactionJournal(
   keyBytes: Uint8Array,
   body: StoredJournalBodyV2,
 ): void {
-  writeAuthenticatedRecord({
+  writeMutableAuthenticatedRecord({
     path: journalPath(runPath),
     recordType: "transaction-journal",
     keyId,
@@ -1494,7 +1695,7 @@ function writeTransactionRecords(
   keyBytes: Uint8Array,
   body: StoredRecordsBodyV2,
 ): void {
-  writeAuthenticatedRecord({
+  writeImmutableAuthenticatedRecord({
     path: recordsPath(runPath),
     recordType: "transition-record",
     keyId,
@@ -2693,7 +2894,7 @@ function acquireNamespaceLock(
     rootIdentity,
     lockIdentity: candidateIdentity,
   };
-  writeAuthenticatedRecord({
+  writeMutableAuthenticatedRecord({
     path: lockOwnerPath(candidatePath),
     recordType: "lock-owner",
     keyId: bootstrap.keyProvider.keyId,
@@ -2861,7 +3062,7 @@ function renewNamespaceLock(
     renewalCounter: held.owner.renewalCounter + 1,
     currentTransaction,
   };
-  const envelope = writeAuthenticatedRecord({
+  const envelope = writeMutableAuthenticatedRecord({
     path: lockOwnerPath(held.lockPath),
     recordType: "lock-owner",
     keyId: bootstrap.keyProvider.keyId,
@@ -3001,22 +3202,8 @@ async function openStoreInternal(
     return denied("key-unavailable");
   }
   try {
-    const storeRoot = storeRootPath(bootstrap);
-    const namespaceDir = namespacePath(bootstrap);
     const runsDir = runsPath(bootstrap);
-    const namespaceAlreadyExists = existsSync(namespaceDir);
-    ensurePrivateDirectory(storeRoot);
-    if (namespaceAlreadyExists) {
-      requirePrivateDirectory(namespaceDir);
-      if (!existsSync(manifestPath(bootstrap))) {
-        throw new StoreIntegrityError();
-      }
-      readManifest(bootstrap, keyBytes);
-    } else {
-      ensurePrivateDirectory(namespaceDir);
-      writeManifest(bootstrap, keyBytes);
-      readManifest(bootstrap, keyBytes);
-    }
+    bootstrapNamespace(bootstrap, keyBytes, options);
     ensurePrivateDirectory(runsDir);
     for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) throw new StoreIntegrityError();
