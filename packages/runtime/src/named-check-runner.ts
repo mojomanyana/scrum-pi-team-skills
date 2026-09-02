@@ -669,6 +669,24 @@ export async function runExactNamedCheckV1(
       FIXTURE_DIAGNOSTIC_MESSAGES_V1["fixture-policy-unavailable"],
     );
   }
+  if (input.signal?.aborted) {
+    state.status = "consumed-cancelled";
+    const cancelledAt = clock.now();
+    return buildResult(state, {
+      startedAt: cancelledAt,
+      completedAt: cancelledAt,
+      elapsedMs: 0,
+      outcome: "cancelled",
+      exitCode: null,
+      signal: null,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      stdoutDigest: observeOutputDigest().digest("hex"),
+      stderrDigest: observeOutputDigest().digest("hex"),
+      diagnostic: createFixtureDiagnosticV1("cancelled"),
+      workspaceTreeAfter: state.before.state.headTree,
+    });
+  }
   const adapter = input.processAdapter ?? createNodeProcessAdapter();
   const startedAt = clock.now();
   if (adapter.platform !== "linux") {

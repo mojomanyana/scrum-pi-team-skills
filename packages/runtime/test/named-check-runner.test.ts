@@ -776,6 +776,38 @@ describe("named-check-runner", () => {
   });
 
   it("supports sticky cancellation and output overflow without leaking raw output", async () => {
+    const preAbortedController = new AbortController();
+    preAbortedController.abort();
+    const preAbortedPermit = issuePermit({
+      operationId: "check-pre-aborted-1",
+      registrationId: "reg-pre-aborted",
+      checkId: "fixture-pass",
+      requestDigest: "9".repeat(64),
+      root: join(tmpdir(), "named-check-runner-pre-aborted"),
+      beforeObservation: syntheticObservation("pre-aborted"),
+    });
+    let preAbortedSpawned = false;
+    const scriptedPreAbortedAdapter = createScriptedProcessAdapter({
+      close: "spawn",
+    });
+    const preAborted = await runExactNamedCheckV1({
+      permit: preAbortedPermit,
+      signal: preAbortedController.signal,
+      processAdapter: {
+        ...scriptedPreAbortedAdapter,
+        spawn(executable, arguments_, options) {
+          preAbortedSpawned = true;
+          return scriptedPreAbortedAdapter.spawn(
+            executable,
+            arguments_,
+            options,
+          );
+        },
+      },
+    });
+    expect(requireValid(preAborted).outcome).toBe("cancelled");
+    expect(preAbortedSpawned).toBe(false);
+
     const cancelledBefore = syntheticObservation("cancelled");
     const controller = new AbortController();
     const cancelledPermit = issuePermit({
