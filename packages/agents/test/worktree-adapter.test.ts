@@ -103,10 +103,23 @@ async function acquireHeavySuiteLock(owner: string): Promise<() => void> {
           !Number.isSafeInteger(holder.pid) ||
           !isProcessAlive(holder.pid);
       } catch {
-        stale = true;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        continue;
       }
       if (stale) {
-        rmSync(heavySuiteLockPath, { recursive: true, force: true });
+        try {
+          rmSync(heavySuiteLockPath, { recursive: true, force: true });
+        } catch (removeError) {
+          const removeCode =
+            typeof removeError === "object" &&
+            removeError !== null &&
+            "code" in removeError
+              ? (removeError as { code?: unknown }).code
+              : undefined;
+          if (removeCode !== "ENOENT" && removeCode !== "ENOTEMPTY") {
+            throw removeError;
+          }
+        }
         continue;
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
