@@ -1,6 +1,7 @@
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -14,8 +15,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   __testOnlyDescribeFixtureHarnessV1,
+  __testOnlySetFixtureFaultV1,
   createFixtureRepositoryHarnessV1,
   createTrustedFixtureGitPolicyV1,
+  recoverFixtureRepositoryHarnessV1,
   type FixtureLimitsV1,
 } from "../src/adapters/git.js";
 import type {
@@ -86,6 +89,12 @@ function fixtureLimits(): FixtureLimitsV1 {
     maxInputArrayEntries: 256,
     maxInputStringBytes: 1024 * 1024,
   };
+}
+
+function createTrustedParent(): string {
+  const path = mkdtempSync(join(tmpdir(), "fixture-worktrees-parent-"));
+  chmodSync(path, 0o700);
+  return path;
 }
 
 function createPolicy(parent: string) {
@@ -324,6 +333,468 @@ describe("worktree adapter", () => {
     await harness.close();
     rmSync(parent, { recursive: true, force: true });
   }, 15_000);
+
+  it("reconciles staged remote and worktree recovery across prepared, started, and observed states", async () => {
+    const expectations = {
+      prepared: { outcome: "not-applied", diagnostic: null },
+      "effect-started": { outcome: "blocked", diagnostic: "outcome-unknown" },
+      "effect-observed": { outcome: "already-applied", diagnostic: null },
+    } as const;
+    const stages = ["prepared", "effect-started", "effect-observed"] as const;
+
+    for (const stage of stages) {
+      const remoteParent = createTrustedParent();
+      const remotePolicy = createPolicy(remoteParent);
+      const remoteOptions = {
+        runId: `run-remote-recovery-${stage}`,
+        taskId: `task-remote-recovery-${stage}`,
+        expectedBaseCommit: "a".repeat(64),
+        expectedBaseTree: "b".repeat(64),
+      };
+      const remoteHarness = await createFixtureRepositoryHarnessV1(
+        remotePolicy,
+        remoteOptions,
+      );
+      try {
+        await remoteHarness.createRepository({
+          operationId: `repo-remote-recovery-${stage}`,
+          registrationId: "repo-main",
+          files: [
+            {
+              pathComponents: ["named-check-fixture.txt"],
+              mode: "100644",
+              content: new TextEncoder().encode("original\n"),
+            },
+          ],
+        });
+        __testOnlySetFixtureFaultV1(
+          remoteHarness,
+          `create-bare-remote:after-${stage}`,
+        );
+        const request = {
+          operationId: `remote-recovery-${stage}`,
+          registrationId: "remote-main",
+          sourceRegistrationId: "repo-main",
+        };
+        await expect(remoteHarness.createBareRemote(request)).rejects.toThrow(
+          /fixture injected fault/i,
+        );
+        await remoteHarness.close();
+
+        const recovered = await recoverFixtureRepositoryHarnessV1(
+          remotePolicy,
+          remoteOptions,
+        );
+        const replay = await recovered.createBareRemote(request);
+        expect(replay.outcome, `remote ${stage}`).toBe(
+          expectations[stage].outcome,
+        );
+        expect(replay.diagnostic?.code ?? null, `remote ${stage}`).toBe(
+          expectations[stage].diagnostic,
+        );
+      } finally {
+        rmSync(remoteParent, { recursive: true, force: true });
+      }
+
+      const worktreeParent = createTrustedParent();
+      const worktreePolicy = createPolicy(worktreeParent);
+      const worktreeOptions = {
+        runId: `run-worktree-recovery-${stage}`,
+        taskId: `task-worktree-recovery-${stage}`,
+        expectedBaseCommit: "a".repeat(64),
+        expectedBaseTree: "b".repeat(64),
+      };
+      const worktreeHarness = await createFixtureRepositoryHarnessV1(
+        worktreePolicy,
+        worktreeOptions,
+      );
+      try {
+        const repository = await worktreeHarness.createRepository({
+          operationId: `repo-worktree-recovery-${stage}`,
+          registrationId: "repo-main",
+          files: [
+            {
+              pathComponents: ["named-check-fixture.txt"],
+              mode: "100644",
+              content: new TextEncoder().encode("original\n"),
+            },
+          ],
+        });
+        __testOnlySetFixtureFaultV1(
+          worktreeHarness,
+          `create-worktree:after-${stage}`,
+        );
+        const request = {
+          operationId: `worktree-recovery-${stage}`,
+          registrationId: "check-main",
+          sourceRegistrationId: "repo-main",
+          role: "named-check" as const,
+          checkId: "fixture-pass",
+          candidateCommit: repository.post!.headCommit,
+          candidateTree: repository.post!.headTree,
+        };
+        await expect(worktreeHarness.createWorktree(request)).rejects.toThrow(
+          /fixture injected fault/i,
+        );
+        await worktreeHarness.close();
+
+        const recovered = await recoverFixtureRepositoryHarnessV1(
+          worktreePolicy,
+          worktreeOptions,
+        );
+        const replay = await recovered.createWorktree(request);
+        expect(replay.outcome, `worktree ${stage}`).toBe(
+          expectations[stage].outcome,
+        );
+        expect(replay.diagnostic?.code ?? null, `worktree ${stage}`).toBe(
+          expectations[stage].diagnostic,
+        );
+      } finally {
+        rmSync(worktreeParent, { recursive: true, force: true });
+      }
+
+      const removeParent = createTrustedParent();
+      const removePolicy = createPolicy(removeParent);
+      const removeOptions = {
+        runId: `run-remove-recovery-${stage}`,
+        taskId: `task-remove-recovery-${stage}`,
+        expectedBaseCommit: "a".repeat(64),
+        expectedBaseTree: "b".repeat(64),
+      };
+      const removeHarness = await createFixtureRepositoryHarnessV1(
+        removePolicy,
+        removeOptions,
+      );
+      try {
+        const repository = await removeHarness.createRepository({
+          operationId: `repo-remove-recovery-${stage}`,
+          registrationId: "repo-main",
+          files: [
+            {
+              pathComponents: ["named-check-fixture.txt"],
+              mode: "100644",
+              content: new TextEncoder().encode("original\n"),
+            },
+          ],
+        });
+        await removeHarness.createWorktree({
+          operationId: `worktree-remove-recovery-${stage}`,
+          registrationId: "check-main",
+          sourceRegistrationId: "repo-main",
+          role: "named-check",
+          checkId: "fixture-pass",
+          candidateCommit: repository.post!.headCommit,
+          candidateTree: repository.post!.headTree,
+        });
+        __testOnlySetFixtureFaultV1(
+          removeHarness,
+          `remove-worktree:after-${stage}`,
+        );
+        await expect(
+          removeHarness.removeWorktree(
+            `remove-recovery-${stage}`,
+            "check-main",
+          ),
+        ).rejects.toThrow(/fixture injected fault/i);
+        await removeHarness.close();
+
+        const recovered = await recoverFixtureRepositoryHarnessV1(
+          removePolicy,
+          removeOptions,
+        );
+        const replay = await recovered.removeWorktree(
+          `remove-recovery-${stage}`,
+          "check-main",
+        );
+        expect(replay.outcome, `remove ${stage}`).toBe(
+          expectations[stage].outcome,
+        );
+        expect(replay.diagnostic?.code ?? null, `remove ${stage}`).toBe(
+          expectations[stage].diagnostic,
+        );
+      } finally {
+        rmSync(removeParent, { recursive: true, force: true });
+      }
+    }
+  }, 60_000);
+
+  it("blocks drifted remote and worktree recovery after effect-observed faults", async () => {
+    const remoteParent = createTrustedParent();
+    const remotePolicy = createPolicy(remoteParent);
+    const remoteOptions = {
+      runId: "run-remote-drift-1",
+      taskId: "task-remote-drift-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    };
+    const remoteHarness = await createFixtureRepositoryHarnessV1(
+      remotePolicy,
+      remoteOptions,
+    );
+    try {
+      const repository = await remoteHarness.createRepository({
+        operationId: "repo-remote-drift-1",
+        registrationId: "repo-main",
+        files: [
+          {
+            pathComponents: ["named-check-fixture.txt"],
+            mode: "100644",
+            content: new TextEncoder().encode("original\n"),
+          },
+        ],
+      });
+      const remoteRequest = {
+        operationId: "remote-drift-1",
+        registrationId: "remote-main",
+        sourceRegistrationId: "repo-main",
+      };
+      __testOnlySetFixtureFaultV1(
+        remoteHarness,
+        "create-bare-remote:after-effect-observed",
+      );
+      await expect(
+        remoteHarness.createBareRemote(remoteRequest),
+      ).rejects.toThrow(/fixture injected fault/i);
+      const remotePath = __testOnlyDescribeFixtureHarnessV1(
+        remoteHarness,
+      ).registrations.find(
+        (entry) => entry.registrationId === "remote-main",
+      )?.path;
+      expect(remotePath).toBeDefined();
+      expect(
+        spawnSync(
+          gitExecutable(),
+          [
+            "-C",
+            remotePath!,
+            "update-ref",
+            "refs/heads/evil",
+            repository.post!.headCommit,
+          ],
+          { encoding: "utf8" },
+        ).status,
+      ).toBe(0);
+      await remoteHarness.close();
+      const recovered = await recoverFixtureRepositoryHarnessV1(
+        remotePolicy,
+        remoteOptions,
+      );
+      const replay = await recovered.createBareRemote(remoteRequest);
+      expect(replay.outcome).toBe("blocked");
+      expect(replay.diagnostic?.code).toBe("outcome-unknown");
+    } finally {
+      rmSync(remoteParent, { recursive: true, force: true });
+    }
+
+    const worktreeDriftCases = [
+      {
+        name: "rogue-extra-worktree",
+        seedVerifier: false,
+        mutate: (input: {
+          readonly parent: string;
+          readonly repoPath: string;
+          readonly verifierPath: string | undefined;
+          readonly candidateCommit: string;
+        }) =>
+          spawnSync(
+            gitExecutable(),
+            [
+              "-C",
+              input.repoPath,
+              "worktree",
+              "add",
+              "--detach",
+              join(input.parent, "rogue-extra-worktree"),
+              input.candidateCommit,
+            ],
+            { encoding: "utf8" },
+          ),
+      },
+      {
+        name: "missing-sibling-registration",
+        seedVerifier: true,
+        mutate: (input: {
+          readonly parent: string;
+          readonly repoPath: string;
+          readonly verifierPath: string | undefined;
+          readonly candidateCommit: string;
+        }) =>
+          spawnSync(
+            gitExecutable(),
+            [
+              "-C",
+              input.repoPath,
+              "worktree",
+              "remove",
+              "--force",
+              input.verifierPath!,
+            ],
+            { encoding: "utf8" },
+          ),
+      },
+      {
+        name: "drifted-sibling-fields",
+        seedVerifier: true,
+        mutate: (input: {
+          readonly parent: string;
+          readonly repoPath: string;
+          readonly verifierPath: string | undefined;
+          readonly candidateCommit: string;
+        }) =>
+          spawnSync(
+            gitExecutable(),
+            ["-C", input.verifierPath!, "switch", "-c", "drift-branch"],
+            { encoding: "utf8" },
+          ),
+      },
+    ] as const;
+
+    for (const [index, testCase] of worktreeDriftCases.entries()) {
+      const worktreeParent = createTrustedParent();
+      const worktreePolicy = createPolicy(worktreeParent);
+      const worktreeOptions = {
+        runId: `run-worktree-drift-${index + 1}`,
+        taskId: `task-worktree-drift-${index + 1}`,
+        expectedBaseCommit: "a".repeat(64),
+        expectedBaseTree: "b".repeat(64),
+      };
+      const worktreeHarness = await createFixtureRepositoryHarnessV1(
+        worktreePolicy,
+        worktreeOptions,
+      );
+      try {
+        const repository = await worktreeHarness.createRepository({
+          operationId: `repo-worktree-drift-${index + 1}`,
+          registrationId: "repo-main",
+          files: [
+            {
+              pathComponents: ["named-check-fixture.txt"],
+              mode: "100644",
+              content: new TextEncoder().encode("original\n"),
+            },
+          ],
+        });
+        if (testCase.seedVerifier) {
+          await worktreeHarness.createWorktree({
+            operationId: `verifier-worktree-drift-${index + 1}`,
+            registrationId: "verifier-main",
+            sourceRegistrationId: "repo-main",
+            role: "independent-verifier",
+            checkId: null,
+            candidateCommit: repository.post!.headCommit,
+            candidateTree: repository.post!.headTree,
+          });
+        }
+        const worktreeRequest = {
+          operationId: `worktree-drift-${index + 1}`,
+          registrationId: "check-main",
+          sourceRegistrationId: "repo-main",
+          role: "named-check" as const,
+          checkId: "fixture-pass",
+          candidateCommit: repository.post!.headCommit,
+          candidateTree: repository.post!.headTree,
+        };
+        __testOnlySetFixtureFaultV1(
+          worktreeHarness,
+          "create-worktree:after-effect-observed",
+        );
+        await expect(
+          worktreeHarness.createWorktree(worktreeRequest),
+        ).rejects.toThrow(/fixture injected fault/i);
+        const registrations =
+          __testOnlyDescribeFixtureHarnessV1(worktreeHarness).registrations;
+        const repoPath = registrations.find(
+          (entry) => entry.registrationId === "repo-main",
+        )?.path;
+        const verifierPath = registrations.find(
+          (entry) => entry.registrationId === "verifier-main",
+        )?.path;
+        expect(repoPath, testCase.name).toBeDefined();
+        expect(
+          testCase.mutate({
+            parent: worktreeParent,
+            repoPath: repoPath!,
+            verifierPath,
+            candidateCommit: repository.post!.headCommit,
+          }).status,
+          testCase.name,
+        ).toBe(0);
+        await worktreeHarness.close();
+        const recovered = await recoverFixtureRepositoryHarnessV1(
+          worktreePolicy,
+          worktreeOptions,
+        );
+        const replay = await recovered.createWorktree(worktreeRequest);
+        expect(replay.outcome, testCase.name).toBe("blocked");
+        expect(replay.diagnostic?.code, testCase.name).toBe("outcome-unknown");
+      } finally {
+        rmSync(worktreeParent, { recursive: true, force: true });
+      }
+    }
+
+    const removeParent = createTrustedParent();
+    const removePolicy = createPolicy(removeParent);
+    const removeOptions = {
+      runId: "run-remove-drift-1",
+      taskId: "task-remove-drift-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    };
+    const removeHarness = await createFixtureRepositoryHarnessV1(
+      removePolicy,
+      removeOptions,
+    );
+    try {
+      const repository = await removeHarness.createRepository({
+        operationId: "repo-remove-drift-1",
+        registrationId: "repo-main",
+        files: [
+          {
+            pathComponents: ["named-check-fixture.txt"],
+            mode: "100644",
+            content: new TextEncoder().encode("original\n"),
+          },
+        ],
+      });
+      await removeHarness.createWorktree({
+        operationId: "worktree-remove-drift-1",
+        registrationId: "check-main",
+        sourceRegistrationId: "repo-main",
+        role: "named-check",
+        checkId: "fixture-pass",
+        candidateCommit: repository.post!.headCommit,
+        candidateTree: repository.post!.headTree,
+      });
+      const worktreePath = __testOnlyDescribeFixtureHarnessV1(
+        removeHarness,
+      ).registrations.find(
+        (entry) => entry.registrationId === "check-main",
+      )?.path;
+      expect(worktreePath).toBeDefined();
+      __testOnlySetFixtureFaultV1(
+        removeHarness,
+        "remove-worktree:after-effect-observed",
+      );
+      await expect(
+        removeHarness.removeWorktree("remove-drift-1", "check-main"),
+      ).rejects.toThrow(/fixture injected fault/i);
+      mkdirSync(worktreePath!, { recursive: true, mode: 0o700 });
+      writeFileSync(join(worktreePath!, "resurrected.txt"), "drift\n", "utf8");
+      await removeHarness.close();
+      const recovered = await recoverFixtureRepositoryHarnessV1(
+        removePolicy,
+        removeOptions,
+      );
+      const replay = await recovered.removeWorktree(
+        "remove-drift-1",
+        "check-main",
+      );
+      expect(replay.outcome).toBe("blocked");
+      expect(replay.diagnostic?.code).toBe("outcome-unknown");
+    } finally {
+      rmSync(removeParent, { recursive: true, force: true });
+    }
+  }, 45_000);
 
   it("creates detached verifier and named-check worktrees and detects mutation", async () => {
     const parent = mkdtempSync(join(tmpdir(), "fixture-worktrees-parent-"));

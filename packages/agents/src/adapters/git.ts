@@ -303,12 +303,32 @@ interface CreateRepositoryOperationRequestV1 {
   readonly expectedBranch: "fixture-main";
 }
 
+interface BareRemoteRefEntryV1 {
+  readonly refname: string;
+  readonly objectId: string;
+}
+
+interface WorktreePorcelainEntryV1 {
+  readonly pathDigest: string;
+  readonly head: string;
+  readonly branch?: string;
+  readonly detached?: true;
+}
+
+interface WorktreeAdminRegistrationEntryV1 {
+  readonly registrationDigest: string;
+  readonly pathDigest: string;
+}
+
 interface CreateBareRemoteOperationRequestV1 {
   readonly registrationId: string;
   readonly sourceRegistrationId: string;
   readonly expectedConfigDigest: string;
   readonly expectedObjectFormat: "sha256";
   readonly expectedBranch: "fixture-main";
+  readonly expectedHeadRef: "refs/heads/fixture-main";
+  readonly expectedRefs: readonly BareRemoteRefEntryV1[];
+  readonly expectedRefSetDigest: string;
   readonly expectedCommit: string;
   readonly expectedTree: string;
   readonly expectedSourceCommonDirectoryDigest: string;
@@ -325,6 +345,10 @@ interface CreateWorktreeOperationRequestV1 {
   readonly expectedObjectFormat: "sha256";
   readonly expectedDetached: true;
   readonly expectedCommonDirectoryDigest: string;
+  readonly expectedWorktreeSet: readonly WorktreePorcelainEntryV1[];
+  readonly expectedWorktreeSetDigest: string;
+  readonly expectedAdminRegistrationSet: readonly WorktreeAdminRegistrationEntryV1[];
+  readonly expectedAdminRegistrationSetDigest: string;
 }
 
 interface RemoveWorktreeOperationRequestV1 {
@@ -1586,25 +1610,116 @@ function toNamedCheckRepositoryObservation(
   });
 }
 
+function worktreePorcelainEntry(input: {
+  readonly path: string;
+  readonly head: string;
+  readonly branch?: string;
+  readonly detached?: true;
+}): WorktreePorcelainEntryV1 {
+  const pathDigest = pathDigestForRelative(input.path);
+  if (!OBJECT_ID_PATTERN.test(input.head)) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
+  if (input.branch !== undefined) {
+    if (
+      input.detached === true ||
+      !input.branch.startsWith("refs/") ||
+      hasControlCharacter(input.branch)
+    ) {
+      throw new TypeError(
+        FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+      );
+    }
+    return Object.freeze({
+      pathDigest,
+      head: input.head,
+      branch: input.branch,
+    });
+  }
+  if (input.detached !== true) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
+  return Object.freeze({
+    pathDigest,
+    head: input.head,
+    detached: true,
+  });
+}
+
+function finalizeWorktreePorcelainEntry(current: {
+  readonly path: string | null;
+  readonly head: string | null;
+  readonly branch: string | null;
+  readonly detached: boolean;
+}): WorktreePorcelainEntryV1 {
+  if (current.path === null || current.head === null) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
+  if (current.branch !== null) {
+    return worktreePorcelainEntry({
+      path: current.path,
+      head: current.head,
+      branch: current.branch,
+    });
+  }
+  if (!current.detached) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
+  return worktreePorcelainEntry({
+    path: current.path,
+    head: current.head,
+    detached: true,
+  });
+}
+
 function parseWorktreeList(
   state: HarnessStateV1,
   cwd: string,
   allowClosed = false,
-): readonly unknown[] {
+): readonly WorktreePorcelainEntryV1[] {
   const output = runGit(state, cwd, ["worktree", "list", "--porcelain", "-z"], {
     allowClosed,
   }).stdout;
+  if (utf8Bytes(output) > state.policyState.limits.maxRecoveryBytes) {
+    throw new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1["limit-exhausted"]);
+  }
   const records = output.split("\0").filter(Boolean);
-  const worktrees: Array<Record<string, unknown>> = [];
-  let current: Record<string, unknown> | null = null;
+  const worktrees: WorktreePorcelainEntryV1[] = [];
+  let current: {
+    path: string | null;
+    head: string | null;
+    branch: string | null;
+    detached: boolean;
+  } | null = null;
   for (const record of records) {
     if (record.startsWith("worktree ")) {
-      if (current) worktrees.push(current);
-      current = Object.create(null) as Record<string, unknown>;
-      current.pathDigest = pathDigestForRelative(record.slice(9));
+      if (current !== null) {
+        worktrees.push(finalizeWorktreePorcelainEntry(current));
+      }
+      if (worktrees.length > state.policyState.limits.maxObservedWorktrees) {
+        throw new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1["limit-exhausted"]);
+      }
+      current = {
+        path: record.slice(9),
+        head: null,
+        branch: null,
+        detached: false,
+      };
       continue;
     }
-    if (!current) continue;
+    if (current === null) {
+      throw new TypeError(
+        FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+      );
+    }
     if (record.startsWith("HEAD ")) current.head = record.slice(5);
     else if (record.startsWith("branch ")) current.branch = record.slice(7);
     else if (record === "detached") current.detached = true;
@@ -1614,11 +1729,144 @@ function parseWorktreeList(
       );
     }
   }
-  if (current) worktrees.push(current);
+  if (current !== null) {
+    worktrees.push(finalizeWorktreePorcelainEntry(current));
+  }
+  if (worktrees.length > state.policyState.limits.maxObservedWorktrees) {
+    throw new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1["limit-exhausted"]);
+  }
   worktrees.sort((left, right) =>
-    String(left.pathDigest).localeCompare(String(right.pathDigest)),
+    left.pathDigest.localeCompare(right.pathDigest),
   );
-  return worktrees;
+  return Object.freeze(worktrees);
+}
+
+function readHeadReference(
+  state: HarnessStateV1,
+  cwd: string,
+  allowClosed = false,
+): string | null {
+  const result = runGit(state, cwd, ["symbolic-ref", "--quiet", "HEAD"], {
+    allowFailure: true,
+    allowClosed,
+  });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+function readBareRemoteRefs(
+  state: HarnessStateV1,
+  cwd: string,
+  allowClosed = false,
+): readonly BareRemoteRefEntryV1[] {
+  const output = runGit(
+    state,
+    cwd,
+    [
+      "for-each-ref",
+      "--sort=refname",
+      "--format=%(refname)%00%(objectname)",
+      "refs",
+    ],
+    { allowClosed },
+  ).stdout;
+  if (utf8Bytes(output) > state.policyState.limits.maxRecoveryBytes) {
+    throw new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1["limit-exhausted"]);
+  }
+  const refs = output
+    .split(/\n/u)
+    .map((line) => line.replace(/\r$/u, ""))
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const fields = line.split("\0");
+      if (fields.length !== 2) {
+        throw new TypeError(
+          FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+        );
+      }
+      const [refname, objectId] = fields;
+      if (
+        refname === undefined ||
+        objectId === undefined ||
+        !refname.startsWith("refs/") ||
+        hasControlCharacter(refname) ||
+        !OBJECT_ID_PATTERN.test(objectId)
+      ) {
+        throw new TypeError(
+          FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+        );
+      }
+      return Object.freeze({ refname, objectId });
+    });
+  if (refs.length > state.policyState.limits.maxRecoveryRecords) {
+    throw new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1["limit-exhausted"]);
+  }
+  return Object.freeze(refs);
+}
+
+function observeAdminWorktreeRegistrationSet(
+  state: HarnessStateV1,
+  commonDirectory: string,
+): readonly WorktreeAdminRegistrationEntryV1[] {
+  const worktreesDirectory = join(commonDirectory, "worktrees");
+  if (!existsSync(worktreesDirectory)) {
+    return Object.freeze([]);
+  }
+  const entries = readdirSync(worktreesDirectory, { withFileTypes: true }).sort(
+    (left, right) => left.name.localeCompare(right.name),
+  );
+  if (entries.length > state.policyState.limits.maxObservedWorktrees) {
+    throw new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1["limit-exhausted"]);
+  }
+  const registrations = entries.map((entry) => {
+    const adminPath = join(worktreesDirectory, entry.name);
+    const stat = lstatSync(adminPath);
+    if (
+      !SHA256_HEX_PATTERN.test(entry.name) ||
+      stat.isSymbolicLink() ||
+      !stat.isDirectory()
+    ) {
+      throw new TypeError(
+        FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+      );
+    }
+    const gitdir = readFileSync(join(adminPath, "gitdir"), "utf8").trim();
+    if (
+      gitdir.length === 0 ||
+      utf8Bytes(gitdir) > state.policyState.limits.maxRootPathBytes ||
+      hasControlCharacter(gitdir)
+    ) {
+      throw new TypeError(
+        FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+      );
+    }
+    const worktreeDotGit = resolve(adminPath, gitdir);
+    if (parse(worktreeDotGit).base !== ".git") {
+      throw new TypeError(
+        FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+      );
+    }
+    return Object.freeze({
+      registrationDigest: entry.name,
+      pathDigest: pathDigestForRelative(dirname(worktreeDotGit)),
+    });
+  });
+  return Object.freeze(registrations);
+}
+
+function bareRemoteRefSetDigest(refs: readonly BareRemoteRefEntryV1[]): string {
+  return computeGitCheckFixtureDigestV1(
+    "spts.fixture-operation-record/1.0.0",
+    refs,
+  );
+}
+
+function worktreeAdminRegistrationSetDigest(
+  registrations: readonly WorktreeAdminRegistrationEntryV1[],
+): string {
+  return computeGitCheckFixtureDigestV1(
+    "spts.fixture-operation-record/1.0.0",
+    registrations,
+  );
 }
 
 function worktreeSetContainsPath(
@@ -1629,10 +1877,7 @@ function worktreeSetContainsPath(
 ): boolean {
   const pathDigest = pathDigestForRelative(worktreePath);
   return parseWorktreeList(state, sourcePath, allowClosed).some(
-    (entry) =>
-      typeof entry === "object" &&
-      entry !== null &&
-      (entry as { readonly pathDigest?: unknown }).pathDigest === pathDigest,
+    (entry) => entry.pathDigest === pathDigest,
   );
 }
 
@@ -2421,6 +2666,260 @@ function createRepositoryRecoveryConflict(
   });
 }
 
+function sameFixtureValue(left: unknown, right: unknown): boolean {
+  return (
+    canonicalizeGitCheckFixtureValueV1(left) ===
+    canonicalizeGitCheckFixtureValueV1(right)
+  );
+}
+
+function bareRemoteRefEntry(
+  refname: string,
+  objectId: string,
+): BareRemoteRefEntryV1 {
+  if (
+    !refname.startsWith("refs/") ||
+    hasControlCharacter(refname) ||
+    !OBJECT_ID_PATTERN.test(objectId)
+  ) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
+  return Object.freeze({ refname, objectId });
+}
+
+function expectedBareRemoteRefs(
+  expectedCommit: string,
+): readonly BareRemoteRefEntryV1[] {
+  return Object.freeze([
+    bareRemoteRefEntry("refs/heads/fixture-main", expectedCommit),
+  ]);
+}
+
+function readBareRemoteRefEntryValue(
+  value: unknown,
+): BareRemoteRefEntryV1 | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const entry = value as Record<string, unknown>;
+  if (
+    typeof entry.refname !== "string" ||
+    !entry.refname.startsWith("refs/") ||
+    hasControlCharacter(entry.refname) ||
+    typeof entry.objectId !== "string" ||
+    !OBJECT_ID_PATTERN.test(entry.objectId)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    refname: entry.refname,
+    objectId: entry.objectId,
+  });
+}
+
+function readBareRemoteRefEntries(
+  value: unknown,
+): readonly BareRemoteRefEntryV1[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const refs = value.map((entry) => readBareRemoteRefEntryValue(entry));
+  if (refs.some((entry) => entry === null)) {
+    return null;
+  }
+  return Object.freeze(refs as BareRemoteRefEntryV1[]);
+}
+
+function readWorktreePorcelainEntryValue(
+  value: unknown,
+): WorktreePorcelainEntryV1 | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const entry = value as Record<string, unknown>;
+  if (
+    typeof entry.pathDigest !== "string" ||
+    !SHA256_HEX_PATTERN.test(entry.pathDigest) ||
+    typeof entry.head !== "string" ||
+    !OBJECT_ID_PATTERN.test(entry.head)
+  ) {
+    return null;
+  }
+  if (typeof entry.branch === "string") {
+    if (
+      entry.detached !== undefined ||
+      !entry.branch.startsWith("refs/") ||
+      hasControlCharacter(entry.branch)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      pathDigest: entry.pathDigest,
+      head: entry.head,
+      branch: entry.branch,
+    });
+  }
+  if (entry.detached !== true) {
+    return null;
+  }
+  return Object.freeze({
+    pathDigest: entry.pathDigest,
+    head: entry.head,
+    detached: true,
+  });
+}
+
+function readWorktreePorcelainEntries(
+  value: unknown,
+): readonly WorktreePorcelainEntryV1[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const entries = value.map((entry) => readWorktreePorcelainEntryValue(entry));
+  if (entries.some((entry) => entry === null)) {
+    return null;
+  }
+  return Object.freeze(entries as WorktreePorcelainEntryV1[]);
+}
+
+function worktreeAdminRegistrationEntry(
+  registrationDigest: string,
+  path: string,
+): WorktreeAdminRegistrationEntryV1 {
+  if (!SHA256_HEX_PATTERN.test(registrationDigest)) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
+  return Object.freeze({
+    registrationDigest,
+    pathDigest: pathDigestForRelative(path),
+  });
+}
+
+function readWorktreeAdminRegistrationEntryValue(
+  value: unknown,
+): WorktreeAdminRegistrationEntryV1 | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const entry = value as Record<string, unknown>;
+  if (
+    typeof entry.registrationDigest !== "string" ||
+    !SHA256_HEX_PATTERN.test(entry.registrationDigest) ||
+    typeof entry.pathDigest !== "string" ||
+    !SHA256_HEX_PATTERN.test(entry.pathDigest)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    registrationDigest: entry.registrationDigest,
+    pathDigest: entry.pathDigest,
+  });
+}
+
+function readWorktreeAdminRegistrationEntries(
+  value: unknown,
+): readonly WorktreeAdminRegistrationEntryV1[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const entries = value.map((entry) =>
+    readWorktreeAdminRegistrationEntryValue(entry),
+  );
+  if (entries.some((entry) => entry === null)) {
+    return null;
+  }
+  return Object.freeze(entries as WorktreeAdminRegistrationEntryV1[]);
+}
+
+function expectedCreateWorktreeSet(
+  state: HarnessStateV1,
+  source: RegistrationStateV1,
+  request: RegisterWorktreeRequestV1,
+): readonly WorktreePorcelainEntryV1[] {
+  const principal = [...state.registrations.values()].find(
+    (registration) =>
+      registration.role === "principal-candidate" &&
+      registration.commonDirectoryDigest === source.commonDirectoryDigest &&
+      registration.state === "retained",
+  );
+  if (!principal || principal.candidateCommit === null) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["registration-conflict"],
+    );
+  }
+  const entries = [
+    worktreePorcelainEntry({
+      path: principal.path,
+      head: principal.candidateCommit,
+      branch: "refs/heads/fixture-main",
+    }),
+    ...[...state.registrations.values()]
+      .filter(
+        (registration) =>
+          registration.role !== "principal-candidate" &&
+          registration.role !== "fixture-remote" &&
+          registration.commonDirectoryDigest === source.commonDirectoryDigest &&
+          registration.state === "active",
+      )
+      .map((registration) => {
+        if (registration.candidateCommit === null) {
+          throw new TypeError(
+            FIXTURE_DIAGNOSTIC_MESSAGES_V1["registration-conflict"],
+          );
+        }
+        return worktreePorcelainEntry({
+          path: registration.path,
+          head: registration.candidateCommit,
+          detached: true,
+        });
+      }),
+    worktreePorcelainEntry({
+      path: join(
+        state.directories.worktrees,
+        registrationDigestV1({ registrationId: request.registrationId }),
+      ),
+      head: request.candidateCommit,
+      detached: true,
+    }),
+  ].sort((left, right) => left.pathDigest.localeCompare(right.pathDigest));
+  return Object.freeze(entries);
+}
+
+function expectedCreateWorktreeAdminRegistrationSet(
+  state: HarnessStateV1,
+  source: RegistrationStateV1,
+  request: RegisterWorktreeRequestV1,
+): readonly WorktreeAdminRegistrationEntryV1[] {
+  const targetDigest = registrationDigestV1({
+    registrationId: request.registrationId,
+  });
+  const targetPath = join(state.directories.worktrees, targetDigest);
+  const entries = [
+    ...[...state.registrations.values()]
+      .filter(
+        (registration) =>
+          registration.role !== "principal-candidate" &&
+          registration.role !== "fixture-remote" &&
+          registration.commonDirectoryDigest === source.commonDirectoryDigest &&
+          registration.state === "active",
+      )
+      .map((registration) =>
+        worktreeAdminRegistrationEntry(
+          registration.registrationDigest,
+          registration.path,
+        ),
+      ),
+    worktreeAdminRegistrationEntry(targetDigest, targetPath),
+  ].sort((left, right) =>
+    left.registrationDigest.localeCompare(right.registrationDigest),
+  );
+  return Object.freeze(entries);
+}
+
 function readWorktreeRole(value: unknown): FixtureWorktreeRoleV1 | null {
   return value === "principal-candidate" ||
     value === "independent-verifier" ||
@@ -2438,12 +2937,16 @@ function createBareRemoteOperationRequest(
       FIXTURE_DIAGNOSTIC_MESSAGES_V1["registration-conflict"],
     );
   }
+  const expectedRefs = expectedBareRemoteRefs(source.candidateCommit);
   return Object.freeze({
     registrationId: request.registrationId,
     sourceRegistrationId: request.sourceRegistrationId,
     expectedConfigDigest: expectedGitConfigDigest(true),
     expectedObjectFormat: "sha256",
     expectedBranch: "fixture-main",
+    expectedHeadRef: "refs/heads/fixture-main",
+    expectedRefs,
+    expectedRefSetDigest: bareRemoteRefSetDigest(expectedRefs),
     expectedCommit: source.candidateCommit,
     expectedTree: source.candidateTree,
     expectedSourceCommonDirectoryDigest: source.commonDirectoryDigest,
@@ -2457,6 +2960,7 @@ function readCreateBareRemoteOperationRequest(
     return null;
   }
   const request = value as Record<string, unknown>;
+  const expectedRefs = readBareRemoteRefEntries(request.expectedRefs);
   if (
     typeof request.registrationId !== "string" ||
     !SAFE_ID_PATTERN.test(request.registrationId) ||
@@ -2465,12 +2969,21 @@ function readCreateBareRemoteOperationRequest(
     request.expectedConfigDigest !== expectedGitConfigDigest(true) ||
     request.expectedObjectFormat !== "sha256" ||
     request.expectedBranch !== "fixture-main" ||
+    request.expectedHeadRef !== "refs/heads/fixture-main" ||
+    expectedRefs === null ||
+    typeof request.expectedRefSetDigest !== "string" ||
+    !SHA256_HEX_PATTERN.test(request.expectedRefSetDigest) ||
     typeof request.expectedCommit !== "string" ||
     !OBJECT_ID_PATTERN.test(request.expectedCommit) ||
     typeof request.expectedTree !== "string" ||
     !OBJECT_ID_PATTERN.test(request.expectedTree) ||
     typeof request.expectedSourceCommonDirectoryDigest !== "string" ||
-    !SHA256_HEX_PATTERN.test(request.expectedSourceCommonDirectoryDigest)
+    !SHA256_HEX_PATTERN.test(request.expectedSourceCommonDirectoryDigest) ||
+    !sameFixtureValue(
+      expectedRefs,
+      expectedBareRemoteRefs(request.expectedCommit),
+    ) ||
+    request.expectedRefSetDigest !== bareRemoteRefSetDigest(expectedRefs)
   ) {
     return null;
   }
@@ -2480,6 +2993,9 @@ function readCreateBareRemoteOperationRequest(
     expectedConfigDigest: request.expectedConfigDigest,
     expectedObjectFormat: request.expectedObjectFormat,
     expectedBranch: request.expectedBranch,
+    expectedHeadRef: request.expectedHeadRef,
+    expectedRefs,
+    expectedRefSetDigest: request.expectedRefSetDigest,
     expectedCommit: request.expectedCommit,
     expectedTree: request.expectedTree,
     expectedSourceCommonDirectoryDigest:
@@ -2490,7 +3006,11 @@ function readCreateBareRemoteOperationRequest(
 function createWorktreeOperationRequest(
   request: RegisterWorktreeRequestV1,
   source: RegistrationStateV1,
+  state: HarnessStateV1,
 ): CreateWorktreeOperationRequestV1 {
+  const expectedWorktreeSet = expectedCreateWorktreeSet(state, source, request);
+  const expectedAdminRegistrationSet =
+    expectedCreateWorktreeAdminRegistrationSet(state, source, request);
   return Object.freeze({
     registrationId: request.registrationId,
     sourceRegistrationId: request.sourceRegistrationId,
@@ -2502,6 +3022,15 @@ function createWorktreeOperationRequest(
     expectedObjectFormat: "sha256",
     expectedDetached: true,
     expectedCommonDirectoryDigest: source.commonDirectoryDigest,
+    expectedWorktreeSet,
+    expectedWorktreeSetDigest: computeGitCheckFixtureDigestV1(
+      "spts.fixture-worktree-set/1.0.0",
+      expectedWorktreeSet,
+    ),
+    expectedAdminRegistrationSet,
+    expectedAdminRegistrationSetDigest: worktreeAdminRegistrationSetDigest(
+      expectedAdminRegistrationSet,
+    ),
   });
 }
 
@@ -2513,6 +3042,12 @@ function readCreateWorktreeOperationRequest(
   }
   const request = value as Record<string, unknown>;
   const role = readWorktreeRole(request.role);
+  const expectedWorktreeSet = readWorktreePorcelainEntries(
+    request.expectedWorktreeSet,
+  );
+  const expectedAdminRegistrationSet = readWorktreeAdminRegistrationEntries(
+    request.expectedAdminRegistrationSet,
+  );
   if (
     typeof request.registrationId !== "string" ||
     !SAFE_ID_PATTERN.test(request.registrationId) ||
@@ -2531,7 +3066,20 @@ function readCreateWorktreeOperationRequest(
     request.expectedObjectFormat !== "sha256" ||
     request.expectedDetached !== true ||
     typeof request.expectedCommonDirectoryDigest !== "string" ||
-    !SHA256_HEX_PATTERN.test(request.expectedCommonDirectoryDigest)
+    !SHA256_HEX_PATTERN.test(request.expectedCommonDirectoryDigest) ||
+    expectedWorktreeSet === null ||
+    typeof request.expectedWorktreeSetDigest !== "string" ||
+    !SHA256_HEX_PATTERN.test(request.expectedWorktreeSetDigest) ||
+    request.expectedWorktreeSetDigest !==
+      computeGitCheckFixtureDigestV1(
+        "spts.fixture-worktree-set/1.0.0",
+        expectedWorktreeSet,
+      ) ||
+    expectedAdminRegistrationSet === null ||
+    typeof request.expectedAdminRegistrationSetDigest !== "string" ||
+    !SHA256_HEX_PATTERN.test(request.expectedAdminRegistrationSetDigest) ||
+    request.expectedAdminRegistrationSetDigest !==
+      worktreeAdminRegistrationSetDigest(expectedAdminRegistrationSet)
   ) {
     return null;
   }
@@ -2546,6 +3094,11 @@ function readCreateWorktreeOperationRequest(
     expectedObjectFormat: request.expectedObjectFormat,
     expectedDetached: request.expectedDetached,
     expectedCommonDirectoryDigest: request.expectedCommonDirectoryDigest,
+    expectedWorktreeSet,
+    expectedWorktreeSetDigest: request.expectedWorktreeSetDigest,
+    expectedAdminRegistrationSet,
+    expectedAdminRegistrationSetDigest:
+      request.expectedAdminRegistrationSetDigest,
   });
 }
 
@@ -3904,6 +4457,8 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
         const configState = validateExactGitConfig(remotePath);
         const observation = observeBareRepositoryState(state, remotePath, true);
         const source = state.registrations.get(request.sourceRegistrationId);
+        const headReference = readHeadReference(state, remotePath, true);
+        const refs = readBareRemoteRefs(state, remotePath, true);
         const exactMatch =
           registration !== undefined &&
           registration.state === "retained" &&
@@ -3919,6 +4474,9 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
           observation.repositoryIdentity.objectFormat ===
             request.expectedObjectFormat &&
           observation.branch === request.expectedBranch &&
+          headReference === request.expectedHeadRef &&
+          sameFixtureValue(refs, request.expectedRefs) &&
+          bareRemoteRefSetDigest(refs) === request.expectedRefSetDigest &&
           observation.headCommit === request.expectedCommit &&
           observation.headTree === request.expectedTree &&
           source?.commonDirectoryDigest ===
@@ -4020,6 +4578,17 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
         const configState = validateExactGitConfig(worktreePath);
         const observation = observeRepositoryState(state, worktreePath, true);
         const source = state.registrations.get(request.sourceRegistrationId);
+        const actualWorktreeSet =
+          source === undefined
+            ? null
+            : parseWorktreeList(state, source.path, true);
+        const actualAdminRegistrationSet =
+          source === undefined
+            ? null
+            : observeAdminWorktreeRegistrationSet(
+                state,
+                source.commonDirectory,
+              );
         const exactMatch =
           registration !== undefined &&
           registrationMatchesWorktreeRequest(registration, request, "active") &&
@@ -4035,10 +4604,24 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
           observation.state.clean &&
           observation.state.headCommit === request.candidateCommit &&
           observation.state.headTree === request.candidateTree &&
+          observation.state.worktreeSetDigest ===
+            request.expectedWorktreeSetDigest &&
           source !== undefined &&
           source.commonDirectoryDigest ===
             request.expectedCommonDirectoryDigest &&
-          worktreeSetContainsPath(state, source.path, worktreePath, true);
+          actualWorktreeSet !== null &&
+          sameFixtureValue(actualWorktreeSet, request.expectedWorktreeSet) &&
+          computeGitCheckFixtureDigestV1(
+            "spts.fixture-worktree-set/1.0.0",
+            actualWorktreeSet,
+          ) === request.expectedWorktreeSetDigest &&
+          actualAdminRegistrationSet !== null &&
+          sameFixtureValue(
+            actualAdminRegistrationSet,
+            request.expectedAdminRegistrationSet,
+          ) &&
+          worktreeAdminRegistrationSetDigest(actualAdminRegistrationSet) ===
+            request.expectedAdminRegistrationSetDigest;
         const result = exactMatch
           ? createObservation(state, {
               operationId: operation.operationId,
@@ -4863,7 +5446,7 @@ async function createWorktree(
     registrationId: request.registrationId,
     registrationDigest,
     requestDigest,
-    request: createWorktreeOperationRequest(request, source),
+    request: createWorktreeOperationRequest(request, source, state),
     effect: () => {
       runGit(
         state,
