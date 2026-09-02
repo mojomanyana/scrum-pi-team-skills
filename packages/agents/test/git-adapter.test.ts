@@ -2,12 +2,15 @@ import {
   chmodSync,
   cpSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -553,6 +556,182 @@ describe("git adapter", () => {
 
     rmSync(parent, { recursive: true, force: true });
   }, 20_000);
+
+  it("retains unexpected root entries and links during cleanup", async () => {
+    const cases = [
+      {
+        name: "unexpected root file",
+        mutate: (rootPath: string) => {
+          writeFileSync(
+            join(rootPath, "unexpected.txt"),
+            "unexpected\n",
+            "utf8",
+          );
+        },
+      },
+      {
+        name: "unexpected transaction temp",
+        mutate: (rootPath: string) => {
+          writeFileSync(
+            join(rootPath, "transactions", "rogue.head.tmp-deadbeef"),
+            "unexpected\n",
+            "utf8",
+          );
+        },
+      },
+      {
+        name: "unexpected symlink",
+        mutate: (rootPath: string) => {
+          symlinkSync(
+            join(rootPath, "metadata", "root-manifest.json"),
+            join(rootPath, "unexpected-link"),
+          );
+        },
+      },
+      {
+        name: "unexpected hardlink",
+        mutate: (rootPath: string) => {
+          linkSync(
+            join(rootPath, "metadata", "root-manifest.json"),
+            join(rootPath, "unexpected-hardlink.json"),
+          );
+        },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const { parent, harness } = await createHarnessWithRepository();
+      try {
+        const { rootPath } = __testOnlyDescribeFixtureHarnessV1(harness);
+        testCase.mutate(rootPath);
+        await harness.close();
+        await expect(harness.cleanup()).rejects.toThrow(/cleanup root proof/i);
+        expect(existsSync(rootPath)).toBe(true);
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    }
+  }, 20_000);
+
+  it("blocks tampered create-repository recovery postconditions", async () => {
+    const request = {
+      operationId: "repo-recovery-guard-1",
+      registrationId: "repo-recovery-guard-main",
+      files: [
+        {
+          pathComponents: ["named-check-fixture.txt"],
+          mode: "100644" as const,
+          content: new TextEncoder().encode("original\n"),
+        },
+      ],
+    };
+    const cases = [
+      {
+        name: "tampered commit",
+        tamper: (repoPath: string) => {
+          writeFileSync(
+            join(repoPath, "named-check-fixture.txt"),
+            "tampered\n",
+            "utf8",
+          );
+          expect(
+            spawnSync(gitExecutable(), ["-C", repoPath, "add", "--all", "--"], {
+              encoding: "utf8",
+            }).status,
+          ).toBe(0);
+          expect(
+            spawnSync(
+              gitExecutable(),
+              [
+                "-C",
+                repoPath,
+                "commit",
+                "--no-gpg-sign",
+                "--no-verify",
+                "-m",
+                "tamper",
+              ],
+              {
+                encoding: "utf8",
+                env: {
+                  ...process.env,
+                  GIT_AUTHOR_NAME: "Probe",
+                  GIT_AUTHOR_EMAIL: "probe@example.invalid",
+                  GIT_AUTHOR_DATE: "2001-01-01T00:00:00Z",
+                  GIT_COMMITTER_NAME: "Probe",
+                  GIT_COMMITTER_EMAIL: "probe@example.invalid",
+                  GIT_COMMITTER_DATE: "2001-01-01T00:00:00Z",
+                },
+              },
+            ).status,
+          ).toBe(0);
+        },
+      },
+      {
+        name: "tampered config",
+        tamper: (repoPath: string) => {
+          writeFileSync(
+            join(repoPath, ".git", "config"),
+            `${readFileSync(join(repoPath, ".git", "config"), "utf8")}\n[alias]\n\tzzz = status\n`,
+            "utf8",
+          );
+        },
+      },
+      {
+        name: "tampered object",
+        tamper: (repoPath: string) => {
+          const head = spawnSync(
+            gitExecutable(),
+            ["-C", repoPath, "rev-parse", "HEAD^{commit}"],
+            { encoding: "utf8" },
+          ).stdout.trim();
+          unlinkSync(
+            join(repoPath, ".git", "objects", head.slice(0, 2), head.slice(2)),
+          );
+        },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const parent = createTrustedParent();
+      const policy = createPolicy(parent);
+      const options = {
+        runId: `run-${testCase.name.replace(/[^a-z]+/giu, "-")}`,
+        taskId: `task-${testCase.name.replace(/[^a-z]+/giu, "-")}`,
+        expectedBaseCommit: "a".repeat(64),
+        expectedBaseTree: "b".repeat(64),
+      };
+      const harness = await createFixtureRepositoryHarnessV1(policy, options);
+      try {
+        __testOnlySetFixtureFaultV1(
+          harness,
+          "create-repository:after-effect-observed",
+        );
+        await expect(harness.createRepository(request)).rejects.toThrow(
+          /fixture injected fault/i,
+        );
+        const repoPath = __testOnlyDescribeFixtureHarnessV1(
+          harness,
+        ).registrations.find(
+          (entry) => entry.registrationId === request.registrationId,
+        )?.path;
+        expect(repoPath).toBeDefined();
+        testCase.tamper(repoPath!);
+        await harness.close();
+
+        const recovered = await recoverFixtureRepositoryHarnessV1(
+          policy,
+          options,
+        );
+        const replay = await recovered.createRepository(request);
+        expect(replay.outcome, testCase.name).toBe("blocked");
+        expect(replay.diagnostic?.code, testCase.name).toBe("outcome-unknown");
+        expect(replay.post, testCase.name).toBeNull();
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    }
+  }, 30_000);
 
   it("preflights collisions and redacts git failures across public APIs", async () => {
     const parent = createTrustedParent();

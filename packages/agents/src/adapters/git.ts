@@ -288,6 +288,21 @@ interface OperationStageRecordV1 {
   readonly recordDigest: string;
 }
 
+interface RepositoryFixtureProjectionFileV1 {
+  readonly pathComponents: readonly string[];
+  readonly pathDigest: string;
+  readonly mode: FixtureFileV1["mode"];
+  readonly contentDigest: string;
+}
+
+interface CreateRepositoryOperationRequestV1 {
+  readonly registrationId: string;
+  readonly files: readonly RepositoryFixtureProjectionFileV1[];
+  readonly expectedConfigDigest: string;
+  readonly expectedObjectFormat: "sha256";
+  readonly expectedBranch: "fixture-main";
+}
+
 interface OperationStateV1 {
   readonly operationId: string;
   readonly kind: OperationKindV1;
@@ -361,6 +376,7 @@ interface HarnessStateV1 {
 
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
 const VERSION_PATTERN = /^git version (\d+)\.(\d+)\.(\d+)/;
 const ROOT_DIR_NAMES = Object.freeze([
   "home",
@@ -1080,24 +1096,16 @@ function normalizedConfigProjection(
     }));
 }
 
-function validateExactGitConfig(
-  cwd: string,
-): { readonly digest: string; readonly bare: boolean } | null {
-  const resolved = resolveGitPaths(cwd);
-  if (!resolved) return null;
-  const commonConfigPath = join(resolved.commonDirectory, "config");
-  if (!existsSync(commonConfigPath)) {
-    throw new TypeError(
-      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
-    );
-  }
-  if (existsSync(join(resolved.adminDirectory, "config.worktree"))) {
-    throw new TypeError(
-      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
-    );
-  }
-  const config = parseGitConfig(commonConfigPath);
-  const expected = resolved.bare
+function expectedGitConfigShape(bare: boolean): {
+  readonly extensions: { readonly objectformat: "sha256" };
+  readonly core: {
+    readonly repositoryformatversion: "1";
+    readonly filemode: "true";
+    readonly bare: "true" | "false";
+    readonly logallrefupdates?: "true";
+  };
+} {
+  return bare
     ? {
         extensions: { objectformat: "sha256" },
         core: {
@@ -1115,6 +1123,41 @@ function validateExactGitConfig(
           logallrefupdates: "true",
         },
       };
+}
+
+function expectedGitConfigDigest(bare: boolean): string {
+  const shape = expectedGitConfigShape(bare);
+  return computeGitCheckFixtureDigestV1(
+    "spts.fixture-common-directory/1.0.0",
+    Object.entries(shape)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([section, entries]) => ({
+        section,
+        entries: Object.entries(entries).sort(([left], [right]) =>
+          left.localeCompare(right),
+        ),
+      })),
+  );
+}
+
+function validateExactGitConfig(
+  cwd: string,
+): { readonly digest: string; readonly bare: boolean } | null {
+  const resolved = resolveGitPaths(cwd);
+  if (!resolved) return null;
+  const commonConfigPath = join(resolved.commonDirectory, "config");
+  if (!existsSync(commonConfigPath)) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
+  if (existsSync(join(resolved.adminDirectory, "config.worktree"))) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+    );
+  }
+  const config = parseGitConfig(commonConfigPath);
+  const expected = expectedGitConfigShape(resolved.bare);
   const expectedSections = Object.keys(expected).sort();
   const actualSections = [...config.keys()].sort();
   if (expectedSections.length !== actualSections.length) {
@@ -1975,6 +2018,249 @@ function createRegistrationState(
   };
 }
 
+function createRepositoryOperationRequest(
+  request: CreateRepositoryRequestV1,
+  files: readonly Readonly<FixtureFileV1>[],
+): CreateRepositoryOperationRequestV1 {
+  return Object.freeze({
+    registrationId: request.registrationId,
+    files: Object.freeze(
+      files
+        .map((file) =>
+          Object.freeze({
+            pathComponents: Object.freeze([...file.pathComponents]),
+            pathDigest: digestRelativePathV1(file.pathComponents),
+            mode: file.mode,
+            contentDigest: createHash("sha256")
+              .update(file.content)
+              .digest("hex"),
+          }),
+        )
+        .sort((left, right) =>
+          left.pathComponents
+            .join("/")
+            .localeCompare(right.pathComponents.join("/")),
+        ),
+    ),
+    expectedConfigDigest: expectedGitConfigDigest(false),
+    expectedObjectFormat: "sha256",
+    expectedBranch: "fixture-main",
+  });
+}
+
+function readCreateRepositoryOperationRequest(
+  value: unknown,
+): CreateRepositoryOperationRequestV1 | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const request = value as Record<string, unknown>;
+  if (
+    typeof request.registrationId !== "string" ||
+    !SAFE_ID_PATTERN.test(request.registrationId) ||
+    request.expectedConfigDigest !== expectedGitConfigDigest(false) ||
+    request.expectedObjectFormat !== "sha256" ||
+    request.expectedBranch !== "fixture-main" ||
+    !Array.isArray(request.files)
+  ) {
+    return null;
+  }
+  const files = request.files
+    .map((entry) => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        return null;
+      }
+      const file = entry as Record<string, unknown>;
+      if (
+        !Array.isArray(file.pathComponents) ||
+        file.pathComponents.length === 0 ||
+        file.pathComponents.some(
+          (component) => typeof component !== "string",
+        ) ||
+        (file.mode !== "100644" && file.mode !== "100755") ||
+        typeof file.pathDigest !== "string" ||
+        !SHA256_HEX_PATTERN.test(file.pathDigest) ||
+        typeof file.contentDigest !== "string" ||
+        !SHA256_HEX_PATTERN.test(file.contentDigest)
+      ) {
+        return null;
+      }
+      const pathComponents = Object.freeze([
+        ...file.pathComponents,
+      ]) as readonly string[];
+      if (digestRelativePathV1(pathComponents) !== file.pathDigest) return null;
+      return Object.freeze({
+        pathComponents,
+        pathDigest: file.pathDigest,
+        mode: file.mode,
+        contentDigest: file.contentDigest,
+      });
+    })
+    .filter(
+      (entry): entry is RepositoryFixtureProjectionFileV1 => entry !== null,
+    );
+  if (files.length !== request.files.length) return null;
+  return Object.freeze({
+    registrationId: request.registrationId,
+    files: Object.freeze(files),
+    expectedConfigDigest: request.expectedConfigDigest,
+    expectedObjectFormat: request.expectedObjectFormat,
+    expectedBranch: request.expectedBranch,
+  });
+}
+
+function collectRepositoryWorkspaceProjection(
+  rootPath: string,
+  pathComponents: readonly string[] = [],
+): {
+  readonly directories: readonly string[];
+  readonly files: readonly {
+    readonly path: string;
+    readonly mode: FixtureFileV1["mode"];
+    readonly contentDigest: string;
+  }[];
+} {
+  const directories: string[] = [];
+  const files: Array<{
+    readonly path: string;
+    readonly mode: FixtureFileV1["mode"];
+    readonly contentDigest: string;
+  }> = [];
+  const entries = readdirSync(rootPath, { withFileTypes: true }).sort(
+    (left, right) => left.name.localeCompare(right.name),
+  );
+  for (const entry of entries) {
+    if (pathComponents.length === 0 && entry.name === ".git") continue;
+    const absolutePath = join(rootPath, entry.name);
+    const stat = lstatSync(absolutePath);
+    if (stat.isSymbolicLink() || !(stat.isDirectory() || stat.isFile())) {
+      throw new TypeError(
+        FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
+      );
+    }
+    const relativePath = [...pathComponents, entry.name].join("/");
+    if (stat.isDirectory()) {
+      directories.push(relativePath);
+      const nested = collectRepositoryWorkspaceProjection(absolutePath, [
+        ...pathComponents,
+        entry.name,
+      ]);
+      directories.push(...nested.directories);
+      files.push(...nested.files);
+      continue;
+    }
+    files.push({
+      path: relativePath,
+      mode: (stat.mode & 0o111) === 0 ? "100644" : "100755",
+      contentDigest: digestFileContent(absolutePath),
+    });
+  }
+  return Object.freeze({
+    directories: Object.freeze(
+      directories.sort((left, right) => left.localeCompare(right)),
+    ),
+    files: Object.freeze(
+      files.sort((left, right) => left.path.localeCompare(right.path)),
+    ),
+  });
+}
+
+function repositoryProjectionMatchesRequest(
+  repositoryPath: string,
+  request: CreateRepositoryOperationRequestV1,
+): boolean {
+  const expectedDirectories = new Set<string>();
+  const expectedFiles = request.files
+    .map((file) => {
+      for (let index = 1; index < file.pathComponents.length; index += 1) {
+        expectedDirectories.add(file.pathComponents.slice(0, index).join("/"));
+      }
+      return {
+        path: file.pathComponents.join("/"),
+        mode: file.mode,
+        contentDigest: file.contentDigest,
+      };
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+  const actual = collectRepositoryWorkspaceProjection(repositoryPath);
+  const actualDirectories = [...actual.directories];
+  const expectedDirectoryList = [...expectedDirectories].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  if (
+    actualDirectories.length !== expectedDirectoryList.length ||
+    actualDirectories.some(
+      (entry, index) => entry !== expectedDirectoryList[index],
+    )
+  ) {
+    return false;
+  }
+  if (actual.files.length !== expectedFiles.length) return false;
+  return actual.files.every((file, index) => {
+    const expected = expectedFiles[index];
+    return (
+      file.path === expected?.path &&
+      file.mode === expected.mode &&
+      file.contentDigest === expected.contentDigest
+    );
+  });
+}
+
+function repositoryRecoveryPostcondition(operation: OperationStateV1): {
+  readonly headCommit: string;
+  readonly headTree: string;
+  readonly objectFormat: "sha1" | "sha256";
+} | null {
+  if (operation.latestStage !== "effect-observed") return null;
+  const result =
+    operation.result as Partial<FixtureRepositoryObservationV1> | null;
+  if (
+    !result ||
+    result.operationKind !== "create-repository" ||
+    result.outcome !== "applied" ||
+    result.post === null ||
+    result.post === undefined ||
+    result.repositoryIdentity === null ||
+    result.repositoryIdentity === undefined
+  ) {
+    return null;
+  }
+  return {
+    headCommit: result.post.headCommit,
+    headTree: result.post.headTree,
+    objectFormat: result.repositoryIdentity.objectFormat,
+  };
+}
+
+function createRepositoryRecoveryConflict(
+  state: HarnessStateV1,
+  operation: OperationStateV1,
+  registrationId: string,
+  repositoryIdentity?: FixtureRepositoryObservationV1["repositoryIdentity"],
+): OperationStageRecordV1 {
+  return writeOperationStage(state, {
+    operationId: operation.operationId,
+    kind: operation.kind,
+    registrationId,
+    registrationDigest: operation.registrationDigest,
+    requestDigest: operation.requestDigest,
+    request: operation.request,
+    sequence: 4,
+    stage: "completed",
+    priorRecordDigest: operation.latestRecordDigest,
+    terminalState: "outcome-unknown",
+    result: operationConflictObservation(state, {
+      operationId: operation.operationId,
+      registrationId,
+      operationKind: "create-repository",
+      purpose: "principal-candidate",
+      requestDigest: operation.requestDigest,
+      diagnosticCode: "outcome-unknown",
+      repositoryIdentity,
+    }),
+  });
+}
+
 function requestDigestForRepository(
   policyId: string,
   request: CreateRepositoryRequestV1,
@@ -2433,6 +2719,277 @@ async function closeHarnessState(state: HarnessStateV1): Promise<void> {
   state.status = recoveryRequired ? "recovery-required" : "closed";
 }
 
+function cleanupRootProofError(): TypeError {
+  return new TypeError("fixture cleanup root proof is invalid");
+}
+
+function validateCleanupRegistrationState(state: HarnessStateV1): void {
+  for (const registration of state.registrations.values()) {
+    if (
+      registration.role === "independent-verifier" ||
+      registration.role === "named-check"
+    ) {
+      if (registration.state !== "removed" || existsSync(registration.path)) {
+        throw cleanupRootProofError();
+      }
+      continue;
+    }
+    if (registration.state !== "retained" || !existsSync(registration.path)) {
+      throw cleanupRootProofError();
+    }
+    const configState = validateExactGitConfig(registration.path);
+    if (
+      configState === null ||
+      configState.bare !== (registration.role === "fixture-remote") ||
+      configState.digest !== registration.commonConfigDigest
+    ) {
+      throw cleanupRootProofError();
+    }
+    if (registration.role === "fixture-remote") {
+      assertHostileStateAbsent(state, registration.path, true);
+      countGitObjects(state, registration.path, true);
+      const objectFormat = readObjectFormat(state, registration.path, true);
+      const branch = readBranch(state, registration.path, true);
+      const headCommit = runGit(
+        state,
+        registration.path,
+        ["rev-parse", "--verify", "HEAD^{commit}"],
+        { allowClosed: true },
+      ).stdout.trim();
+      const headTree = runGit(
+        state,
+        registration.path,
+        ["rev-parse", "HEAD^{tree}"],
+        {
+          allowClosed: true,
+        },
+      ).stdout.trim();
+      if (
+        directoryDigest(snapshotDirectoryIdentity(registration.path)) !==
+          registration.commonDirectoryDigest ||
+        objectFormat !== "sha256" ||
+        branch !== "fixture-main" ||
+        (registration.candidateCommit !== null &&
+          headCommit !== registration.candidateCommit) ||
+        (registration.candidateTree !== null &&
+          headTree !== registration.candidateTree)
+      ) {
+        throw cleanupRootProofError();
+      }
+      continue;
+    }
+    const observation = observeRepositoryState(state, registration.path, true);
+    if (
+      observation.repositoryIdentity.commonDirectoryDigest !==
+        registration.commonDirectoryDigest ||
+      observation.repositoryIdentity.objectFormat !== "sha256" ||
+      observation.state.branch !== "fixture-main" ||
+      !observation.state.clean ||
+      (registration.candidateCommit !== null &&
+        observation.state.headCommit !== registration.candidateCommit) ||
+      (registration.candidateTree !== null &&
+        observation.state.headTree !== registration.candidateTree)
+    ) {
+      throw cleanupRootProofError();
+    }
+  }
+}
+
+type CleanupEntryKindV1 = "directory" | "file" | "opaque-directory";
+
+function expectedCleanupEntries(
+  state: HarnessStateV1,
+  relativePath: readonly string[],
+): ReadonlyMap<string, CleanupEntryKindV1> | null {
+  const entries = new Map<string, CleanupEntryKindV1>();
+  if (relativePath.length === 0) {
+    for (const name of ROOT_DIR_NAMES) entries.set(name, "directory");
+    return entries;
+  }
+  const [head, second, third] = relativePath;
+  if (
+    head === "home" ||
+    head === "hooks-disabled" ||
+    head === "quarantine" ||
+    head === "worktrees"
+  ) {
+    return relativePath.length === 1 ? entries : null;
+  }
+  if (head === "repositories") {
+    if (relativePath.length === 1) {
+      for (const registration of state.registrations.values()) {
+        if (registration.role === "principal-candidate") {
+          entries.set(registration.registrationDigest, "opaque-directory");
+        }
+      }
+      return entries;
+    }
+    return null;
+  }
+  if (head === "remotes") {
+    if (relativePath.length === 1) {
+      for (const registration of state.registrations.values()) {
+        if (registration.role === "fixture-remote") {
+          entries.set(
+            `${registration.registrationDigest}.git`,
+            "opaque-directory",
+          );
+        }
+      }
+      return entries;
+    }
+    return null;
+  }
+  if (head === "transactions") {
+    if (relativePath.length === 1) {
+      for (const operation of state.operations.values()) {
+        entries.set(
+          `${operationDigest(state.runDigest, operation.operationId)}.head`,
+          "file",
+        );
+      }
+      return entries;
+    }
+    return null;
+  }
+  if (head !== "metadata") return null;
+  if (relativePath.length === 1) {
+    entries.set(ROOT_MANIFEST_FILE, "file");
+    entries.set("operations", "directory");
+    entries.set("registrations", "directory");
+    return entries;
+  }
+  if (second === "operations") {
+    if (relativePath.length === 2) {
+      for (const operation of state.operations.values()) {
+        entries.set(
+          operationDigest(state.runDigest, operation.operationId),
+          "directory",
+        );
+      }
+      return entries;
+    }
+    if (relativePath.length === 3) {
+      const operation = [...state.operations.values()].find(
+        (entry) =>
+          operationDigest(state.runDigest, entry.operationId) === third,
+      );
+      if (!operation) return null;
+      entries.set("000001-prepared.json", "file");
+      entries.set("000002-effect-started.json", "file");
+      entries.set("000003-effect-observed.json", "file");
+      entries.set("000004-completed.json", "file");
+      return entries;
+    }
+    return null;
+  }
+  if (second !== "registrations") return null;
+  if (relativePath.length === 2) {
+    for (const registration of state.registrations.values()) {
+      entries.set(registration.registrationDigest, "directory");
+    }
+    return entries;
+  }
+  if (relativePath.length === 3) {
+    const registration = [...state.registrations.values()].find(
+      (entry) => entry.registrationDigest === third,
+    );
+    if (!registration) return null;
+    for (
+      let generation = 1;
+      generation <= registration.generation;
+      generation += 1
+    ) {
+      entries.set(`${generation}.json`, "file");
+    }
+    return entries;
+  }
+  return null;
+}
+
+function validateCleanupOpaqueDirectory(
+  rootDevice: number,
+  limits: Readonly<FixtureLimitsV1>,
+  path: string,
+  counters: { entries: number; bytes: number },
+): void {
+  const entries = readdirSync(path, { withFileTypes: true }).sort(
+    (left, right) => left.name.localeCompare(right.name),
+  );
+  for (const entry of entries) {
+    const absolutePath = join(path, entry.name);
+    const stat = lstatSync(absolutePath);
+    counters.entries += 1;
+    counters.bytes += stat.size;
+    if (
+      counters.entries > limits.maxCleanupEntries ||
+      counters.bytes > limits.maxCleanupBytes ||
+      stat.dev !== rootDevice ||
+      stat.isSymbolicLink() ||
+      !(stat.isDirectory() || stat.isFile()) ||
+      (stat.isFile() && stat.nlink !== 1)
+    ) {
+      throw cleanupRootProofError();
+    }
+    if (stat.isDirectory()) {
+      validateCleanupOpaqueDirectory(
+        rootDevice,
+        limits,
+        absolutePath,
+        counters,
+      );
+    }
+  }
+}
+
+function validateCleanupRootContents(state: HarnessStateV1): void {
+  validateCleanupRegistrationState(state);
+  const counters = { entries: 0, bytes: 0 };
+  const rootDevice = state.rootIdentity.device;
+  const walk = (absolutePath: string, relativePath: readonly string[]) => {
+    const expected = expectedCleanupEntries(state, relativePath);
+    if (!expected) throw cleanupRootProofError();
+    const entries = readdirSync(absolutePath, { withFileTypes: true }).sort(
+      (left, right) => left.name.localeCompare(right.name),
+    );
+    if (entries.length !== expected.size) throw cleanupRootProofError();
+    for (const entry of entries) {
+      const kind = expected.get(entry.name);
+      if (!kind) throw cleanupRootProofError();
+      const entryPath = join(absolutePath, entry.name);
+      const stat = lstatSync(entryPath);
+      counters.entries += 1;
+      counters.bytes += stat.size;
+      if (
+        counters.entries > state.policyState.limits.maxCleanupEntries ||
+        counters.bytes > state.policyState.limits.maxCleanupBytes ||
+        stat.dev !== rootDevice ||
+        stat.isSymbolicLink() ||
+        !(stat.isDirectory() || stat.isFile()) ||
+        (stat.isFile() && stat.nlink !== 1)
+      ) {
+        throw cleanupRootProofError();
+      }
+      if (kind === "file") {
+        if (!stat.isFile()) throw cleanupRootProofError();
+        continue;
+      }
+      if (!stat.isDirectory()) throw cleanupRootProofError();
+      if (kind === "opaque-directory") {
+        validateCleanupOpaqueDirectory(
+          rootDevice,
+          state.policyState.limits,
+          entryPath,
+          counters,
+        );
+        continue;
+      }
+      walk(entryPath, [...relativePath, entry.name]);
+    }
+  };
+  walk(state.rootPath, []);
+}
+
 function createHarnessObject(
   policy: TrustedFixtureGitPolicyV1,
   state: HarnessStateV1,
@@ -2506,6 +3063,7 @@ function cleanupHarness(harness: FixtureRepositoryHarnessV1): void {
       );
     }
   }
+  validateCleanupRootContents(state);
   rmSync(state.rootPath, { recursive: true, force: false });
   state.status = "removed";
 }
@@ -2573,7 +3131,17 @@ function loadRegistrationState(state: HarnessStateV1): void {
         ? path
         : readGitAbsoluteDir(state, path)
       : path;
-    const configState = existsSync(path) ? validateExactGitConfig(path) : null;
+    let configState: {
+      readonly digest: string;
+      readonly bare: boolean;
+    } | null = null;
+    if (existsSync(path)) {
+      try {
+        configState = validateExactGitConfig(path);
+      } catch {
+        configState = null;
+      }
+    }
     state.registrations.set(record.registrationId, {
       registrationId: record.registrationId,
       registrationDigest: record.registrationDigest,
@@ -2587,10 +3155,7 @@ function loadRegistrationState(state: HarnessStateV1): void {
       sourceCommonDirectoryDigest: null,
       commonConfigDigest:
         configState?.digest ??
-        computeGitCheckFixtureDigestV1(
-          "spts.fixture-common-directory/1.0.0",
-          path,
-        ),
+        expectedGitConfigDigest(record.role === "fixture-remote"),
       candidateCommit: record.candidateCommit,
       candidateTree: record.candidateTree,
       state: record.state,
@@ -2640,40 +3205,120 @@ function recoverIncompleteOperations(state: HarnessStateV1): void {
         state.directories.repositories,
         tuple.registrationDigest,
       );
-      const result = existsSync(repositoryPath)
-        ? createObservation(state, {
-            operationId: operation.operationId,
-            registrationId: tuple.registrationId,
-            operationKind: "create-repository",
-            purpose: "principal-candidate",
-            sequence: currentSequence(state),
-            repositoryIdentity: observeRepositoryState(state, repositoryPath)
-              .repositoryIdentity,
-            pre: null,
-            post: observeRepositoryState(state, repositoryPath).state,
-            outcome: "already-applied",
-            diagnostic: null,
-            requestDigest: operation.requestDigest,
-          })
-        : createObservation(state, {
-            operationId: operation.operationId,
-            registrationId: tuple.registrationId,
-            operationKind: "create-repository",
-            purpose: "principal-candidate",
-            sequence: currentSequence(state),
-            repositoryIdentity: {
-              commonDirectoryDigest: computeGitCheckFixtureDigestV1(
-                "spts.fixture-common-directory/1.0.0",
-                repositoryPath,
-              ),
-              objectFormat: "sha256",
-            },
-            pre: null,
-            post: null,
-            outcome: "not-applied",
-            diagnostic: null,
-            requestDigest: operation.requestDigest,
-          });
+      const request = readCreateRepositoryOperationRequest(operation.request);
+      if (!existsSync(repositoryPath)) {
+        const result =
+          operation.latestStage === "prepared"
+            ? createObservation(state, {
+                operationId: operation.operationId,
+                registrationId: tuple.registrationId,
+                operationKind: "create-repository",
+                purpose: "principal-candidate",
+                sequence: currentSequence(state),
+                repositoryIdentity: {
+                  commonDirectoryDigest: computeGitCheckFixtureDigestV1(
+                    "spts.fixture-common-directory/1.0.0",
+                    repositoryPath,
+                  ),
+                  objectFormat: "sha256",
+                },
+                pre: null,
+                post: null,
+                outcome: "not-applied",
+                diagnostic: null,
+                requestDigest: operation.requestDigest,
+              })
+            : operationConflictObservation(state, {
+                operationId: operation.operationId,
+                registrationId: tuple.registrationId,
+                operationKind: "create-repository",
+                purpose: "principal-candidate",
+                requestDigest: operation.requestDigest,
+                diagnosticCode: "outcome-unknown",
+              });
+        const completed = writeOperationStage(state, {
+          operationId: operation.operationId,
+          kind: operation.kind,
+          registrationId: tuple.registrationId,
+          registrationDigest: tuple.registrationDigest,
+          requestDigest: operation.requestDigest,
+          request: operation.request,
+          sequence: 4,
+          stage: "completed",
+          priorRecordDigest: operation.latestRecordDigest,
+          terminalState: terminalStateForResult(result),
+          result,
+        });
+        storeOperationState(state, completed);
+        continue;
+      }
+      if (!request) {
+        storeOperationState(
+          state,
+          createRepositoryRecoveryConflict(
+            state,
+            operation,
+            tuple.registrationId,
+          ),
+        );
+        continue;
+      }
+      let observation;
+      let configState;
+      try {
+        configState = validateExactGitConfig(repositoryPath);
+        observation = observeRepositoryState(state, repositoryPath, true);
+      } catch {
+        storeOperationState(
+          state,
+          createRepositoryRecoveryConflict(
+            state,
+            operation,
+            tuple.registrationId,
+          ),
+        );
+        continue;
+      }
+      const expectedPostcondition = repositoryRecoveryPostcondition(operation);
+      const exactMatch =
+        configState !== null &&
+        configState.bare === false &&
+        configState.digest === request.expectedConfigDigest &&
+        observation.repositoryIdentity.objectFormat ===
+          request.expectedObjectFormat &&
+        observation.state.branch === request.expectedBranch &&
+        observation.state.clean &&
+        repositoryProjectionMatchesRequest(repositoryPath, request) &&
+        expectedPostcondition !== null &&
+        observation.state.headCommit === expectedPostcondition.headCommit &&
+        observation.state.headTree === expectedPostcondition.headTree &&
+        observation.repositoryIdentity.objectFormat ===
+          expectedPostcondition.objectFormat;
+      if (!exactMatch) {
+        storeOperationState(
+          state,
+          createRepositoryRecoveryConflict(
+            state,
+            operation,
+            tuple.registrationId,
+            observation.repositoryIdentity,
+          ),
+        );
+        continue;
+      }
+      const result = createObservation(state, {
+        operationId: operation.operationId,
+        registrationId: tuple.registrationId,
+        operationKind: "create-repository",
+        purpose: "principal-candidate",
+        sequence: currentSequence(state),
+        repositoryIdentity: observation.repositoryIdentity,
+        pre: null,
+        post: observation.state,
+        outcome: "already-applied",
+        diagnostic: null,
+        requestDigest: operation.requestDigest,
+      });
       const completed = writeOperationStage(state, {
         operationId: operation.operationId,
         kind: operation.kind,
@@ -3055,9 +3700,7 @@ async function createRepository(
     registrationId: request.registrationId,
     registrationDigest,
     requestDigest,
-    request: {
-      registrationId: request.registrationId,
-    },
+    request: createRepositoryOperationRequest(request, files),
     effect: () => {
       runGit(
         state,
