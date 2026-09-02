@@ -221,6 +221,18 @@ function createPolicy(
   parent: string,
   options?: { readonly gitExecutablePath?: string },
 ) {
+  const trustedCheckExecutable = join(parent, "trusted-named-check.mjs");
+  if (!existsSync(trustedCheckExecutable)) {
+    writeFileSync(
+      trustedCheckExecutable,
+      [
+        `#!${process.execPath}`,
+        `await import(${JSON.stringify(new URL(`file://${fixtureScriptPath}`).href)});`,
+      ].join("\n"),
+      { encoding: "utf8", mode: 0o755 },
+    );
+    chmodSync(trustedCheckExecutable, 0o755);
+  }
   return createTrustedFixtureGitPolicyV1({
     policyId: "policy-1",
     trustedParent: parent,
@@ -229,22 +241,22 @@ function createPolicy(
     namedChecks: [
       {
         checkId: "fixture-hang",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "hang"],
+        executable: trustedCheckExecutable,
+        argv: ["hang"],
         maxDurationMs: 2_000,
         maxOutputBytes: 1_048_576,
       },
       {
         checkId: "fixture-pass",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "pass"],
+        executable: trustedCheckExecutable,
+        argv: ["pass"],
         maxDurationMs: 5_000,
         maxOutputBytes: 1_048_576,
       },
       {
         checkId: "fixture-mutate",
-        executable: process.execPath,
-        argv: [fixtureScriptPath, "mutate"],
+        executable: trustedCheckExecutable,
+        argv: ["mutate"],
         maxDurationMs: 5_000,
         maxOutputBytes: 1_048_576,
       },
@@ -330,6 +342,7 @@ describe("git adapter", () => {
       "fixture-pass",
     ]);
 
+    const duplicateExecutable = join(parent, "trusted-named-check.mjs");
     expect(() =>
       createTrustedFixtureGitPolicyV1({
         policyId: "policy-2",
@@ -339,15 +352,15 @@ describe("git adapter", () => {
         namedChecks: [
           {
             checkId: "fixture-pass",
-            executable: process.execPath,
-            argv: [fixtureScriptPath, "pass"],
+            executable: duplicateExecutable,
+            argv: ["pass"],
             maxDurationMs: 5_000,
             maxOutputBytes: 1_048_576,
           },
           {
             checkId: "fixture-pass",
-            executable: process.execPath,
-            argv: [fixtureScriptPath, "pass"],
+            executable: duplicateExecutable,
+            argv: ["pass"],
             maxDurationMs: 5_000,
             maxOutputBytes: 1_048_576,
           },
