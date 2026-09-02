@@ -459,6 +459,7 @@ function ensurePrivateDirectory(path: string): void {
       throw new StoreBootstrapValidationError();
     }
     fchmodSync(descriptor, 0o700);
+    fsyncSync(descriptor);
     const after = lstatSync(path);
     if (
       !after.isDirectory() ||
@@ -471,6 +472,7 @@ function ensurePrivateDirectory(path: string): void {
   } finally {
     closeSync(descriptor);
   }
+  syncDirectory(parse(path).dir);
   requirePrivateDirectory(path);
 }
 
@@ -3228,6 +3230,40 @@ async function openStoreInternal(
         options,
       );
       try {
+        const interruptedCreateOperation = readOperationEnvelope(
+          runPath,
+          optionsInput.operationId,
+          bootstrap.keyProvider.keyId,
+          keyBytes!,
+        );
+        if (interruptedCreateOperation && !existsSync(headPath(runPath))) {
+          requireValidOperationRecordBody(
+            interruptedCreateOperation.body,
+            storeIdentity(bootstrap),
+            request.identity,
+            bootstrap.keyProvider.keyId,
+            keyBytes!,
+          );
+          if (
+            interruptedCreateOperation.body.kind !== "create" ||
+            interruptedCreateOperation.body.requestDigest !==
+              optionsInput.requestDigest
+          ) {
+            return denied("replay-conflict");
+          }
+          const recovered = replayOperationResult<CreatedControllerRunV2>(
+            interruptedCreateOperation.body,
+          );
+          writeHeadState(
+            runPath,
+            bootstrap.keyProvider.keyId,
+            keyBytes!,
+            recovered.status,
+            recovered.snapshot,
+          );
+          renewNamespaceLock(bootstrap, held, keyBytes!, null);
+          return directResult(recovered);
+        }
         const existing = loadExistingOperationResult(
           runPath,
           storeIdentity(bootstrap),
@@ -3278,14 +3314,6 @@ async function openStoreInternal(
           1,
           false,
         );
-        writeHeadState(
-          runPath,
-          bootstrap.keyProvider.keyId,
-          keyBytes!,
-          status,
-          snapshot,
-        );
-        renewNamespaceLock(bootstrap, held, keyBytes!, currentTransaction);
         const result: CreatedControllerRunV2 = deepFreeze({
           kind: "create",
           replayed: false,
@@ -3301,6 +3329,15 @@ async function openStoreInternal(
           optionsInput.requestDigest,
           result,
         );
+        options?.fault?.("operation-durable");
+        writeHeadState(
+          runPath,
+          bootstrap.keyProvider.keyId,
+          keyBytes!,
+          status,
+          snapshot,
+        );
+        options?.fault?.("head-published");
         renewNamespaceLock(bootstrap, held, keyBytes!, null);
         return directResult(result);
       } finally {

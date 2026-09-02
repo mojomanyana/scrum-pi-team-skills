@@ -620,6 +620,31 @@ describe("authenticated file controller store v2", () => {
     expect(fileTree(root).some((path) => path.includes("outside"))).toBe(false);
   });
 
+  it("recovers creation after the durable operation precedes genesis head publication", async () => {
+    const root = privateRoot();
+    let injected = false;
+    const faulting = await open(root, {
+      fault(point) {
+        if (!injected && point === "operation-durable") {
+          injected = true;
+          throw new Error("injected-create-crash");
+        }
+      },
+    });
+    expect(await create(faulting)).toMatchObject({ disposition: "denied" });
+    await faulting.closeControllerStoreV2();
+
+    const fresh = await open(root);
+    expect(ok(await create(fresh))).toMatchObject({
+      kind: "create",
+      revision: 0,
+      replayed: true,
+    });
+    expect(ok(await fresh.loadControllerRunV2(identity()))).toMatchObject({
+      status: { committedRevision: 0 },
+    });
+  });
+
   it("uses and releases a namespace lock while creating a run", async () => {
     const root = privateRoot();
     const store = await open(root);

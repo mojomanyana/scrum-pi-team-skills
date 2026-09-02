@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 export { evaluateControllerTransitionV2 } from "./controller-core-v2.js";
 export * from "./controller-store-v2.js";
-export * from "./file-controller-store-v2.js";
+export { openControllerStoreV2 } from "./file-controller-store-v2.js";
 export {
   canonicalizeTrustedConcreteLaunchDecisionV2,
   createPiLaunchPlanV2,
@@ -31,12 +31,6 @@ export {
   ReceiptStorageError,
   type ReceiptFileOperations,
 } from "./receipt-filesystem.js";
-export {
-  CONTROLLER_STORE_FAULT_POINTS_V2,
-  openControllerStoreV2,
-  openControllerStoreV2ForTesting,
-  type ControllerStoreTestingOptionsV2,
-} from "./file-controller-store-v2.js";
 export {
   createReceiptAuthenticator,
   ReceiptAuthenticationError,
