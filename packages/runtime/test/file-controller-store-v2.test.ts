@@ -1,6 +1,8 @@
 import { createHmac } from "node:crypto";
 import {
+  appendFileSync,
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -8,6 +10,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -105,11 +108,11 @@ function configuration(rootPath: string, keyBytes = key): object {
   });
 }
 
-function initialSnapshot(): ControllerSnapshotV2 {
+function initialSnapshot(snapshotId = "store-run-1"): ControllerSnapshotV2 {
   return {
     contractId: "spts.controller-snapshot",
     schemaVersion: "2.0.0",
-    snapshotId: "store-run-1",
+    snapshotId,
     revision: 0,
     previousTransitionDigest: null,
     authorityDigest: "1".repeat(64),
@@ -276,14 +279,18 @@ async function commit(
   });
 }
 
-function runPath(rootPath: string): string {
+function runPathFor(rootPath: string, snapshot = initialSnapshot()): string {
   return join(
     rootPath,
     "controller-store-v2",
     namespaceDigest,
     "runs",
-    identity().runIdentityDigest,
+    identity(snapshot).runIdentityDigest,
   );
+}
+
+function runPath(rootPath: string): string {
+  return runPathFor(rootPath);
 }
 
 function fileTree(rootPath: string): string[] {
@@ -909,6 +916,237 @@ describe("authenticated file controller store v2", () => {
         status: { committedRevision: 0 },
       });
     }
+  });
+
+  it("binds an authenticated head to the exact requested run identity", async () => {
+    const root = privateRoot();
+    const first = initialSnapshot("run-a");
+    const second = initialSnapshot("run-b");
+    const store = await open(root);
+    ok(await create(store, first));
+    ok(await create(store, second));
+    copyFileSync(
+      join(runPathFor(root, first), "head.json"),
+      join(runPathFor(root, second), "head.json"),
+    );
+
+    await expect(store.loadControllerRunV2(identity(second))).resolves.toEqual({
+      disposition: "denied",
+      diagnostic: {
+        code: "integrity-failure",
+        message: "Controller store request denied.",
+      },
+    });
+  });
+
+  it("creates an authenticated namespace manifest that rejects the wrong key even while empty", async () => {
+    const root = privateRoot();
+    const store = await open(root);
+    await store.closeControllerStoreV2();
+    expect(
+      existsSync(
+        join(root, "controller-store-v2", namespaceDigest, "manifest.json"),
+      ),
+    ).toBe(true);
+
+    await expect(
+      openControllerStoreV2ForTesting(
+        configuration(root, Buffer.alloc(32, 0x42)),
+      ),
+    ).resolves.toEqual({
+      disposition: "denied",
+      diagnostic: {
+        code: "integrity-failure",
+        message: "Controller store request denied.",
+      },
+    });
+  });
+
+  it("rejects noncanonical authenticated record bytes", async () => {
+    const root = privateRoot();
+    const store = await open(root);
+    ok(await create(store));
+    await store.closeControllerStoreV2();
+    appendFileSync(join(runPath(root), "head.json"), "\n");
+
+    await expect(
+      openControllerStoreV2ForTesting(configuration(root)),
+    ).resolves.toMatchObject({
+      disposition: "denied",
+      diagnostic: { code: "integrity-failure" },
+    });
+  });
+
+  it("authenticates and validates every final operation while reopening", async () => {
+    const root = privateRoot();
+    const store = await open(root);
+    ok(await create(store));
+    await store.closeControllerStoreV2();
+    const operations = join(runPath(root), "operations");
+    const name = readdirSync(operations).find((entry) =>
+      entry.endsWith(".json"),
+    );
+    expect(name).toBeDefined();
+    const path = join(operations, name!);
+    const envelope = JSON.parse(readFileSync(path, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    envelope.authenticationTag = "0".repeat(64);
+    writeFileSync(path, JSON.stringify(envelope), { mode: 0o600 });
+
+    await expect(
+      openControllerStoreV2ForTesting(configuration(root)),
+    ).resolves.toMatchObject({
+      disposition: "denied",
+      diagnostic: { code: "integrity-failure" },
+    });
+  });
+
+  it("reports success after the durable head linearization point", async () => {
+    const root = privateRoot();
+    const creator = await open(root);
+    ok(await create(creator));
+    await creator.closeControllerStoreV2();
+    const faulting = await open(root, {
+      fault(point) {
+        if (point === "head-published") {
+          throw new Error(`/secret/${"ghp_"}${"x".repeat(40)}`);
+        }
+      },
+    });
+
+    expect(await commit(faulting, initialSnapshot())).toMatchObject({
+      disposition: "ok",
+      value: { kind: "commit", revision: 1, replayed: false },
+    });
+  });
+
+  it("does not preserve a new head or report a stale retry when operation recovery evidence is missing", async () => {
+    const root = privateRoot();
+    const creator = await open(root);
+    ok(await create(creator));
+    await creator.closeControllerStoreV2();
+    const faulting = await open(root, {
+      fault(point) {
+        if (point === "head-published") throw new Error("simulated crash");
+      },
+    });
+    await commit(
+      faulting,
+      initialSnapshot(),
+      "begin-implementation",
+      1,
+      "missing-operation",
+    );
+    await faulting.closeControllerStoreV2();
+    rmSync(join(runPath(root), "transaction", "operation.json"));
+    const fresh = await open(root);
+
+    await expect(
+      fresh.recoverControllerRunV2(identity(), {
+        operationId: "recover-missing-operation",
+      }),
+    ).resolves.toMatchObject({
+      disposition: "denied",
+      diagnostic: { code: "integrity-failure" },
+    });
+    await expect(
+      commit(
+        fresh,
+        initialSnapshot(),
+        "begin-implementation",
+        1,
+        "missing-operation",
+      ),
+    ).resolves.toMatchObject({
+      disposition: "denied",
+      diagnostic: { code: "integrity-failure" },
+    });
+  });
+
+  it("contains hostile operation option accessors in the fixed result union", async () => {
+    const root = privateRoot();
+    const store = await open(root);
+    const hostile = Object.defineProperty({}, "abortSignal", {
+      enumerable: true,
+      get() {
+        throw new Error(`/secret/${"RAW-ghp_"}${"x".repeat(30)}`);
+      },
+    });
+
+    await expect(
+      store.createControllerRunV2(initialSnapshot(), hostile as never),
+    ).resolves.toEqual({
+      disposition: "denied",
+      diagnostic: {
+        code: "invalid-input",
+        message: "Controller store request denied.",
+      },
+    });
+  });
+
+  it("rejects a symlinked store directory without chmod of its external target", async () => {
+    const root = privateRoot();
+    const outside = privateRoot();
+    chmodSync(outside, 0o755);
+    symlinkSync(outside, join(root, "controller-store-v2"));
+    const before = lstatSync(outside).mode & 0o777;
+
+    await expect(
+      openControllerStoreV2ForTesting(configuration(root)),
+    ).resolves.toMatchObject({ disposition: "denied" });
+    expect(before).toBe(0o755);
+    expect(lstatSync(outside).mode & 0o777).toBe(before);
+  });
+
+  it("requires an exact frozen null-prototype deployment attestation", async () => {
+    const root = privateRoot();
+    const bootstrap = configuration(root) as Record<string, unknown>;
+    bootstrap.deploymentAttestation = nullRecord({
+      ...(bootstrap.deploymentAttestation as Record<string, unknown>),
+    });
+
+    await expect(
+      openControllerStoreV2ForTesting(bootstrap),
+    ).resolves.toMatchObject({
+      disposition: "denied",
+      diagnostic: { code: "durability-unavailable" },
+    });
+  });
+
+  it("rejects replay from a commit operation unreachable after head rollback", async () => {
+    const root = privateRoot();
+    const store = await open(root);
+    ok(await create(store));
+    const headPath = join(runPath(root), "head.json");
+    const genesis = readFileSync(headPath);
+    ok(
+      await commit(
+        store,
+        initialSnapshot(),
+        "begin-implementation",
+        1,
+        "rolled-back-operation",
+      ),
+    );
+    writeFileSync(headPath, genesis, { mode: 0o600 });
+
+    await expect(
+      commit(
+        store,
+        initialSnapshot(),
+        "begin-implementation",
+        1,
+        "rolled-back-operation",
+      ),
+    ).resolves.toMatchObject({
+      disposition: "denied",
+      diagnostic: { code: "integrity-failure" },
+    });
+    expect(
+      JSON.parse(readFileSync(headPath, "utf8")).body.status.committedRevision,
+    ).toBe(0);
   });
 });
 

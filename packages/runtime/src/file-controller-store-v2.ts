@@ -1,6 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
 import {
-  chmodSync,
   closeSync,
   constants,
   existsSync,
@@ -59,6 +58,7 @@ import {
 } from "@scrum-pi-team-skills/contracts";
 
 const STORE_ROOT_DIRECTORY = "controller-store-v2";
+const MANIFEST_FILE = "manifest.json";
 const RUNS_DIRECTORY = "runs";
 const OPERATIONS_DIRECTORY = "operations";
 const TRANSACTION_DIRECTORY = "transaction";
@@ -78,6 +78,7 @@ const LOCK_CANDIDATE_QUARANTINE = "lock-candidate";
 const RECORD_CONTRACT_ID = "spts.controller-store-file.v2" as const;
 const RECORD_SCHEMA_VERSION = 2 as const;
 const RECORD_BODY_DOMAIN = "spts/controller-store-file-body/v2";
+const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_HEAD_BYTES = 4 * 1024 * 1024;
 const MAX_OPERATION_BYTES = 4 * 1024 * 1024;
 const MAX_TRANSACTION_BYTES = 4 * 1024 * 1024;
@@ -161,6 +162,10 @@ type StoredReadyControllerStoreStatusV2 = Omit<
   ReadyControllerStoreStatusV2,
   "headRecordDigest"
 >;
+
+interface StoredManifestBodyV2 {
+  readonly identity: Readonly<ControllerStoreIdentityV2>;
+}
 
 interface StoredHeadBodyV2 {
   readonly status: Readonly<StoredReadyControllerStoreStatusV2>;
@@ -413,8 +418,10 @@ function requirePrivateDirectory(path: string): void {
 }
 
 function ensurePrivateDirectory(path: string): void {
+  let created = false;
   try {
     mkdirSync(path, { mode: 0o700 });
+    created = true;
   } catch (error) {
     if (
       typeof error === "object" &&
@@ -425,7 +432,45 @@ function ensurePrivateDirectory(path: string): void {
       throw error;
     }
   }
-  chmodSync(path, 0o700);
+  if (!created) {
+    requirePrivateDirectory(path);
+    return;
+  }
+
+  const before = lstatSync(path);
+  if (
+    !before.isDirectory() ||
+    before.isSymbolicLink() ||
+    before.uid !== expectedUid()
+  ) {
+    throw new StoreBootstrapValidationError();
+  }
+  const descriptor = openSync(
+    path,
+    constants.O_RDONLY | constants.O_DIRECTORY | noFollowFlag(),
+  );
+  try {
+    const opened = fstatSync(descriptor);
+    if (
+      !opened.isDirectory() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino
+    ) {
+      throw new StoreBootstrapValidationError();
+    }
+    fchmodSync(descriptor, 0o700);
+    const after = lstatSync(path);
+    if (
+      !after.isDirectory() ||
+      after.isSymbolicLink() ||
+      after.dev !== opened.dev ||
+      after.ino !== opened.ino
+    ) {
+      throw new StoreBootstrapValidationError();
+    }
+  } finally {
+    closeSync(descriptor);
+  }
   requirePrivateDirectory(path);
 }
 
@@ -618,6 +663,9 @@ function readAuthenticatedRecord<T extends StoreRecordBodyV2>(options: {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
+    if (canonicalizeControllerStoreValueV2(parsed) !== text) {
+      throw new StoreIntegrityError();
+    }
   } catch {
     throw new StoreIntegrityError();
   }
@@ -736,23 +784,40 @@ function validateBootstrap(value: unknown): ControllerStoreBootstrapV2 {
       "attestedBy",
     ],
   ) as Record<string, unknown>;
-  const expectedSemantics = [
+  const expectedSemantics = Object.freeze([
     "exclusive-create",
     "same-filesystem-atomic-rename",
     "file-fsync",
     "directory-fsync",
     "atomic-mkdir",
     "stable-owner-mode",
-  ] as const;
+  ] as const);
+  const attestedSemantics = attestationRecord.semantics;
+  const semanticsKeys = expectedSemantics.map((_, index) => String(index));
   if (
+    !Object.isFrozen(attestationRecord) ||
     attestationRecord.kind !== "trusted-local-filesystem-v1" ||
     attestationRecord.platform !== "linux" ||
     attestationRecord.nodeMajor !== 24 ||
-    !Array.isArray(attestationRecord.semantics) ||
-    attestationRecord.semantics.length !== expectedSemantics.length ||
-    !attestationRecord.semantics.every(
-      (item, index) => item === expectedSemantics[index],
-    ) ||
+    !Array.isArray(attestedSemantics) ||
+    !Object.isFrozen(attestedSemantics) ||
+    Object.getPrototypeOf(attestedSemantics) !== Array.prototype ||
+    Reflect.ownKeys(attestedSemantics).length !==
+      expectedSemantics.length + 1 ||
+    !semanticsKeys.every((key) => Object.hasOwn(attestedSemantics, key)) ||
+    !Object.hasOwn(attestedSemantics, "length") ||
+    attestedSemantics.length !== expectedSemantics.length ||
+    !expectedSemantics.every((item, index) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        attestedSemantics,
+        String(index),
+      );
+      return (
+        descriptor?.enumerable === true &&
+        "value" in descriptor &&
+        descriptor.value === item
+      );
+    }) ||
     attestationRecord.expectedUid !== expectedUid() ||
     attestationRecord.rootDevice !== statSync(rootPath).dev ||
     typeof attestationRecord.attestedBy !== "string" ||
@@ -799,6 +864,10 @@ function namespaceDigest(
 
 function namespacePath(bootstrap: ControllerStoreBootstrapV2): string {
   return join(storeRootPath(bootstrap), namespaceDigest(bootstrap));
+}
+
+function manifestPath(bootstrap: ControllerStoreBootstrapV2): string {
+  return join(namespacePath(bootstrap), MANIFEST_FILE);
 }
 
 function runsPath(bootstrap: ControllerStoreBootstrapV2): string {
@@ -911,6 +980,83 @@ function denied<T>(
   };
 }
 
+interface ValidatedOperationOptionsV2 {
+  readonly operationId: string;
+  readonly requestDigest: DigestSha256V2;
+  readonly abortSignal?: AbortSignal;
+}
+
+interface ValidatedRecoveryOptionsV2 {
+  readonly operationId: string;
+  readonly abortSignal?: AbortSignal;
+}
+
+function readOptionsDataRecord(
+  value: unknown,
+  requiredKeys: readonly string[],
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new StoreDeniedError("invalid-input");
+  }
+  const allowedKeys = [...requiredKeys, "abortSignal"];
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.some((key) => typeof key !== "string") ||
+    requiredKeys.some((key) => !Object.hasOwn(value, key)) ||
+    keys.some((key) => !allowedKeys.includes(key as string))
+  ) {
+    throw new StoreDeniedError("invalid-input");
+  }
+  const result: Record<string, unknown> = {};
+  for (const key of keys as string[]) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !("value" in descriptor)) {
+      throw new StoreDeniedError("invalid-input");
+    }
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+
+function validateAbortSignal(value: unknown): AbortSignal | undefined {
+  if (value === undefined) return undefined;
+  if (!(value instanceof AbortSignal)) {
+    throw new StoreDeniedError("invalid-input");
+  }
+  return value;
+}
+
+function validateOperationOptions(value: unknown): ValidatedOperationOptionsV2 {
+  const record = readOptionsDataRecord(value, ["operationId", "requestDigest"]);
+  if (
+    typeof record.operationId !== "string" ||
+    !isSafeString(record.operationId) ||
+    typeof record.requestDigest !== "string" ||
+    !digestPattern.test(record.requestDigest)
+  ) {
+    throw new StoreDeniedError("invalid-input");
+  }
+  return {
+    operationId: record.operationId,
+    requestDigest: record.requestDigest as DigestSha256V2,
+    abortSignal: validateAbortSignal(record.abortSignal),
+  };
+}
+
+function validateRecoveryOptions(value: unknown): ValidatedRecoveryOptionsV2 {
+  const record = readOptionsDataRecord(value, ["operationId"]);
+  if (
+    typeof record.operationId !== "string" ||
+    !isSafeString(record.operationId)
+  ) {
+    throw new StoreDeniedError("invalid-input");
+  }
+  return {
+    operationId: record.operationId,
+    abortSignal: validateAbortSignal(record.abortSignal),
+  };
+}
+
 function keyBytesFromProvider(bootstrap: ControllerStoreBootstrapV2): Buffer {
   const raw = bootstrap.keyProvider.acquire();
   if (!(raw instanceof Uint8Array) || raw.byteLength < digestByteLength) {
@@ -919,6 +1065,38 @@ function keyBytesFromProvider(bootstrap: ControllerStoreBootstrapV2): Buffer {
   const key = Buffer.from(raw);
   if (raw.byteLength > 0) raw.fill(0);
   return key;
+}
+
+function writeManifest(
+  bootstrap: ControllerStoreBootstrapV2,
+  keyBytes: Uint8Array,
+): void {
+  writeAuthenticatedRecord<StoredManifestBodyV2>({
+    path: manifestPath(bootstrap),
+    recordType: "store-manifest",
+    keyId: bootstrap.keyProvider.keyId,
+    keyBytes,
+    body: { identity: storeIdentity(bootstrap) },
+  });
+}
+
+function readManifest(
+  bootstrap: ControllerStoreBootstrapV2,
+  keyBytes: Uint8Array,
+): void {
+  const manifest = readAuthenticatedRecord<StoredManifestBodyV2>({
+    path: manifestPath(bootstrap),
+    recordType: "store-manifest",
+    keyId: bootstrap.keyProvider.keyId,
+    keyBytes,
+    maximumBytes: MAX_MANIFEST_BYTES,
+  });
+  if (
+    !exactKeys(manifest.body, ["identity"]) ||
+    !sameCanonicalValue(manifest.body.identity, storeIdentity(bootstrap))
+  ) {
+    throw new StoreIntegrityError();
+  }
 }
 
 function readHeadEnvelope(
@@ -1003,6 +1181,9 @@ function readReceiptEnvelope(
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
+    if (canonicalizeControllerStoreValueV2(parsed) !== text) {
+      throw new StoreIntegrityError();
+    }
   } catch {
     throw new StoreIntegrityError();
   }
@@ -1066,8 +1247,23 @@ function parseCommittedTransitionReceiptEnvelope(
   return parseCommittedControllerTransitionReceiptV2(value);
 }
 
+function snapshotMatchesRunIdentity(
+  snapshot: Readonly<ControllerSnapshotV2>,
+  identity: Readonly<ControllerRunIdentityV2>,
+): boolean {
+  return (
+    snapshot.snapshotId === identity.snapshotId &&
+    snapshot.identity.projectId === identity.projectId &&
+    snapshot.identity.taskId === identity.taskId &&
+    snapshot.identity.repositoryId === identity.repositoryId &&
+    snapshot.identity.headBranch === identity.headBranch
+  );
+}
+
 function readCurrentHeadState(
   runPath: string,
+  expectedStoreIdentity: Readonly<ControllerStoreIdentityV2>,
+  expectedRunIdentity: Readonly<ControllerRunIdentityV2>,
   keyId: string,
   keyBytes: Uint8Array,
 ): {
@@ -1096,25 +1292,39 @@ function readCurrentHeadState(
     throw new StoreIntegrityError();
   }
   if (body.status.kind !== "ready") throw new StoreIntegrityError();
+  const snapshot = cloneJsonValue<ControllerSnapshotV2>(body.snapshot);
   if (
-    !validateControllerSnapshotV2(
-      cloneJsonValue<ControllerSnapshotV2>(body.snapshot),
-    )
+    !validateControllerSnapshotV2(snapshot) ||
+    !sameCanonicalValue(body.status.identity, expectedStoreIdentity) ||
+    !sameCanonicalValue(body.status.runIdentity, expectedRunIdentity) ||
+    !snapshotMatchesRunIdentity(snapshot, expectedRunIdentity) ||
+    body.status.committedRevision !== snapshot.revision ||
+    body.status.snapshotDigest !== digestControllerSnapshotV2(snapshot) ||
+    body.status.operationCount !== snapshot.revision + 1 ||
+    body.status.quarantineCount !== 0 ||
+    body.status.cleanupRequired !== false
   ) {
     throw new StoreIntegrityError();
   }
-  const cleanupRequired =
-    body.status.cleanupRequired ||
-    hasPendingTransaction(runPath, keyId, keyBytes);
+  const cleanupRequired = hasPendingTransaction(runPath, keyId, keyBytes);
   const status = parseControllerStoreStatusV2({
     ...body.status,
     cleanupRequired,
     headRecordDigest: envelope.recordDigest,
   });
   if (status.kind !== "ready") throw new StoreIntegrityError();
+  assertHeadOperationReachability(
+    runPath,
+    expectedStoreIdentity,
+    expectedRunIdentity,
+    keyId,
+    keyBytes,
+    status,
+    snapshot,
+  );
   return {
     status,
-    snapshot: deepFreeze(cloneJsonValue<ControllerSnapshotV2>(body.snapshot)),
+    snapshot: deepFreeze(snapshot),
     cleanupRequired,
     recordDigest: envelope.recordDigest,
   };
@@ -1133,6 +1343,8 @@ function hasPendingTransaction(
 
 function currentRunStatusOrAbsent(
   runPath: string,
+  expectedStoreIdentity: Readonly<ControllerStoreIdentityV2>,
+  expectedRunIdentity: Readonly<ControllerRunIdentityV2>,
   keyId: string,
   keyBytes: Uint8Array,
 ):
@@ -1148,7 +1360,13 @@ function currentRunStatusOrAbsent(
       readonly code: "integrity-failure" | "recovery-required";
     } {
   try {
-    const head = readCurrentHeadState(runPath, keyId, keyBytes);
+    const head = readCurrentHeadState(
+      runPath,
+      expectedStoreIdentity,
+      expectedRunIdentity,
+      keyId,
+      keyBytes,
+    );
     if (head) return head;
     const txnDir = transactionPath(runPath);
     if (existsSync(txnDir)) {
@@ -1289,6 +1507,10 @@ function removeOperationRecordPending(runPath: string): void {
 
 function validateOperationRecordBody(
   value: unknown,
+  expectedStoreIdentity: Readonly<ControllerStoreIdentityV2>,
+  expectedRunIdentity: Readonly<ControllerRunIdentityV2>,
+  keyId: string,
+  keyBytes: Uint8Array,
 ): value is StoredOperationRecordBodyV2 {
   if (!exactKeys(value, ["kind", "operationId", "requestDigest", "result"])) {
     return false;
@@ -1305,30 +1527,103 @@ function validateOperationRecordBody(
     return false;
   }
   const result = value.result as Record<string, unknown>;
+  const expectedResultKeys =
+    value.kind === "create"
+      ? ["kind", "replayed", "revision", "snapshot", "status"]
+      : [
+          "kind",
+          "replayed",
+          "revision",
+          "snapshot",
+          "intents",
+          "receipt",
+          "status",
+        ];
   if (
+    !exactKeys(result, expectedResultKeys) ||
     result.kind !== value.kind ||
-    typeof result.replayed !== "boolean" ||
-    typeof result.revision !== "number"
-  )
+    result.replayed !== false ||
+    !Number.isSafeInteger(result.revision) ||
+    Number(result.revision) < 0
+  ) {
     return false;
+  }
+  const snapshot = cloneJsonValue<ControllerSnapshotV2>(result.snapshot);
   if (
-    !validateControllerSnapshotV2(
-      cloneJsonValue<ControllerSnapshotV2>(result.snapshot),
+    !validateControllerSnapshotV2(snapshot) ||
+    snapshot.revision !== result.revision ||
+    !snapshotMatchesRunIdentity(snapshot, expectedRunIdentity) ||
+    !validateControllerStoreStatusV2(result.status)
+  ) {
+    return false;
+  }
+  const status = result.status as ReadyControllerStoreStatusV2;
+  if (
+    status.kind !== "ready" ||
+    !sameCanonicalValue(status.identity, expectedStoreIdentity) ||
+    !sameCanonicalValue(status.runIdentity, expectedRunIdentity) ||
+    !sameCanonicalValue(
+      status,
+      createStoredStatus(
+        expectedStoreIdentity,
+        expectedRunIdentity,
+        snapshot,
+        snapshot.revision,
+        status.lastReceiptDigest,
+        snapshot.revision + 1,
+        false,
+      ),
     )
   ) {
     return false;
   }
-  if (!validateControllerStoreStatusV2(result.status)) return false;
-  if (value.kind === "commit") {
+  if (value.kind === "create") {
     return (
-      Array.isArray(result.intents) &&
-      result.intents.every(
-        (item) => typeof item === "object" && item !== null,
-      ) &&
-      validateCommittedControllerTransitionReceiptV2(result.receipt)
+      result.revision === 0 &&
+      snapshot.previousTransitionDigest === null &&
+      status.lastReceiptDigest === null
     );
   }
-  return true;
+  if (
+    result.revision === 0 ||
+    !Array.isArray(result.intents) ||
+    !validateCommittedTransitionReceiptEnvelope(result.receipt, keyId, keyBytes)
+  ) {
+    return false;
+  }
+  const receipt = result.receipt as CommittedControllerTransitionReceiptV2;
+  const operationIdentityDigest = digestControllerStoreValueV2(
+    "spts/controller-store-operation-identity/v2",
+    {
+      namespaceDigest: expectedRunIdentity.namespaceDigest,
+      runIdentityDigest: expectedRunIdentity.runIdentityDigest,
+      operationId: value.operationId,
+    },
+  );
+  return (
+    receipt.namespaceDigest === expectedRunIdentity.namespaceDigest &&
+    receipt.keyId === expectedStoreIdentity.keyId &&
+    receipt.taskId === expectedRunIdentity.taskId &&
+    receipt.projectId === expectedRunIdentity.projectId &&
+    receipt.repositoryId === expectedRunIdentity.repositoryId &&
+    receipt.runId === expectedRunIdentity.snapshotId &&
+    receipt.branch === expectedRunIdentity.headBranch &&
+    receipt.previousRevision === Number(result.revision) - 1 &&
+    receipt.committedRevision === result.revision &&
+    receipt.committedSnapshotDigest === digestControllerSnapshotV2(snapshot) &&
+    receipt.operationIdentity === value.operationId &&
+    receipt.idempotencyIdentity === `op-${operationIdentityDigest}` &&
+    receipt.canonicalRequestDigest === value.requestDigest &&
+    receipt.transitionDigest === snapshot.previousTransitionDigest &&
+    receipt.transitionChainDigest === receipt.transitionDigest &&
+    receipt.recordDigest === receipt.transitionDigest &&
+    receipt.orderedIntentsDigest ===
+      digestControllerStoreValueV2(
+        "spts/controller-store-ordered-intents/v2",
+        result.intents,
+      ) &&
+    status.lastReceiptDigest === receipt.receiptDigest
+  );
 }
 
 function validateControllerStoreStatusV2(
@@ -1338,6 +1633,346 @@ function validateControllerStoreStatusV2(
     return parseControllerStoreStatusV2(value) !== undefined;
   } catch {
     return false;
+  }
+}
+
+interface StoredOperationEvidenceV2 {
+  readonly body: Readonly<StoredOperationRecordBodyV2>;
+  readonly source: "final" | "pending";
+}
+
+interface StoredTransactionOperationEvidenceV2 {
+  readonly final: Readonly<StoredOperationRecordBodyV2> | null;
+  readonly pending: Readonly<StoredOperationRecordBodyV2> | null;
+}
+
+function requireValidOperationRecordBody(
+  value: unknown,
+  expectedStoreIdentity: Readonly<ControllerStoreIdentityV2>,
+  expectedRunIdentity: Readonly<ControllerRunIdentityV2>,
+  keyId: string,
+  keyBytes: Uint8Array,
+): asserts value is StoredOperationRecordBodyV2 {
+  try {
+    if (
+      validateOperationRecordBody(
+        value,
+        expectedStoreIdentity,
+        expectedRunIdentity,
+        keyId,
+        keyBytes,
+      )
+    ) {
+      return;
+    }
+  } catch {
+    // Authenticated but malformed operation data is an integrity failure.
+  }
+  throw new StoreIntegrityError();
+}
+
+function validateJournalBody(
+  value: unknown,
+  expectedRunIdentity: Readonly<ControllerRunIdentityV2>,
+): value is StoredJournalBodyV2 {
+  if (
+    !exactKeys(value, [
+      "operationId",
+      "requestDigest",
+      "fromRevision",
+      "toRevision",
+      "committedSnapshotDigest",
+      "operationIdentity",
+      "operationIdentityDigest",
+      "idempotencyIdentity",
+      "headPublished",
+    ]) ||
+    typeof value.operationId !== "string" ||
+    !isSafeString(value.operationId) ||
+    typeof value.requestDigest !== "string" ||
+    !digestPattern.test(value.requestDigest) ||
+    typeof value.fromRevision !== "number" ||
+    !Number.isSafeInteger(value.fromRevision) ||
+    value.fromRevision < 0 ||
+    value.fromRevision === Number.MAX_SAFE_INTEGER ||
+    typeof value.toRevision !== "number" ||
+    !Number.isSafeInteger(value.toRevision) ||
+    value.toRevision !== value.fromRevision + 1 ||
+    typeof value.committedSnapshotDigest !== "string" ||
+    !digestPattern.test(value.committedSnapshotDigest) ||
+    value.operationIdentity !== value.operationId ||
+    typeof value.operationIdentityDigest !== "string" ||
+    !digestPattern.test(value.operationIdentityDigest) ||
+    typeof value.idempotencyIdentity !== "string" ||
+    typeof value.headPublished !== "boolean"
+  ) {
+    return false;
+  }
+  const operationIdentityDigest = digestControllerStoreValueV2(
+    "spts/controller-store-operation-identity/v2",
+    {
+      namespaceDigest: expectedRunIdentity.namespaceDigest,
+      runIdentityDigest: expectedRunIdentity.runIdentityDigest,
+      operationId: value.operationId,
+    },
+  );
+  return (
+    value.operationIdentityDigest === operationIdentityDigest &&
+    value.idempotencyIdentity === `op-${operationIdentityDigest}`
+  );
+}
+
+function operationRecordMatchesJournal(
+  body: Readonly<StoredOperationRecordBodyV2>,
+  journal: Readonly<StoredJournalBodyV2>,
+): boolean {
+  if (body.kind !== "commit") return false;
+  const result = body.result as Readonly<CommittedControllerTransitionV2>;
+  return (
+    body.operationId === journal.operationId &&
+    body.requestDigest === journal.requestDigest &&
+    result.revision === journal.toRevision &&
+    digestControllerSnapshotV2(
+      cloneJsonValue<ControllerSnapshotV2>(result.snapshot),
+    ) === journal.committedSnapshotDigest &&
+    result.receipt.previousRevision === journal.fromRevision &&
+    result.receipt.committedRevision === journal.toRevision &&
+    result.receipt.committedSnapshotDigest ===
+      journal.committedSnapshotDigest &&
+    result.receipt.operationIdentity === journal.operationIdentity &&
+    result.receipt.idempotencyIdentity === journal.idempotencyIdentity &&
+    result.receipt.canonicalRequestDigest === journal.requestDigest
+  );
+}
+
+function readFinalOperationEvidence(
+  runPath: string,
+  expectedStoreIdentity: Readonly<ControllerStoreIdentityV2>,
+  expectedRunIdentity: Readonly<ControllerRunIdentityV2>,
+  keyId: string,
+  keyBytes: Uint8Array,
+): readonly StoredOperationEvidenceV2[] {
+  const directory = operationsPath(runPath);
+  if (!existsSync(directory)) return [];
+  requirePrivateDirectory(directory);
+  const evidence: StoredOperationEvidenceV2[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (!entry.isFile() || !/^[0-9a-f]{64}\.json$/.test(entry.name)) {
+      throw new StoreIntegrityError();
+    }
+    const path = join(directory, entry.name);
+    const envelope = readAuthenticatedRecord<StoredOperationRecordBodyV2>({
+      path,
+      recordType: "operation-record",
+      keyId,
+      keyBytes,
+      maximumBytes: MAX_OPERATION_BYTES,
+    });
+    requireValidOperationRecordBody(
+      envelope.body,
+      expectedStoreIdentity,
+      expectedRunIdentity,
+      keyId,
+      keyBytes,
+    );
+    if (operationRecordPath(runPath, envelope.body.operationId) !== path) {
+      throw new StoreIntegrityError();
+    }
+    evidence.push({ body: envelope.body, source: "final" });
+  }
+  return evidence;
+}
+
+function readTransactionOperationEvidence(
+  runPath: string,
+  expectedStoreIdentity: Readonly<ControllerStoreIdentityV2>,
+  expectedRunIdentity: Readonly<ControllerRunIdentityV2>,
+  keyId: string,
+  keyBytes: Uint8Array,
+  journal: Readonly<StoredJournalBodyV2>,
+): StoredTransactionOperationEvidenceV2 {
+  const pendingEnvelope = readPendingOperationEnvelope(
+    runPath,
+    keyId,
+    keyBytes,
+  );
+  const finalEnvelope = readOperationEnvelope(
+    runPath,
+    journal.operationId,
+    keyId,
+    keyBytes,
+  );
+  if (pendingEnvelope) {
+    requireValidOperationRecordBody(
+      pendingEnvelope.body,
+      expectedStoreIdentity,
+      expectedRunIdentity,
+      keyId,
+      keyBytes,
+    );
+    if (!operationRecordMatchesJournal(pendingEnvelope.body, journal)) {
+      throw new StoreIntegrityError();
+    }
+  }
+  if (finalEnvelope) {
+    requireValidOperationRecordBody(
+      finalEnvelope.body,
+      expectedStoreIdentity,
+      expectedRunIdentity,
+      keyId,
+      keyBytes,
+    );
+    if (!operationRecordMatchesJournal(finalEnvelope.body, journal)) {
+      throw new StoreIntegrityError();
+    }
+  }
+  if (
+    pendingEnvelope &&
+    finalEnvelope &&
+    !sameCanonicalValue(pendingEnvelope.body, finalEnvelope.body)
+  ) {
+    throw new StoreIntegrityError();
+  }
+  return {
+    final: finalEnvelope?.body ?? null,
+    pending: pendingEnvelope?.body ?? null,
+  };
+}
+
+function selectCanonicalOperationEvidence(
+  matches: readonly StoredOperationEvidenceV2[],
+): StoredOperationEvidenceV2 {
+  const selected = matches[0];
+  if (
+    !selected ||
+    matches.some(
+      (candidate) => !sameCanonicalValue(candidate.body, selected.body),
+    )
+  ) {
+    throw new StoreIntegrityError();
+  }
+  return selected;
+}
+
+function assertHeadOperationReachability(
+  runPath: string,
+  expectedStoreIdentity: Readonly<ControllerStoreIdentityV2>,
+  expectedRunIdentity: Readonly<ControllerRunIdentityV2>,
+  keyId: string,
+  keyBytes: Uint8Array,
+  status: Readonly<ReadyControllerStoreStatusV2>,
+  snapshot: Readonly<ControllerSnapshotV2>,
+): void {
+  const finalEvidence = readFinalOperationEvidence(
+    runPath,
+    expectedStoreIdentity,
+    expectedRunIdentity,
+    keyId,
+    keyBytes,
+  );
+  const journalEnvelope = readJournalEnvelope(runPath, keyId, keyBytes);
+  let transactionEvidence: StoredTransactionOperationEvidenceV2 = {
+    final: null,
+    pending: null,
+  };
+  if (journalEnvelope) {
+    if (!validateJournalBody(journalEnvelope.body, expectedRunIdentity)) {
+      throw new StoreIntegrityError();
+    }
+    transactionEvidence = readTransactionOperationEvidence(
+      runPath,
+      expectedStoreIdentity,
+      expectedRunIdentity,
+      keyId,
+      keyBytes,
+      journalEnvelope.body,
+    );
+    if (
+      journalEnvelope.body.toRevision === status.committedRevision &&
+      !transactionEvidence.final &&
+      !transactionEvidence.pending
+    ) {
+      throw new StoreIntegrityError();
+    }
+  } else if (readPendingOperationEnvelope(runPath, keyId, keyBytes)) {
+    throw new StoreIntegrityError();
+  }
+
+  const candidates: StoredOperationEvidenceV2[] = [...finalEvidence];
+  if (
+    journalEnvelope &&
+    transactionEvidence.pending &&
+    journalEnvelope.body.toRevision === status.committedRevision
+  ) {
+    candidates.push({
+      body: transactionEvidence.pending,
+      source: "pending",
+    });
+  }
+
+  const reachableFinalOperations = new Set<string>();
+  let expectedSnapshotDigest = status.snapshotDigest;
+  let expectedReceiptDigest = status.lastReceiptDigest;
+  for (let revision = status.committedRevision; revision > 0; revision -= 1) {
+    if (expectedReceiptDigest === null) throw new StoreIntegrityError();
+    const matches = candidates.filter((candidate) => {
+      if (candidate.body.kind !== "commit") return false;
+      const result = candidate.body
+        .result as Readonly<CommittedControllerTransitionV2>;
+      return (
+        result.revision === revision &&
+        result.receipt.receiptDigest === expectedReceiptDigest &&
+        digestControllerSnapshotV2(
+          cloneJsonValue<ControllerSnapshotV2>(result.snapshot),
+        ) === expectedSnapshotDigest
+      );
+    });
+    const selected = selectCanonicalOperationEvidence(matches);
+    const result = selected.body
+      .result as Readonly<CommittedControllerTransitionV2>;
+    if (
+      revision === status.committedRevision &&
+      !sameCanonicalValue(result.snapshot, snapshot)
+    ) {
+      throw new StoreIntegrityError();
+    }
+    for (const match of matches) {
+      if (match.source === "final") {
+        reachableFinalOperations.add(match.body.operationId);
+      }
+    }
+    expectedSnapshotDigest = result.receipt.previousSnapshotDigest;
+    expectedReceiptDigest = result.receipt.previousReceiptDigest;
+  }
+
+  const genesisMatches = candidates.filter((candidate) => {
+    if (candidate.body.kind !== "create") return false;
+    const result = candidate.body.result as Readonly<CreatedControllerRunV2>;
+    return (
+      result.revision === 0 &&
+      result.status.lastReceiptDigest === null &&
+      digestControllerSnapshotV2(
+        cloneJsonValue<ControllerSnapshotV2>(result.snapshot),
+      ) === expectedSnapshotDigest
+    );
+  });
+  const genesis = selectCanonicalOperationEvidence(genesisMatches);
+  if (
+    status.committedRevision === 0 &&
+    !sameCanonicalValue(genesis.body.result.snapshot, snapshot)
+  ) {
+    throw new StoreIntegrityError();
+  }
+  for (const match of genesisMatches) {
+    if (match.source === "final") {
+      reachableFinalOperations.add(match.body.operationId);
+    }
+  }
+  if (
+    expectedReceiptDigest !== null ||
+    reachableFinalOperations.size !== finalEvidence.length
+  ) {
+    throw new StoreIntegrityError();
   }
 }
 
@@ -1407,6 +2042,8 @@ function createStoredStatus(
 
 function loadExistingOperationResult(
   runPath: string,
+  expectedStoreIdentity: Readonly<ControllerStoreIdentityV2>,
+  expectedRunIdentity: Readonly<ControllerRunIdentityV2>,
   operationId: string,
   requestDigest: DigestSha256V2,
   keyId: string,
@@ -1427,22 +2064,54 @@ function loadExistingOperationResult(
     keyBytes,
   );
   if (finalRecord) {
-    if (finalRecord.body.requestDigest !== requestDigest)
-      return { kind: "conflict" };
-    if (!validateOperationRecordBody(finalRecord.body))
+    requireValidOperationRecordBody(
+      finalRecord.body,
+      expectedStoreIdentity,
+      expectedRunIdentity,
+      keyId,
+      keyBytes,
+    );
+    if (finalRecord.body.operationId !== operationId) {
       throw new StoreIntegrityError();
+    }
+    const head = readCurrentHeadState(
+      runPath,
+      expectedStoreIdentity,
+      expectedRunIdentity,
+      keyId,
+      keyBytes,
+    );
+    if (!head) throw new StoreIntegrityError();
+    if (finalRecord.body.requestDigest !== requestDigest) {
+      return { kind: "conflict" };
+    }
     return { kind: "replay", result: replayOperationResult(finalRecord.body) };
   }
   const pendingRecord = readPendingOperationEnvelope(runPath, keyId, keyBytes);
   if (!pendingRecord) return { kind: "none" };
-  if (!validateOperationRecordBody(pendingRecord.body))
+  if (
+    !validateOperationRecordBody(
+      pendingRecord.body,
+      expectedStoreIdentity,
+      expectedRunIdentity,
+      keyId,
+      keyBytes,
+    )
+  ) {
     throw new StoreIntegrityError();
+  }
   if (pendingRecord.body.requestDigest !== requestDigest)
     return { kind: "conflict" };
   const journal = readJournalEnvelope(runPath, keyId, keyBytes);
   if (!journal) return { kind: "none" };
   if (journal.body.operationId !== operationId) return { kind: "none" };
-  const head = readCurrentHeadState(runPath, keyId, keyBytes);
+  const head = readCurrentHeadState(
+    runPath,
+    expectedStoreIdentity,
+    expectedRunIdentity,
+    keyId,
+    keyBytes,
+  );
   if (!head) return { kind: "none" };
   if (head.status.committedRevision === journal.body.toRevision) {
     ensurePrivateDirectory(operationsPath(runPath));
@@ -1992,7 +2661,6 @@ function acquireNamespaceLock(
   );
   const candidatePath = lockCandidatePath(bootstrap, tokenDigest);
   mkdirSync(candidatePath, { mode: 0o700 });
-  chmodSync(candidatePath, 0o700);
   requirePrivateDirectory(candidatePath);
   const candidateIdentity = filesystemIdentity(candidatePath);
   const timestamp = lockTimestamp(bootstrap);
@@ -2282,75 +2950,74 @@ async function openStoreInternal(
     const storeRoot = storeRootPath(bootstrap);
     const namespaceDir = namespacePath(bootstrap);
     const runsDir = runsPath(bootstrap);
-    if (existsSync(namespaceDir)) {
+    const namespaceAlreadyExists = existsSync(namespaceDir);
+    ensurePrivateDirectory(storeRoot);
+    if (namespaceAlreadyExists) {
       requirePrivateDirectory(namespaceDir);
-      if (existsSync(runsDir)) {
-        requirePrivateDirectory(runsDir);
-        for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
-          if (!entry.isDirectory()) continue;
-          const runDir = join(runsDir, entry.name);
-          requirePrivateDirectory(runDir);
-          if (existsSync(headPath(runDir))) {
-            readHeadEnvelope(runDir, bootstrap.keyProvider.keyId, keyBytes);
+      if (!existsSync(manifestPath(bootstrap))) {
+        throw new StoreIntegrityError();
+      }
+      readManifest(bootstrap, keyBytes);
+    } else {
+      ensurePrivateDirectory(namespaceDir);
+      writeManifest(bootstrap, keyBytes);
+      readManifest(bootstrap, keyBytes);
+    }
+    ensurePrivateDirectory(runsDir);
+    for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) throw new StoreIntegrityError();
+      const runDir = join(runsDir, entry.name);
+      requirePrivateDirectory(runDir);
+      if (existsSync(headPath(runDir))) {
+        readHeadEnvelope(runDir, bootstrap.keyProvider.keyId, keyBytes);
+      }
+      if (existsSync(operationsPath(runDir))) {
+        requirePrivateDirectory(operationsPath(runDir));
+        for (const opEntry of readdirSync(operationsPath(runDir), {
+          withFileTypes: true,
+        })) {
+          if (!opEntry.isFile() || !opEntry.name.endsWith(".json")) {
+            throw new StoreIntegrityError();
           }
-          if (existsSync(operationsPath(runDir))) {
-            requirePrivateDirectory(operationsPath(runDir));
-            for (const opEntry of readdirSync(operationsPath(runDir), {
-              withFileTypes: true,
-            })) {
-              if (!opEntry.isFile() || !opEntry.name.endsWith(".json"))
-                continue;
-              readOperationEnvelope(
-                runDir,
-                opEntry.name.slice(0, -5),
-                bootstrap.keyProvider.keyId,
-                keyBytes,
-              );
-            }
-          }
-          if (existsSync(transactionPath(runDir))) {
-            requirePrivateDirectory(transactionPath(runDir));
-            if (existsSync(journalPath(runDir)))
-              readJournalEnvelope(
-                runDir,
-                bootstrap.keyProvider.keyId,
-                keyBytes,
-              );
-            if (existsSync(recordsPath(runDir)))
-              readAuthenticatedRecord({
-                path: recordsPath(runDir),
-                recordType: "transition-record",
-                keyId: bootstrap.keyProvider.keyId,
-                keyBytes,
-                maximumBytes: MAX_TRANSACTION_BYTES,
-              });
-            if (existsSync(pendingOperationPath(runDir)))
-              readPendingOperationEnvelope(
-                runDir,
-                bootstrap.keyProvider.keyId,
-                keyBytes,
-              );
-            if (existsSync(receiptPath(runDir)))
-              readReceiptEnvelope(
-                runDir,
-                bootstrap.keyProvider.keyId,
-                keyBytes,
-              );
-            if (existsSync(tempHeadPath(runDir)))
-              readAuthenticatedRecord({
-                path: tempHeadPath(runDir),
-                recordType: "head-pointer",
-                keyId: bootstrap.keyProvider.keyId,
-                keyBytes,
-                maximumBytes: MAX_HEAD_BYTES,
-              });
-          }
+          readAuthenticatedRecord<StoredOperationRecordBodyV2>({
+            path: join(operationsPath(runDir), opEntry.name),
+            recordType: "operation-record",
+            keyId: bootstrap.keyProvider.keyId,
+            keyBytes,
+            maximumBytes: MAX_OPERATION_BYTES,
+          });
         }
       }
+      if (existsSync(transactionPath(runDir))) {
+        requirePrivateDirectory(transactionPath(runDir));
+        if (existsSync(journalPath(runDir)))
+          readJournalEnvelope(runDir, bootstrap.keyProvider.keyId, keyBytes);
+        if (existsSync(recordsPath(runDir)))
+          readAuthenticatedRecord({
+            path: recordsPath(runDir),
+            recordType: "transition-record",
+            keyId: bootstrap.keyProvider.keyId,
+            keyBytes,
+            maximumBytes: MAX_TRANSACTION_BYTES,
+          });
+        if (existsSync(pendingOperationPath(runDir)))
+          readPendingOperationEnvelope(
+            runDir,
+            bootstrap.keyProvider.keyId,
+            keyBytes,
+          );
+        if (existsSync(receiptPath(runDir)))
+          readReceiptEnvelope(runDir, bootstrap.keyProvider.keyId, keyBytes);
+        if (existsSync(tempHeadPath(runDir)))
+          readAuthenticatedRecord({
+            path: tempHeadPath(runDir),
+            recordType: "head-pointer",
+            keyId: bootstrap.keyProvider.keyId,
+            keyBytes,
+            maximumBytes: MAX_HEAD_BYTES,
+          });
+      }
     }
-    ensurePrivateDirectory(storeRoot);
-    ensurePrivateDirectory(namespaceDir);
-    ensurePrivateDirectory(runsDir);
   } catch (error) {
     if (error instanceof StoreDeniedError) {
       return denied(error.code);
@@ -2401,6 +3068,8 @@ async function openStoreInternal(
       const runPath = currentRunDir(identity);
       const state = currentRunStatusOrAbsent(
         runPath,
+        storeIdentity(bootstrap),
+        identity,
         bootstrap.keyProvider.keyId,
         keyBytes!,
       );
@@ -2428,6 +3097,8 @@ async function openStoreInternal(
       const runPath = currentRunDir(identity);
       const state = currentRunStatusOrAbsent(
         runPath,
+        storeIdentity(bootstrap),
+        identity,
         bootstrap.keyProvider.keyId,
         keyBytes!,
       );
@@ -2468,8 +3139,10 @@ async function openStoreInternal(
     },
   ): Promise<ControllerStoreResultV2<CreatedControllerRunV2>> => {
     if (closed) return denied("store-closed");
-    if (optionsInput.abortSignal?.aborted) return denied("abort-before-commit");
     try {
+      optionsInput = validateOperationOptions(optionsInput);
+      if (optionsInput.abortSignal?.aborted)
+        return denied("abort-before-commit");
       const request = deriveControllerStoreCreationRequestV2(
         deriveControllerStoreNamespaceDigestV2(bootstrap.namespaceSeed),
         initialSnapshotInput,
@@ -2488,6 +3161,8 @@ async function openStoreInternal(
       try {
         const existing = loadExistingOperationResult(
           runPath,
+          storeIdentity(bootstrap),
+          request.identity,
           optionsInput.operationId,
           optionsInput.requestDigest,
           bootstrap.keyProvider.keyId,
@@ -2502,6 +3177,8 @@ async function openStoreInternal(
         if (existing.kind === "conflict") return denied("replay-conflict");
         const state = currentRunStatusOrAbsent(
           runPath,
+          storeIdentity(bootstrap),
+          request.identity,
           bootstrap.keyProvider.keyId,
           keyBytes!,
         );
@@ -2581,8 +3258,12 @@ async function openStoreInternal(
     },
   ): Promise<ControllerStoreResultV2<CommittedControllerTransitionV2>> => {
     if (closed) return denied("store-closed");
-    if (optionsInput.abortSignal?.aborted) return denied("abort-before-commit");
+    let linearizedResult: Readonly<CommittedControllerTransitionV2> | null =
+      null;
     try {
+      optionsInput = validateOperationOptions(optionsInput);
+      if (optionsInput.abortSignal?.aborted)
+        return denied("abort-before-commit");
       const request = deriveControllerStoreCommitRequestV2(
         deriveControllerStoreNamespaceDigestV2(bootstrap.namespaceSeed),
         previousSnapshotInput,
@@ -2603,6 +3284,8 @@ async function openStoreInternal(
       try {
         const existing = loadExistingOperationResult(
           runPath,
+          storeIdentity(bootstrap),
+          request.identity,
           optionsInput.operationId,
           optionsInput.requestDigest,
           bootstrap.keyProvider.keyId,
@@ -2617,6 +3300,8 @@ async function openStoreInternal(
         if (existing.kind === "conflict") return denied("replay-conflict");
         const state = currentRunStatusOrAbsent(
           runPath,
+          storeIdentity(bootstrap),
+          request.identity,
           bootstrap.keyProvider.keyId,
           keyBytes!,
         );
@@ -2869,6 +3554,7 @@ async function openStoreInternal(
         options?.fault?.("head-prepared");
         renameSync(tempHeadPath(runPath), headPath(runPath));
         syncDirectory(runPath);
+        linearizedResult = result;
         renewNamespaceLock(bootstrap, held, keyBytes!, currentTransaction);
         options?.fault?.("head-published");
         writeOperationRecordFinal(
@@ -2889,6 +3575,7 @@ async function openStoreInternal(
         releaseNamespaceLock(bootstrap, held, keyBytes!);
       }
     } catch (error) {
+      if (linearizedResult) return directResult(linearizedResult);
       if (error instanceof StoreDeniedError) return denied(error.code);
       if (error instanceof StoreIntegrityError)
         return denied("integrity-failure");
@@ -2906,8 +3593,10 @@ async function openStoreInternal(
     },
   ): Promise<ControllerStoreResultV2<RecoveredControllerRunV2>> => {
     if (closed) return denied("store-closed");
-    if (optionsInput.abortSignal?.aborted) return denied("abort-before-commit");
     try {
+      optionsInput = validateRecoveryOptions(optionsInput);
+      if (optionsInput.abortSignal?.aborted)
+        return denied("abort-before-commit");
       const identity = inspectRunIdentity(identityInput);
       const runPath = currentRunDir(identity);
       const held = acquireNamespaceLock(
@@ -2921,6 +3610,8 @@ async function openStoreInternal(
         requirePrivateDirectory(runPath);
         const state = currentRunStatusOrAbsent(
           runPath,
+          storeIdentity(bootstrap),
+          identity,
           bootstrap.keyProvider.keyId,
           keyBytes!,
         );
@@ -2939,6 +3630,17 @@ async function openStoreInternal(
           keyBytes!,
         );
         if (!journal) return denied("recovery-required");
+        if (!validateJournalBody(journal.body, identity)) {
+          throw new StoreIntegrityError();
+        }
+        const operationEvidence = readTransactionOperationEvidence(
+          runPath,
+          storeIdentity(bootstrap),
+          identity,
+          bootstrap.keyProvider.keyId,
+          keyBytes!,
+          journal.body,
+        );
         const currentTransaction = lockCurrentTransaction({
           kind: "recover",
           operationId: optionsInput.operationId,
@@ -2948,23 +3650,18 @@ async function openStoreInternal(
           toRevision: journal.body.toRevision,
         });
         if (state.status.committedRevision === journal.body.toRevision) {
+          if (!operationEvidence.pending && !operationEvidence.final) {
+            throw new StoreIntegrityError();
+          }
           renewNamespaceLock(bootstrap, held, keyBytes!, currentTransaction);
-          const pending = readPendingOperationEnvelope(
-            runPath,
-            bootstrap.keyProvider.keyId,
-            keyBytes!,
-          );
-          if (
-            pending &&
-            !existsSync(operationRecordPath(runPath, journal.body.operationId))
-          ) {
+          if (operationEvidence.pending && !operationEvidence.final) {
             writeOperationRecordFinal(
               runPath,
               bootstrap.keyProvider.keyId,
               keyBytes!,
               journal.body.operationId,
               journal.body.requestDigest,
-              pending.body.result,
+              operationEvidence.pending.result,
             );
           }
           renewNamespaceLock(bootstrap, held, keyBytes!, currentTransaction);
@@ -2977,6 +3674,7 @@ async function openStoreInternal(
           });
         }
         if (state.status.committedRevision === journal.body.fromRevision) {
+          if (operationEvidence.final) throw new StoreIntegrityError();
           renewNamespaceLock(bootstrap, held, keyBytes!, currentTransaction);
           cleanupPendingTransaction(runPath);
           renewNamespaceLock(bootstrap, held, keyBytes!, null);
