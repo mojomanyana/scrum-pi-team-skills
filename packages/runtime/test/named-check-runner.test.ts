@@ -16,11 +16,13 @@ import {
   createNamedCheckAuthorityV1,
   issueNamedCheckPermitV1,
   runExactNamedCheckV1,
-  type NamedCheckWorkspaceObservationV1,
+  type NamedCheckRepositoryObservationV1,
 } from "../src/named-check-runner.js";
-import type {
-  NamedCheckResultV1,
-  ValidationResult,
+import {
+  CLEAN_REPOSITORY_DIGESTS_V1,
+  computeGitCheckFixtureDigestV1,
+  type NamedCheckResultV1,
+  type ValidationResult,
 } from "@scrum-pi-team-skills/contracts";
 import { createNodeProcessAdapter } from "../src/process-host.js";
 
@@ -37,15 +39,60 @@ function requireValid(
   return result.value;
 }
 
-function workspaceObservation(path: string): NamedCheckWorkspaceObservationV1 {
+const workspaceBindings = new WeakMap<
+  object,
+  { readonly cwd: string; readonly homeDirectory: string }
+>();
+
+function bindWorkspaceExecution(root: string): object {
+  const token = {};
+  workspaceBindings.set(token, {
+    cwd: root,
+    homeDirectory: join(root, "home"),
+  });
+  return token;
+}
+
+function workspaceObservation(
+  path: string,
+  overrides?: Partial<NamedCheckRepositoryObservationV1>,
+): NamedCheckRepositoryObservationV1 {
   const file = join(path, "named-check-fixture.txt");
   const content = readFileSync(file, "utf8");
+  const sentinelDigest = createHash("sha256")
+    .update(content)
+    .update(String(readFileSync(file).byteLength))
+    .digest("hex");
   return {
-    workspaceTree: "b".repeat(64),
-    sentinelDigest: createHash("sha256")
-      .update(content)
-      .update(String(readFileSync(file).byteLength))
-      .digest("hex"),
+    repositoryIdentity: {
+      commonDirectoryDigest: computeGitCheckFixtureDigestV1(
+        "spts.fixture-common-directory/1.0.0",
+        path,
+      ),
+      objectFormat: "sha256",
+      ...overrides?.repositoryIdentity,
+    },
+    state: {
+      headCommit: "a".repeat(64),
+      headTree: "b".repeat(64),
+      branch: null,
+      detached: true,
+      clean: true,
+      indexDigest: CLEAN_REPOSITORY_DIGESTS_V1.indexDigest,
+      trackedWorktreeDigest: CLEAN_REPOSITORY_DIGESTS_V1.trackedWorktreeDigest,
+      untrackedSetDigest: CLEAN_REPOSITORY_DIGESTS_V1.untrackedSetDigest,
+      ignoredSetDigest: CLEAN_REPOSITORY_DIGESTS_V1.ignoredSetDigest,
+      conflictSetDigest: CLEAN_REPOSITORY_DIGESTS_V1.conflictSetDigest,
+      submoduleSetDigest: CLEAN_REPOSITORY_DIGESTS_V1.submoduleSetDigest,
+      filesystemSentinelDigest: sentinelDigest,
+      worktreeSetDigest: computeGitCheckFixtureDigestV1(
+        "spts.fixture-worktree-set/1.0.0",
+        [],
+      ),
+      ...overrides?.state,
+    },
+    workspaceSentinelDigest: sentinelDigest,
+    ...overrides,
   };
 }
 
@@ -64,6 +111,11 @@ function createWorkspace(): { readonly root: string; cleanup(): void } {
 function createAuthority() {
   return createNamedCheckAuthorityV1({
     policyId: "policy-1",
+    resolveWorkspaceExecution: (workspaceIdentityToken: object) => {
+      const binding = workspaceBindings.get(workspaceIdentityToken);
+      if (!binding) throw new TypeError("missing workspace binding");
+      return binding;
+    },
     checks: [
       {
         checkId: "fixture-pass",
@@ -154,12 +206,10 @@ describe("named-check-runner", () => {
         attempt: 1,
         candidateCommit: "a".repeat(64),
         candidateTree: "b".repeat(64),
-        workspaceIdentityToken: {},
+        workspaceIdentityToken: bindWorkspaceExecution(workspace.root),
         requestDigest: "c".repeat(64),
       },
       {
-        cwd: workspace.root,
-        homeDirectory: join(workspace.root, "home"),
         beforeObservation: before,
         observeAfter: () => workspaceObservation(workspace.root),
       },
@@ -210,6 +260,111 @@ describe("named-check-runner", () => {
     workspace.cleanup();
   }, 15_000);
 
+  it("rejects public cwd, home, and environment override attempts", async () => {
+    const workspace = createWorkspace();
+    const evilRoot = createWorkspace();
+    const authority = createAuthority();
+    const before = workspaceObservation(workspace.root);
+    let captured:
+      | {
+          readonly executable: string;
+          readonly argv: readonly string[];
+          readonly options: SpawnOptions;
+        }
+      | undefined;
+    const nodeAdapter = createNodeProcessAdapter();
+    const processAdapter = {
+      ...nodeAdapter,
+      spawn(
+        executable: string,
+        argv: readonly string[],
+        options: SpawnOptions,
+      ) {
+        captured = { executable, argv: [...argv], options };
+        return spawn(executable, [...argv], options) as ReturnType<
+          typeof nodeAdapter.spawn
+        >;
+      },
+    };
+
+    const permit = issueNamedCheckPermitV1(
+      authority,
+      {
+        operationId: "check-override-1",
+        runId: "run-1",
+        registrationId: "reg-override",
+        checkId: "fixture-pass",
+        attempt: 1,
+        candidateCommit: "a".repeat(64),
+        candidateTree: "b".repeat(64),
+        workspaceIdentityToken: bindWorkspaceExecution(workspace.root),
+        requestDigest: "7".repeat(64),
+      },
+      {
+        beforeObservation: before,
+        observeAfter: () => before,
+        cwd: evilRoot.root,
+        homeDirectory: join(evilRoot.root, "home"),
+        environment: {
+          HOME: evilRoot.root,
+          XDG_CONFIG_HOME: join(evilRoot.root, "home"),
+          GIT_TERMINAL_PROMPT: "1",
+        },
+      } as never,
+    );
+
+    const result = await runExactNamedCheckV1({ permit, processAdapter });
+    const value = requireValid(result);
+    expect(value.outcome).toBe("passed");
+    expect(captured?.options.cwd).toBe(workspace.root);
+    expect(captured?.options.env?.HOME).toBe(join(workspace.root, "home"));
+    expect(captured?.options.env?.GIT_TERMINAL_PROMPT).toBe("0");
+
+    workspace.cleanup();
+    evilRoot.cleanup();
+  });
+
+  it("treats index-only repository drift as mutation-detected", async () => {
+    const workspace = createWorkspace();
+    const authority = createAuthority();
+    const before = workspaceObservation(workspace.root);
+    const permit = issueNamedCheckPermitV1(
+      authority,
+      {
+        operationId: "check-index-only-1",
+        runId: "run-1",
+        registrationId: "reg-index-only",
+        checkId: "fixture-pass",
+        attempt: 1,
+        candidateCommit: "a".repeat(64),
+        candidateTree: "b".repeat(64),
+        workspaceIdentityToken: bindWorkspaceExecution(workspace.root),
+        requestDigest: "8".repeat(64),
+      },
+      {
+        beforeObservation: before,
+        observeAfter: () => ({
+          repositoryIdentity: before.repositoryIdentity,
+          state: {
+            ...before.state,
+            clean: false,
+            indexDigest: computeGitCheckFixtureDigestV1(
+              "spts.fixture-index/1.0.0",
+              [{ pathDigest: "ghost" }],
+            ),
+          },
+        }),
+      },
+    );
+
+    const result = await runExactNamedCheckV1({ permit });
+    const value = requireValid(result);
+    expect(value.outcome).toBe("mutation-detected");
+    expect(value.diagnostic?.code).toBe("workspace-mutated");
+
+    workspace.cleanup();
+  });
+
   it("classifies failure, timeout, mutation, and descendant cleanup safely", async () => {
     const authority = createAuthority();
 
@@ -224,12 +379,10 @@ describe("named-check-runner", () => {
         attempt: 1,
         candidateCommit: "a".repeat(64),
         candidateTree: "b".repeat(64),
-        workspaceIdentityToken: {},
+        workspaceIdentityToken: bindWorkspaceExecution(failureWorkspace.root),
         requestDigest: "d".repeat(64),
       },
       {
-        cwd: failureWorkspace.root,
-        homeDirectory: join(failureWorkspace.root, "home"),
         beforeObservation: workspaceObservation(failureWorkspace.root),
         observeAfter: () => workspaceObservation(failureWorkspace.root),
       },
@@ -253,12 +406,10 @@ describe("named-check-runner", () => {
         attempt: 1,
         candidateCommit: "a".repeat(64),
         candidateTree: "b".repeat(64),
-        workspaceIdentityToken: {},
+        workspaceIdentityToken: bindWorkspaceExecution(timeoutWorkspace.root),
         requestDigest: "e".repeat(64),
       },
       {
-        cwd: timeoutWorkspace.root,
-        homeDirectory: join(timeoutWorkspace.root, "home"),
         beforeObservation: workspaceObservation(timeoutWorkspace.root),
         observeAfter: () => workspaceObservation(timeoutWorkspace.root),
       },
@@ -281,12 +432,10 @@ describe("named-check-runner", () => {
         attempt: 1,
         candidateCommit: "a".repeat(64),
         candidateTree: "b".repeat(64),
-        workspaceIdentityToken: {},
+        workspaceIdentityToken: bindWorkspaceExecution(mutateWorkspace.root),
         requestDigest: "f".repeat(64),
       },
       {
-        cwd: mutateWorkspace.root,
-        homeDirectory: join(mutateWorkspace.root, "home"),
         beforeObservation: workspaceObservation(mutateWorkspace.root),
         observeAfter: () => workspaceObservation(mutateWorkspace.root),
       },
@@ -310,16 +459,15 @@ describe("named-check-runner", () => {
         attempt: 1,
         candidateCommit: "a".repeat(64),
         candidateTree: "b".repeat(64),
-        workspaceIdentityToken: {},
+        workspaceIdentityToken: bindWorkspaceExecution(restoreWorkspace.root),
         requestDigest: "1".repeat(64),
       },
       {
-        cwd: restoreWorkspace.root,
-        homeDirectory: join(restoreWorkspace.root, "home"),
         beforeObservation: beforeRestore,
         observeAfter: () => ({
-          workspaceTree: beforeRestore.workspaceTree,
-          sentinelDigest: `${beforeRestore.sentinelDigest}-changed`,
+          repositoryIdentity: beforeRestore.repositoryIdentity,
+          state: beforeRestore.state,
+          workspaceSentinelDigest: `${beforeRestore.workspaceSentinelDigest?.slice(0, 63) ?? ""}0`,
         }),
       },
     );
@@ -342,12 +490,12 @@ describe("named-check-runner", () => {
         attempt: 1,
         candidateCommit: "a".repeat(64),
         candidateTree: "b".repeat(64),
-        workspaceIdentityToken: {},
+        workspaceIdentityToken: bindWorkspaceExecution(
+          descendantWorkspace.root,
+        ),
         requestDigest: "2".repeat(64),
       },
       {
-        cwd: descendantWorkspace.root,
-        homeDirectory: join(descendantWorkspace.root, "home"),
         beforeObservation: workspaceObservation(descendantWorkspace.root),
         observeAfter: () => workspaceObservation(descendantWorkspace.root),
       },
@@ -382,12 +530,10 @@ describe("named-check-runner", () => {
         attempt: 1,
         candidateCommit: "a".repeat(64),
         candidateTree: "b".repeat(64),
-        workspaceIdentityToken: {},
+        workspaceIdentityToken: bindWorkspaceExecution(syncWorkspace.root),
         requestDigest: "5".repeat(64),
       },
       {
-        cwd: syncWorkspace.root,
-        homeDirectory: join(syncWorkspace.root, "home"),
         beforeObservation: workspaceObservation(syncWorkspace.root),
         observeAfter: () => {
           const secret = ["api_key", "sk-secret"].join("=");
@@ -413,12 +559,10 @@ describe("named-check-runner", () => {
         attempt: 1,
         candidateCommit: "a".repeat(64),
         candidateTree: "b".repeat(64),
-        workspaceIdentityToken: {},
+        workspaceIdentityToken: bindWorkspaceExecution(asyncWorkspace.root),
         requestDigest: "6".repeat(64),
       },
       {
-        cwd: asyncWorkspace.root,
-        homeDirectory: join(asyncWorkspace.root, "home"),
         beforeObservation: workspaceObservation(asyncWorkspace.root),
         observeAfter: async () => {
           const secret = ["api_key", "sk-secret"].join("=");
@@ -449,12 +593,10 @@ describe("named-check-runner", () => {
         attempt: 1,
         candidateCommit: "a".repeat(64),
         candidateTree: "b".repeat(64),
-        workspaceIdentityToken: {},
+        workspaceIdentityToken: bindWorkspaceExecution(cancelledWorkspace.root),
         requestDigest: "3".repeat(64),
       },
       {
-        cwd: cancelledWorkspace.root,
-        homeDirectory: join(cancelledWorkspace.root, "home"),
         beforeObservation: workspaceObservation(cancelledWorkspace.root),
         observeAfter: () => workspaceObservation(cancelledWorkspace.root),
       },
@@ -481,12 +623,10 @@ describe("named-check-runner", () => {
         attempt: 1,
         candidateCommit: "a".repeat(64),
         candidateTree: "b".repeat(64),
-        workspaceIdentityToken: {},
+        workspaceIdentityToken: bindWorkspaceExecution(overflowWorkspace.root),
         requestDigest: "4".repeat(64),
       },
       {
-        cwd: overflowWorkspace.root,
-        homeDirectory: join(overflowWorkspace.root, "home"),
         beforeObservation: workspaceObservation(overflowWorkspace.root),
         observeAfter: () => workspaceObservation(overflowWorkspace.root),
       },

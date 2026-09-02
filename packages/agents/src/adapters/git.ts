@@ -45,12 +45,14 @@ import {
   type ValidationResult,
 } from "@scrum-pi-team-skills/contracts";
 import {
+  cancelNamedCheckPermitV1,
   createNamedCheckAuthorityV1,
   issueNamedCheckPermitV1 as issueRuntimeNamedCheckPermitV1,
   runExactNamedCheckV1,
   type IssueNamedCheckPermitV1Options,
   type NamedCheckAuthorityV1,
   type NamedCheckPermitV1,
+  type NamedCheckRepositoryObservationV1,
 } from "@scrum-pi-team-skills/runtime";
 
 import {
@@ -312,6 +314,13 @@ interface PolicyStateV1 {
   readonly harnesses: Set<FixtureRepositoryHarnessV1>;
 }
 
+interface ActiveNamedCheckExecutionV1 {
+  readonly operationId: string;
+  readonly registrationId: string;
+  readonly controller: AbortController;
+  readonly promise: Promise<ValidationResult<NamedCheckResultV1>>;
+}
+
 interface HarnessStateV1 {
   readonly policyState: PolicyStateV1;
   readonly runId: string;
@@ -336,6 +345,8 @@ interface HarnessStateV1 {
   };
   readonly operations: Map<string, OperationStateV1>;
   readonly registrations: Map<string, RegistrationStateV1>;
+  readonly issuedPermits: Set<NamedCheckPermitV1>;
+  readonly activeNamedChecks: Map<string, ActiveNamedCheckExecutionV1>;
   faultPoint: string | null;
   status:
     | "active"
@@ -427,6 +438,17 @@ function validateSafeId(label: string, value: unknown): string {
 
 function validateObjectId(label: string, value: unknown): string {
   if (typeof value !== "string" || !OBJECT_ID_PATTERN.test(value)) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return value;
+}
+
+function validateAbsoluteDirectory(label: string, value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    !isAbsolute(value) ||
+    containsCredentialShapedContent(value)
+  ) {
     throw new TypeError(`${label} is invalid`);
   }
   return value;
@@ -842,6 +864,27 @@ function deriveRunDigest(
   });
 }
 
+function findMatchingHarnessRoots(
+  parentPath: string,
+  runDigest: string,
+): readonly string[] {
+  return readdirSync(parentPath)
+    .map((entry) => join(parentPath, entry))
+    .filter((entry) => existsSync(join(entry, "metadata", ROOT_MANIFEST_FILE)))
+    .filter((entry) => {
+      try {
+        return (
+          readCanonicalJson<RootManifestV1>(
+            join(entry, "metadata", ROOT_MANIFEST_FILE),
+          ).runDigest === runDigest
+        );
+      } catch {
+        return false;
+      }
+    })
+    .sort();
+}
+
 function maybeInjectFault(state: HarnessStateV1, point: string): void {
   if (state.faultPoint !== point) return;
   state.faultPoint = null;
@@ -1218,11 +1261,11 @@ function readGitCommonDir(state: HarnessStateV1, cwd: string): string {
 function readObjectFormat(
   state: HarnessStateV1,
   cwd: string,
+  allowClosed = false,
 ): "sha1" | "sha256" {
-  const value = runGit(state, cwd, [
-    "rev-parse",
-    "--show-object-format",
-  ]).stdout.trim();
+  const value = runGit(state, cwd, ["rev-parse", "--show-object-format"], {
+    allowClosed,
+  }).stdout.trim();
   if (value !== "sha1" && value !== "sha256") {
     throw new TypeError(
       FIXTURE_DIAGNOSTIC_MESSAGES_V1["repository-identity-drift"],
@@ -1231,17 +1274,25 @@ function readObjectFormat(
   return value;
 }
 
-function readBranch(state: HarnessStateV1, cwd: string): string | null {
+function readBranch(
+  state: HarnessStateV1,
+  cwd: string,
+  allowClosed = false,
+): string | null {
   const result = runGit(
     state,
     cwd,
     ["symbolic-ref", "--quiet", "--short", "HEAD"],
-    { allowFailure: true },
+    { allowFailure: true, allowClosed },
   );
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-function assertHostileStateAbsent(state: HarnessStateV1, cwd: string): void {
+function assertHostileStateAbsent(
+  state: HarnessStateV1,
+  cwd: string,
+  allowClosed = false,
+): void {
   const gitDir = readGitAbsoluteDir(state, cwd);
   const commonDir = readGitCommonDir(state, cwd);
   const hostilePaths = [
@@ -1267,6 +1318,7 @@ function assertHostileStateAbsent(state: HarnessStateV1, cwd: string): void {
   }
   const fsck = runGit(state, cwd, ["fsck", "--strict", "--no-progress"], {
     allowFailure: true,
+    allowClosed,
   });
   if (fsck.status !== 0) {
     throw new TypeError(
@@ -1334,16 +1386,32 @@ function workspaceOnlySentinelDigest(path: string): string {
   );
 }
 
+function toNamedCheckRepositoryObservation(
+  observation: {
+    readonly repositoryIdentity: FixtureRepositoryObservationV1["repositoryIdentity"];
+    readonly state: RepositoryStateV1;
+  },
+  workspacePath: string,
+): NamedCheckRepositoryObservationV1 {
+  return Object.freeze({
+    repositoryIdentity: Object.freeze({
+      commonDirectoryDigest:
+        observation.repositoryIdentity.commonDirectoryDigest,
+      objectFormat: observation.repositoryIdentity.objectFormat,
+    }),
+    state: observation.state,
+    workspaceSentinelDigest: workspaceOnlySentinelDigest(workspacePath),
+  });
+}
+
 function parseWorktreeList(
   state: HarnessStateV1,
   cwd: string,
+  allowClosed = false,
 ): readonly unknown[] {
-  const output = runGit(state, cwd, [
-    "worktree",
-    "list",
-    "--porcelain",
-    "-z",
-  ]).stdout;
+  const output = runGit(state, cwd, ["worktree", "list", "--porcelain", "-z"], {
+    allowClosed,
+  }).stdout;
   const records = output.split("\0").filter(Boolean);
   const worktrees: Array<Record<string, unknown>> = [];
   let current: Record<string, unknown> | null = null;
@@ -1371,9 +1439,13 @@ function parseWorktreeList(
   return worktrees;
 }
 
-function countGitObjects(state: HarnessStateV1, cwd: string): void {
+function countGitObjects(
+  state: HarnessStateV1,
+  cwd: string,
+  allowClosed = false,
+): void {
   const count = Number.parseInt(
-    runGit(state, cwd, ["count-objects", "-v"])
+    runGit(state, cwd, ["count-objects", "-v"], { allowClosed })
       .stdout.split(/\r?\n/u)
       .find((line) => line.startsWith("count: "))
       ?.slice(7) ?? "0",
@@ -1390,31 +1462,39 @@ function countGitObjects(state: HarnessStateV1, cwd: string): void {
 function observeRepositoryState(
   state: HarnessStateV1,
   cwd: string,
+  allowClosed = false,
 ): {
   readonly repositoryIdentity: FixtureRepositoryObservationV1["repositoryIdentity"];
   readonly state: RepositoryStateV1;
 } {
-  assertHostileStateAbsent(state, cwd);
-  const objectFormat = readObjectFormat(state, cwd);
-  const headCommit = runGit(state, cwd, [
-    "rev-parse",
-    "--verify",
-    "HEAD^{commit}",
-  ]).stdout.trim();
-  const headTree = runGit(state, cwd, [
-    "rev-parse",
-    "HEAD^{tree}",
-  ]).stdout.trim();
-  const branch = readBranch(state, cwd);
-  const status = runGit(state, cwd, [
-    "status",
-    "--porcelain=v2",
-    "-z",
-    "--branch",
-    "--untracked-files=all",
-    "--ignored=matching",
-  ]).stdout;
-  const indexEntries = runGit(state, cwd, ["ls-files", "--stage", "-z"])
+  assertHostileStateAbsent(state, cwd, allowClosed);
+  const objectFormat = readObjectFormat(state, cwd, allowClosed);
+  const headCommit = runGit(
+    state,
+    cwd,
+    ["rev-parse", "--verify", "HEAD^{commit}"],
+    { allowClosed },
+  ).stdout.trim();
+  const headTree = runGit(state, cwd, ["rev-parse", "HEAD^{tree}"], {
+    allowClosed,
+  }).stdout.trim();
+  const branch = readBranch(state, cwd, allowClosed);
+  const status = runGit(
+    state,
+    cwd,
+    [
+      "status",
+      "--porcelain=v2",
+      "-z",
+      "--branch",
+      "--untracked-files=all",
+      "--ignored=matching",
+    ],
+    { allowClosed },
+  ).stdout;
+  const indexEntries = runGit(state, cwd, ["ls-files", "--stage", "-z"], {
+    allowClosed,
+  })
     .stdout.split("\0")
     .filter(Boolean)
     .map((entry) => {
@@ -1457,14 +1537,14 @@ function observeRepositoryState(
   );
   const worktreeSetDigest = computeGitCheckFixtureDigestV1(
     "spts.fixture-worktree-set/1.0.0",
-    parseWorktreeList(state, cwd),
+    parseWorktreeList(state, cwd, allowClosed),
   );
   const filesystemObservations = walkTree(cwd);
   const gitDir = readGitAbsoluteDir(state, cwd);
   if (!containsPath(cwd, gitDir)) {
     filesystemObservations.push(...walkTree(gitDir, "__admin__"));
   }
-  countGitObjects(state, cwd);
+  countGitObjects(state, cwd, allowClosed);
   return {
     repositoryIdentity: {
       commonDirectoryDigest: directoryDigest(
@@ -2120,6 +2200,74 @@ function defaultRegistrationTuple(
   };
 }
 
+function hasIssuedNamedCheckPermit(
+  state: HarnessStateV1,
+  registrationId: string,
+): boolean {
+  return [...state.issuedPermits].some(
+    (permit) => permit.registrationId === registrationId,
+  );
+}
+
+function hasActiveNamedCheck(
+  state: HarnessStateV1,
+  registrationId: string,
+): boolean {
+  return [...state.activeNamedChecks.values()].some(
+    (entry) => entry.registrationId === registrationId,
+  );
+}
+
+async function settleNamedCheckCancellation(
+  state: HarnessStateV1,
+): Promise<boolean> {
+  for (const permit of state.issuedPermits) {
+    cancelNamedCheckPermitV1(permit);
+  }
+  for (const execution of state.activeNamedChecks.values()) {
+    execution.controller.abort();
+  }
+  const settled = await Promise.allSettled(
+    [...state.activeNamedChecks.values()].map((entry) => entry.promise),
+  );
+  let recoveryRequired = false;
+  for (const result of settled) {
+    if (result.status === "rejected") {
+      recoveryRequired = true;
+      continue;
+    }
+    if (!result.value.valid) {
+      recoveryRequired = true;
+      continue;
+    }
+    if (result.value.value.outcome === "outcome-unknown") {
+      recoveryRequired = true;
+    }
+  }
+  state.issuedPermits.clear();
+  return recoveryRequired;
+}
+
+async function cancelHarnessState(state: HarnessStateV1): Promise<void> {
+  if (!state.policyState.revoked) ensureHarnessState(state, true);
+  if (state.status === "removed" || state.status === "recovery-required")
+    return;
+  if (state.status === "cancelled") return;
+  state.status = "cancelling";
+  const recoveryRequired = await settleNamedCheckCancellation(state);
+  state.status = recoveryRequired ? "recovery-required" : "cancelled";
+}
+
+async function closeHarnessState(state: HarnessStateV1): Promise<void> {
+  if (!state.policyState.revoked) ensureHarnessState(state, true);
+  if (state.status === "removed" || state.status === "recovery-required")
+    return;
+  if (state.status === "closed") return;
+  state.status = "closing";
+  const recoveryRequired = await settleNamedCheckCancellation(state);
+  state.status = recoveryRequired ? "recovery-required" : "closed";
+}
+
 function createHarnessObject(
   policy: TrustedFixtureGitPolicyV1,
   state: HarnessStateV1,
@@ -2145,16 +2293,8 @@ function createHarnessObject(
     ) => issueHarnessNamedCheckPermitV1(harness, request),
     runNamedCheckV1: async (request: RunNamedCheckRequestV1) =>
       runHarnessNamedCheckV1(harness, request),
-    cancel: async () => {
-      const current = requireHarnessState(harness);
-      if (current.status === "active") current.status = "cancelled";
-    },
-    close: async () => {
-      const current = requireHarnessState(harness);
-      if (current.status === "active" || current.status === "cancelled") {
-        current.status = "closed";
-      }
-    },
+    cancel: async () => cancelHarnessState(requireHarnessState(harness)),
+    close: async () => closeHarnessState(requireHarnessState(harness)),
     cleanup: async () => cleanupHarness(harness),
   });
   HARNESS_STATE.set(harness, state);
@@ -2167,6 +2307,11 @@ function cleanupHarness(harness: FixtureRepositoryHarnessV1): void {
   ensureHarnessState(state, true);
   if (state.status !== "closed" && state.status !== "cancelled") {
     throw new TypeError("fixture cleanup requires a closed harness");
+  }
+  if (state.issuedPermits.size > 0 || state.activeNamedChecks.size > 0) {
+    throw new TypeError(
+      "fixture cleanup must retain live named-check authority evidence",
+    );
   }
   for (const operation of state.operations.values()) {
     if (!operation.completed) {
@@ -2524,6 +2669,19 @@ export function createTrustedFixtureGitPolicyV1(
   const authority = createNamedCheckAuthorityV1({
     policyId: definition.policyId,
     checks: namedChecks,
+    resolveWorkspaceExecution: (workspaceIdentityToken: object) => {
+      const token = workspaceIdentityToken as {
+        readonly cwd?: unknown;
+        readonly homeDirectory?: unknown;
+      };
+      return {
+        cwd: validateAbsoluteDirectory("cwd", token.cwd),
+        homeDirectory: validateAbsoluteDirectory(
+          "homeDirectory",
+          token.homeDirectory,
+        ),
+      };
+    },
   });
   const policy: TrustedFixtureGitPolicyV1 = Object.freeze({
     policyId: definition.policyId,
@@ -2542,7 +2700,9 @@ export function createTrustedFixtureGitPolicyV1(
       state.revoked = true;
       for (const harness of state.harnesses) {
         const harnessState = requireHarnessState(harness);
-        if (harnessState.status !== "removed") harnessState.status = "closed";
+        if (harnessState.status !== "removed") {
+          await closeHarnessState(harnessState);
+        }
       }
     },
   });
@@ -2576,6 +2736,14 @@ export async function createFixtureRepositoryHarnessV1(
   validateObjectId("expectedBaseCommit", options.expectedBaseCommit);
   validateObjectId("expectedBaseTree", options.expectedBaseTree);
   const runDigest = deriveRunDigest(policy.policyId, options);
+  if (
+    findMatchingHarnessRoots(policyState.parentIdentity.path, runDigest)
+      .length > 0
+  ) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1["run-identity-conflict"],
+    );
+  }
   const rootPath = join(
     policyState.parentIdentity.path,
     `spts-fixture-${randomBytes(16).toString("hex")}`,
@@ -2595,6 +2763,8 @@ export async function createFixtureRepositoryHarnessV1(
     directories,
     operations: new Map(),
     registrations: new Map(),
+    issuedPermits: new Set(),
+    activeNamedChecks: new Map(),
     faultPoint: null,
     status: "active",
   };
@@ -2618,9 +2788,19 @@ export async function recoverFixtureRepositoryHarnessV1(
   validateObjectId("expectedBaseCommit", options.expectedBaseCommit);
   validateObjectId("expectedBaseTree", options.expectedBaseTree);
   const runDigest = deriveRunDigest(policy.policyId, options);
-  const candidates = readdirSync(policyState.parentIdentity.path)
-    .map((entry) => join(policyState.parentIdentity.path, entry))
-    .filter((entry) => existsSync(join(entry, "metadata", ROOT_MANIFEST_FILE)));
+  const candidates = findMatchingHarnessRoots(
+    policyState.parentIdentity.path,
+    runDigest,
+  );
+  if (candidates.length !== 1) {
+    throw new TypeError(
+      FIXTURE_DIAGNOSTIC_MESSAGES_V1[
+        candidates.length === 0
+          ? "storage-unavailable"
+          : "run-identity-conflict"
+      ],
+    );
+  }
   for (const rootPath of candidates) {
     const directories = createRunDirectories(rootPath);
     const state: HarnessStateV1 = {
@@ -2638,6 +2818,8 @@ export async function recoverFixtureRepositoryHarnessV1(
       directories,
       operations: new Map(),
       registrations: new Map(),
+      issuedPermits: new Set(),
+      activeNamedChecks: new Map(),
       faultPoint: null,
       status: "active",
     };
@@ -3096,6 +3278,23 @@ async function removeWorktree(
       diagnosticCode: registration.cleanupBlockedReason,
     });
   }
+  if (
+    hasIssuedNamedCheckPermit(state, registrationId) ||
+    hasActiveNamedCheck(state, registrationId)
+  ) {
+    return operationConflictObservation(state, {
+      operationId,
+      registrationId,
+      operationKind: "remove-worktree",
+      purpose: registration.role,
+      requestDigest: computeFixtureRepositoryRequestDigestV1({
+        policyId: state.policyState.publicPolicy.policyId,
+        operationId,
+        registrationId,
+      }),
+      diagnosticCode: "live-agent-ambiguous",
+    });
+  }
   const requestDigest = computeFixtureRepositoryRequestDigestV1({
     policyId: state.policyState.publicPolicy.policyId,
     operationId,
@@ -3119,6 +3318,80 @@ async function removeWorktree(
       diagnosticCode: "operation-replay-conflict",
     });
   }
+  let pre;
+  try {
+    pre = observeRepositoryState(state, registration.path);
+  } catch {
+    return createObservation(state, {
+      operationId,
+      registrationId,
+      operationKind: "remove-worktree",
+      purpose: registration.role,
+      sequence: currentSequence(state),
+      repositoryIdentity: {
+        commonDirectoryDigest: registration.commonDirectoryDigest,
+        objectFormat: "sha256",
+      },
+      pre: null,
+      post: null,
+      outcome: "blocked",
+      diagnostic: createFixtureDiagnosticV1("repository-identity-drift"),
+      requestDigest,
+    });
+  }
+  if (!pre.state.clean) {
+    return createObservation(state, {
+      operationId,
+      registrationId,
+      operationKind: "remove-worktree",
+      purpose: registration.role,
+      sequence: currentSequence(state),
+      repositoryIdentity: pre.repositoryIdentity,
+      pre: pre.state,
+      post: pre.state,
+      outcome: "blocked",
+      diagnostic: createFixtureDiagnosticV1("workspace-dirty"),
+      requestDigest,
+    });
+  }
+  if (
+    pre.repositoryIdentity.commonDirectoryDigest !==
+    registration.commonDirectoryDigest
+  ) {
+    return createObservation(state, {
+      operationId,
+      registrationId,
+      operationKind: "remove-worktree",
+      purpose: registration.role,
+      sequence: currentSequence(state),
+      repositoryIdentity: pre.repositoryIdentity,
+      pre: pre.state,
+      post: pre.state,
+      outcome: "blocked",
+      diagnostic: createFixtureDiagnosticV1("repository-identity-drift"),
+      requestDigest,
+    });
+  }
+  if (
+    registration.candidateCommit !== null &&
+    registration.candidateTree !== null &&
+    (pre.state.headCommit !== registration.candidateCommit ||
+      pre.state.headTree !== registration.candidateTree)
+  ) {
+    return createObservation(state, {
+      operationId,
+      registrationId,
+      operationKind: "remove-worktree",
+      purpose: registration.role,
+      sequence: currentSequence(state),
+      repositoryIdentity: pre.repositoryIdentity,
+      pre: pre.state,
+      post: pre.state,
+      outcome: "blocked",
+      diagnostic: createFixtureDiagnosticV1("candidate-identity-drift"),
+      requestDigest,
+    });
+  }
   return executeOperationWithLedger(state, {
     operationId,
     kind: "remove-worktree",
@@ -3130,7 +3403,6 @@ async function removeWorktree(
       sourceRegistrationId: registration.sourceRegistrationId,
     },
     effect: () => {
-      const pre = observeRepositoryState(state, registration.path);
       registration.state = "cleanup-pending";
       registration.generation += 1;
       writeRegistrationRecord(state, registration);
@@ -3199,21 +3471,17 @@ async function issueHarnessNamedCheckPermitV1(
     candidateTree: registration.candidateTree,
   });
   const options: IssueNamedCheckPermitV1Options = {
-    cwd: registration.path,
-    homeDirectory: state.directories.home,
-    beforeObservation: {
-      workspaceTree: observation.state.headTree,
-      sentinelDigest: workspaceOnlySentinelDigest(registration.path),
-    },
-    observeAfter: () => {
-      const after = observeRepositoryState(state, registration.path);
-      return {
-        workspaceTree: after.state.headTree,
-        sentinelDigest: workspaceOnlySentinelDigest(registration.path),
-      };
-    },
+    beforeObservation: toNamedCheckRepositoryObservation(
+      observation,
+      registration.path,
+    ),
+    observeAfter: () =>
+      toNamedCheckRepositoryObservation(
+        observeRepositoryState(state, registration.path, true),
+        registration.path,
+      ),
   };
-  return issueRuntimeNamedCheckPermitV1(
+  const permit = issueRuntimeNamedCheckPermitV1(
     state.policyState.authority,
     {
       operationId: request.operationId,
@@ -3223,11 +3491,17 @@ async function issueHarnessNamedCheckPermitV1(
       attempt: request.attempt,
       candidateCommit: registration.candidateCommit,
       candidateTree: registration.candidateTree,
-      workspaceIdentityToken: registration,
+      workspaceIdentityToken: Object.freeze({
+        cwd: registration.path,
+        homeDirectory: state.directories.home,
+        registration,
+      }),
       requestDigest,
     },
     options,
   );
+  state.issuedPermits.add(permit);
+  return permit;
 }
 
 async function runHarnessNamedCheckV1(
@@ -3265,6 +3539,9 @@ async function runHarnessNamedCheckV1(
   } catch {
     return conflictResult("operation-replay-conflict");
   }
+  if (hasActiveNamedCheck(state, request.registrationId)) {
+    return conflictResult("live-agent-ambiguous");
+  }
   const result = await executeOperationWithLedger(state, {
     operationId: request.operationId,
     kind: "named-check",
@@ -3280,7 +3557,36 @@ async function runHarnessNamedCheckV1(
     },
     effect: async () => {
       const permit = await issueHarnessNamedCheckPermitV1(harness, request);
-      return runExactNamedCheckV1({ permit, signal: request.signal });
+      const controller = new AbortController();
+      let abortListener: (() => void) | undefined;
+      if (request.signal) {
+        abortListener = () => controller.abort();
+        if (request.signal.aborted) abortListener();
+        else {
+          request.signal.addEventListener("abort", abortListener, {
+            once: true,
+          });
+        }
+      }
+      const promise = runExactNamedCheckV1({
+        permit,
+        signal: controller.signal,
+      });
+      state.activeNamedChecks.set(request.operationId, {
+        operationId: request.operationId,
+        registrationId: request.registrationId,
+        controller,
+        promise,
+      });
+      try {
+        return await promise;
+      } finally {
+        state.issuedPermits.delete(permit);
+        state.activeNamedChecks.delete(request.operationId);
+        if (abortListener && request.signal) {
+          request.signal.removeEventListener("abort", abortListener);
+        }
+      }
     },
   });
   updateRegistrationCleanupState(registration, result);

@@ -4,12 +4,15 @@ import { isAbsolute } from "node:path";
 import type { SpawnOptions } from "node:child_process";
 
 import {
+  CLEAN_REPOSITORY_DIGESTS_V1,
   FIXTURE_DIAGNOSTIC_MESSAGES_V1,
+  computeGitCheckFixtureDigestV1,
   computeNamedCheckResultDigestV1,
   containsCredentialShapedContent,
   createFixtureDiagnosticV1,
   validateNamedCheckResultV1,
   type NamedCheckResultV1,
+  type RepositoryStateV1,
   type ValidationResult,
 } from "@scrum-pi-team-skills/contracts";
 
@@ -27,9 +30,17 @@ export interface NamedCheckAuthorityV1Definition {
   readonly maxOutputBytes: number;
 }
 
+export interface NamedCheckWorkspaceBindingV1 {
+  readonly cwd: string;
+  readonly homeDirectory: string;
+}
+
 export interface NamedCheckAuthorityCreationV1 {
   readonly policyId: string;
   readonly checks: readonly NamedCheckAuthorityV1Definition[];
+  readonly resolveWorkspaceExecution: (
+    workspaceIdentityToken: object,
+  ) => NamedCheckWorkspaceBindingV1;
 }
 
 export interface NamedCheckAuthorityV1 {
@@ -49,19 +60,20 @@ export interface IssueNamedCheckPermitV1Input {
   readonly requestDigest: string;
 }
 
-export interface NamedCheckWorkspaceObservationV1 {
-  readonly workspaceTree: string;
-  readonly sentinelDigest?: string;
+export interface NamedCheckRepositoryObservationV1 {
+  readonly repositoryIdentity: {
+    readonly commonDirectoryDigest: string;
+    readonly objectFormat: "sha1" | "sha256";
+  };
+  readonly state: RepositoryStateV1;
+  readonly workspaceSentinelDigest?: string;
 }
 
 export interface IssueNamedCheckPermitV1Options {
-  readonly cwd: string;
-  readonly homeDirectory: string;
-  readonly environment?: Readonly<Record<string, string>>;
-  readonly beforeObservation?: NamedCheckWorkspaceObservationV1;
+  readonly beforeObservation?: NamedCheckRepositoryObservationV1;
   readonly observeAfter?: () =>
-    | NamedCheckWorkspaceObservationV1
-    | Promise<NamedCheckWorkspaceObservationV1>;
+    | NamedCheckRepositoryObservationV1
+    | Promise<NamedCheckRepositoryObservationV1>;
 }
 
 export interface NamedCheckPermitV1 {
@@ -108,6 +120,9 @@ interface CheckDefinitionStateV1 {
 interface NamedCheckAuthorityStateV1 {
   readonly policyId: string;
   readonly checks: ReadonlyMap<string, CheckDefinitionStateV1>;
+  readonly resolveWorkspaceExecution: (
+    workspaceIdentityToken: object,
+  ) => NamedCheckWorkspaceBindingV1;
 }
 
 type PermitStateStatusV1 =
@@ -126,10 +141,10 @@ interface NamedCheckPermitStateV1 {
   readonly cwd: string;
   readonly homeDirectory: string;
   readonly environment: Readonly<Record<string, string>>;
-  readonly before: Readonly<NamedCheckWorkspaceObservationV1>;
+  readonly before: Readonly<NamedCheckRepositoryObservationV1>;
   readonly observeAfter: () =>
-    | NamedCheckWorkspaceObservationV1
-    | Promise<NamedCheckWorkspaceObservationV1>;
+    | NamedCheckRepositoryObservationV1
+    | Promise<NamedCheckRepositoryObservationV1>;
   readonly issuedAtMs: number;
   readonly deadlineMs: number;
   status: PermitStateStatusV1;
@@ -301,33 +316,100 @@ function validateNamedCheckDefinition(
   });
 }
 
+function defaultObservationFor(
+  candidateTree: string,
+): NamedCheckRepositoryObservationV1 {
+  return Object.freeze({
+    repositoryIdentity: Object.freeze({
+      commonDirectoryDigest: computeGitCheckFixtureDigestV1(
+        "spts.fixture-common-directory/1.0.0",
+        candidateTree,
+      ),
+      objectFormat: "sha256",
+    }),
+    state: Object.freeze({
+      headCommit: candidateTree,
+      headTree: candidateTree,
+      branch: null,
+      detached: true,
+      clean: true,
+      indexDigest: CLEAN_REPOSITORY_DIGESTS_V1.indexDigest,
+      trackedWorktreeDigest: CLEAN_REPOSITORY_DIGESTS_V1.trackedWorktreeDigest,
+      untrackedSetDigest: CLEAN_REPOSITORY_DIGESTS_V1.untrackedSetDigest,
+      ignoredSetDigest: CLEAN_REPOSITORY_DIGESTS_V1.ignoredSetDigest,
+      conflictSetDigest: CLEAN_REPOSITORY_DIGESTS_V1.conflictSetDigest,
+      submoduleSetDigest: CLEAN_REPOSITORY_DIGESTS_V1.submoduleSetDigest,
+      filesystemSentinelDigest: computeGitCheckFixtureDigestV1(
+        "spts.fixture-filesystem-sentinel/1.0.0",
+        [],
+      ),
+      worktreeSetDigest: computeGitCheckFixtureDigestV1(
+        "spts.fixture-worktree-set/1.0.0",
+        [],
+      ),
+    }),
+    workspaceSentinelDigest: computeGitCheckFixtureDigestV1(
+      "spts.fixture-filesystem-sentinel/1.0.0",
+      [],
+    ),
+  });
+}
+
+function validateRepositoryState(
+  value: RepositoryStateV1,
+): Readonly<RepositoryStateV1> {
+  validateObjectId("headCommit", value.headCommit);
+  validateObjectId("headTree", value.headTree);
+  if (value.branch !== null) validateSafeId("branch", value.branch);
+  if (value.detached !== (value.branch === null)) {
+    throw new TypeError("named check repository observation is invalid");
+  }
+  if (typeof value.clean !== "boolean") {
+    throw new TypeError("named check repository observation is invalid");
+  }
+  validateDigest("indexDigest", value.indexDigest);
+  validateDigest("trackedWorktreeDigest", value.trackedWorktreeDigest);
+  validateDigest("untrackedSetDigest", value.untrackedSetDigest);
+  validateDigest("ignoredSetDigest", value.ignoredSetDigest);
+  validateDigest("conflictSetDigest", value.conflictSetDigest);
+  validateDigest("submoduleSetDigest", value.submoduleSetDigest);
+  validateDigest("filesystemSentinelDigest", value.filesystemSentinelDigest);
+  validateDigest("worktreeSetDigest", value.worktreeSetDigest);
+  return Object.freeze({ ...value });
+}
+
+function validateRepositoryObservation(
+  value: NamedCheckRepositoryObservationV1,
+): Readonly<NamedCheckRepositoryObservationV1> {
+  validateDigest(
+    "commonDirectoryDigest",
+    value.repositoryIdentity.commonDirectoryDigest,
+  );
+  if (
+    value.repositoryIdentity.objectFormat !== "sha1" &&
+    value.repositoryIdentity.objectFormat !== "sha256"
+  ) {
+    throw new TypeError("named check repository observation is invalid");
+  }
+  return Object.freeze({
+    repositoryIdentity: Object.freeze({
+      commonDirectoryDigest: value.repositoryIdentity.commonDirectoryDigest,
+      objectFormat: value.repositoryIdentity.objectFormat,
+    }),
+    state: validateRepositoryState(value.state),
+    workspaceSentinelDigest:
+      value.workspaceSentinelDigest === undefined
+        ? undefined
+        : validateDigest(
+            "workspaceSentinelDigest",
+            value.workspaceSentinelDigest,
+          ),
+  });
+}
+
 function copyExactEnvironment(
   homeDirectory: string,
-  environment?: Readonly<Record<string, string>>,
 ): Readonly<Record<string, string>> {
-  const keys = new Set<string>([
-    "HOME",
-    "XDG_CONFIG_HOME",
-    "LANG",
-    "LC_ALL",
-    "TZ",
-    "CI",
-    "NO_COLOR",
-    "GIT_CONFIG_NOSYSTEM",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_TERMINAL_PROMPT",
-    "GCM_INTERACTIVE",
-    "GIT_ASKPASS",
-    "SSH_ASKPASS",
-    "GIT_PAGER",
-    "PAGER",
-  ]);
-  if (
-    environment &&
-    Object.values(environment).some(containsCredentialShapedContent)
-  ) {
-    throw new TypeError("named check environment is invalid");
-  }
   const result = Object.create(null) as Record<string, string>;
   result.HOME = homeDirectory;
   result.XDG_CONFIG_HOME = homeDirectory;
@@ -344,21 +426,6 @@ function copyExactEnvironment(
   result.SSH_ASKPASS = "/bin/false";
   result.GIT_PAGER = "cat";
   result.PAGER = "cat";
-
-  if (environment) {
-    const ownKeys = Object.keys(environment);
-    if (ownKeys.some((key) => !keys.has(key))) {
-      throw new TypeError("named check environment is invalid");
-    }
-    for (const key of ownKeys) {
-      const value = environment[key];
-      if (typeof value !== "string" || /[\0]/.test(value)) {
-        throw new TypeError("named check environment is invalid");
-      }
-      result[key] = value;
-    }
-  }
-
   return Object.freeze(result);
 }
 
@@ -415,10 +482,54 @@ function wait(clock: RuntimeClock, milliseconds: number): Promise<void> {
   });
 }
 
+function observationsMatchCore(
+  before: NamedCheckRepositoryObservationV1,
+  after: NamedCheckRepositoryObservationV1,
+): boolean {
+  return (
+    before.repositoryIdentity.commonDirectoryDigest ===
+      after.repositoryIdentity.commonDirectoryDigest &&
+    before.repositoryIdentity.objectFormat ===
+      after.repositoryIdentity.objectFormat &&
+    before.state.headCommit === after.state.headCommit &&
+    before.state.headTree === after.state.headTree &&
+    before.state.branch === after.state.branch &&
+    before.state.detached === after.state.detached &&
+    before.state.clean === after.state.clean &&
+    before.state.indexDigest === after.state.indexDigest &&
+    before.state.trackedWorktreeDigest === after.state.trackedWorktreeDigest &&
+    before.state.untrackedSetDigest === after.state.untrackedSetDigest &&
+    before.state.ignoredSetDigest === after.state.ignoredSetDigest &&
+    before.state.conflictSetDigest === after.state.conflictSetDigest &&
+    before.state.submoduleSetDigest === after.state.submoduleSetDigest &&
+    before.state.worktreeSetDigest === after.state.worktreeSetDigest
+  );
+}
+
+function observationsMatch(
+  before: NamedCheckRepositoryObservationV1,
+  after: NamedCheckRepositoryObservationV1,
+): boolean {
+  return (
+    observationsMatchCore(before, after) &&
+    before.workspaceSentinelDigest === after.workspaceSentinelDigest
+  );
+}
+
+function observationsMatchCoreOnly(
+  before: NamedCheckRepositoryObservationV1,
+  after: NamedCheckRepositoryObservationV1,
+): boolean {
+  return observationsMatchCore(before, after);
+}
+
 export function createNamedCheckAuthorityV1(
   definition: NamedCheckAuthorityCreationV1,
 ): NamedCheckAuthorityV1 {
   validateSafeId("policyId", definition.policyId);
+  if (typeof definition.resolveWorkspaceExecution !== "function") {
+    throw new TypeError("named check workspace resolution is invalid");
+  }
   if (!Array.isArray(definition.checks) || definition.checks.length === 0) {
     throw new TypeError("named check definitions are required");
   }
@@ -441,6 +552,7 @@ export function createNamedCheckAuthorityV1(
     Object.freeze({
       policyId: definition.policyId,
       checks: new Map(checkStates.map((entry) => [entry.checkId, entry])),
+      resolveWorkspaceExecution: definition.resolveWorkspaceExecution,
     }),
   );
   return authority;
@@ -472,18 +584,17 @@ export function issueNamedCheckPermitV1(
   if (!check) {
     throw new TypeError(FIXTURE_DIAGNOSTIC_MESSAGES_V1["check-not-allowed"]);
   }
-  const cwd = validateAbsoluteDirectory("cwd", options.cwd);
+  const resolvedWorkspace = authorityState.resolveWorkspaceExecution(
+    input.workspaceIdentityToken,
+  );
+  const cwd = validateAbsoluteDirectory("cwd", resolvedWorkspace.cwd);
   const homeDirectory = validateAbsoluteDirectory(
     "homeDirectory",
-    options.homeDirectory,
+    resolvedWorkspace.homeDirectory,
   );
-  const before = Object.freeze({
-    workspaceTree: validateObjectId(
-      "workspaceTreeBefore",
-      options.beforeObservation?.workspaceTree ?? input.candidateTree,
-    ),
-    sentinelDigest: options.beforeObservation?.sentinelDigest,
-  });
+  const before = validateRepositoryObservation(
+    options.beforeObservation ?? defaultObservationFor(input.candidateTree),
+  );
   const permit = Object.freeze({
     operationId: input.operationId,
     runId: input.runId,
@@ -501,14 +612,9 @@ export function issueNamedCheckPermitV1(
     input,
     cwd,
     homeDirectory,
-    environment: copyExactEnvironment(homeDirectory, options.environment),
+    environment: copyExactEnvironment(homeDirectory),
     before,
-    observeAfter:
-      options.observeAfter ??
-      (() => ({
-        workspaceTree: before.workspaceTree,
-        sentinelDigest: before.sentinelDigest,
-      })),
+    observeAfter: options.observeAfter ?? (() => before),
     issuedAtMs,
     deadlineMs: issuedAtMs + check.maxDurationMs,
     status: "issued",
@@ -516,16 +622,43 @@ export function issueNamedCheckPermitV1(
   return permit;
 }
 
+export function cancelNamedCheckPermitV1(permit: NamedCheckPermitV1): void {
+  const state = requirePermit(permit);
+  if (state.status === "issued") {
+    state.status = "consumed-cancelled";
+    return;
+  }
+  if (state.status === "consumed-before-spawn") {
+    state.status = "recovery-required";
+  }
+}
+
 export async function runExactNamedCheckV1(
   input: RunExactNamedCheckV1Input,
 ): Promise<ValidationResult<NamedCheckResultV1>> {
   const state = requirePermit(input.permit);
+  const clock = input.clock ?? defaultClock;
+  if (state.status === "consumed-cancelled") {
+    return buildResult(state, {
+      startedAt: clock.now(),
+      completedAt: clock.now(),
+      elapsedMs: 0,
+      outcome: "cancelled",
+      exitCode: null,
+      signal: null,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      stdoutDigest: observeOutputDigest().digest("hex"),
+      stderrDigest: observeOutputDigest().digest("hex"),
+      diagnostic: createFixtureDiagnosticV1("cancelled"),
+      workspaceTreeAfter: state.before.state.headTree,
+    });
+  }
   if (state.status !== "issued") {
     throw new TypeError(
       FIXTURE_DIAGNOSTIC_MESSAGES_V1["fixture-policy-unavailable"],
     );
   }
-  const clock = input.clock ?? defaultClock;
   const adapter = input.processAdapter ?? createNodeProcessAdapter();
   const startedAt = clock.now();
   if (adapter.platform !== "linux") {
@@ -541,7 +674,7 @@ export async function runExactNamedCheckV1(
       stdoutDigest: observeOutputDigest().digest("hex"),
       stderrDigest: observeOutputDigest().digest("hex"),
       diagnostic: createFixtureDiagnosticV1("outcome-unknown"),
-      workspaceTreeAfter: state.before.workspaceTree,
+      workspaceTreeAfter: state.before.state.headTree,
     });
     return unsupported;
   }
@@ -561,7 +694,7 @@ export async function runExactNamedCheckV1(
       stdoutDigest: observeOutputDigest().digest("hex"),
       stderrDigest: observeOutputDigest().digest("hex"),
       diagnostic: createFixtureDiagnosticV1("cancelled"),
-      workspaceTreeAfter: state.before.workspaceTree,
+      workspaceTreeAfter: state.before.state.headTree,
     });
   }
 
@@ -582,7 +715,7 @@ export async function runExactNamedCheckV1(
       stdoutDigest: observeOutputDigest().digest("hex"),
       stderrDigest: observeOutputDigest().digest("hex"),
       diagnostic: createFixtureDiagnosticV1("outcome-unknown"),
-      workspaceTreeAfter: state.before.workspaceTree,
+      workspaceTreeAfter: state.before.state.headTree,
     });
   }
 
@@ -626,7 +759,7 @@ export async function runExactNamedCheckV1(
       stdoutDigest: stdoutHash.digest("hex"),
       stderrDigest: stderrHash.digest("hex"),
       diagnostic: createFixtureDiagnosticV1("spawn-failed"),
-      workspaceTreeAfter: state.before.workspaceTree,
+      workspaceTreeAfter: state.before.state.headTree,
     });
   }
 
@@ -650,7 +783,7 @@ export async function runExactNamedCheckV1(
       stdoutDigest: stdoutHash.digest("hex"),
       stderrDigest: stderrHash.digest("hex"),
       diagnostic: createFixtureDiagnosticV1("outcome-unknown"),
-      workspaceTreeAfter: state.before.workspaceTree,
+      workspaceTreeAfter: state.before.state.headTree,
     });
   }
   state.status = "started";
@@ -776,29 +909,30 @@ export async function runExactNamedCheckV1(
 
   state.status = "observing";
   let afterObservation:
-    NamedCheckWorkspaceObservationV1 | { readonly failed: true };
+    NamedCheckRepositoryObservationV1 | { readonly failed: true };
   try {
     afterObservation = await Promise.resolve(state.observeAfter());
   } catch {
     afterObservation = { failed: true };
   }
   const observationFailed = "failed" in afterObservation;
-  const observedWorkspace: NamedCheckWorkspaceObservationV1 | null =
+  const observedWorkspace: NamedCheckRepositoryObservationV1 | null =
     observationFailed
       ? null
-      : (afterObservation as NamedCheckWorkspaceObservationV1);
+      : validateRepositoryObservation(
+          afterObservation as NamedCheckRepositoryObservationV1,
+        );
   const workspaceTreeAfter =
     observedWorkspace === null
-      ? state.before.workspaceTree
-      : validateObjectId("workspaceTreeAfter", observedWorkspace.workspaceTree);
-  const sentinelChanged =
-    observedWorkspace !== null &&
-    state.before.sentinelDigest !== undefined &&
-    observedWorkspace.sentinelDigest !== undefined &&
-    state.before.sentinelDigest !== observedWorkspace.sentinelDigest;
+      ? state.before.state.headTree
+      : observedWorkspace.state.headTree;
   const mutated =
-    !observationFailed &&
-    (workspaceTreeAfter !== state.before.workspaceTree || sentinelChanged);
+    observedWorkspace !== null &&
+    !observationsMatch(state.before, observedWorkspace);
+  const sentinelOnlyMutation =
+    observedWorkspace !== null &&
+    mutated &&
+    observationsMatchCoreOnly(state.before, observedWorkspace);
   const completedAt = clock.now();
   const elapsedMs = Math.max(
     0,
@@ -811,7 +945,7 @@ export async function runExactNamedCheckV1(
     outcome = "outcome-unknown";
     diagnostic = createFixtureDiagnosticV1("outcome-unknown");
     state.status = observationFailed ? "completed" : "recovery-required";
-  } else if (mutated) {
+  } else if (mutated && !(sentinelOnlyMutation && (timedOut || cancelled))) {
     outcome = "mutation-detected";
     diagnostic = createFixtureDiagnosticV1("workspace-mutated");
     state.status = "completed";
@@ -890,7 +1024,7 @@ function buildResult(
     attempt: state.input.attempt,
     candidateCommit: state.input.candidateCommit,
     candidateTree: state.input.candidateTree,
-    workspaceTreeBefore: state.before.workspaceTree,
+    workspaceTreeBefore: state.before.state.headTree,
     workspaceTreeAfter: details.workspaceTreeAfter,
     startedAt: details.startedAt,
     completedAt: details.completedAt,

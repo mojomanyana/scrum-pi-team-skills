@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -114,6 +115,122 @@ function createPolicy(parent: string) {
 }
 
 describe("worktree adapter", () => {
+  it("blocks dirty worktree removal and retains evidence", async () => {
+    const parent = mkdtempSync(
+      join(tmpdir(), "fixture-worktrees-guard-parent-"),
+    );
+    chmodSync(parent, 0o700);
+    const policy = createPolicy(parent);
+    const harness = await createFixtureRepositoryHarnessV1(policy, {
+      runId: "run-worktree-guard-1",
+      taskId: "task-worktree-guard-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    });
+
+    const repository = await harness.createRepository({
+      operationId: "repo-guard-1",
+      registrationId: "repo-guard-main",
+      files: [
+        {
+          pathComponents: ["named-check-fixture.txt"],
+          mode: "100644",
+          content: new TextEncoder().encode("original\n"),
+        },
+      ],
+    });
+
+    const dirtyWorktree = await harness.createWorktree({
+      operationId: "worktree-guard-dirty-1",
+      registrationId: "check-guard-dirty-1",
+      sourceRegistrationId: "repo-guard-main",
+      role: "named-check",
+      checkId: "fixture-pass",
+      candidateCommit: repository.post!.headCommit,
+      candidateTree: repository.post!.headTree,
+    });
+    expect(dirtyWorktree.outcome).toBe("applied");
+
+    const described = __testOnlyDescribeFixtureHarnessV1(harness);
+    const dirtyPath = described.registrations.find(
+      (entry) => entry.registrationId === "check-guard-dirty-1",
+    )?.path;
+    expect(dirtyPath).toBeDefined();
+    writeFileSync(
+      join(dirtyPath!, "named-check-fixture.txt"),
+      "dirty\n",
+      "utf8",
+    );
+    const dirtyRemoval = await harness.removeWorktree(
+      "cleanup-guard-dirty-1",
+      "check-guard-dirty-1",
+    );
+    expect(dirtyRemoval.outcome).toBe("blocked");
+    expect(dirtyRemoval.diagnostic?.code).toBe("workspace-dirty");
+    expect(existsSync(dirtyPath!)).toBe(true);
+
+    await harness.close();
+    rmSync(parent, { recursive: true, force: true });
+  }, 15_000);
+
+  it("blocks drifted worktree removal and retains evidence", async () => {
+    const parent = mkdtempSync(
+      join(tmpdir(), "fixture-worktrees-drift-parent-"),
+    );
+    chmodSync(parent, 0o700);
+    const policy = createPolicy(parent);
+    const harness = await createFixtureRepositoryHarnessV1(policy, {
+      runId: "run-worktree-drift-1",
+      taskId: "task-worktree-drift-1",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    });
+
+    const repository = await harness.createRepository({
+      operationId: "repo-drift-1",
+      registrationId: "repo-drift-main",
+      files: [
+        {
+          pathComponents: ["named-check-fixture.txt"],
+          mode: "100644",
+          content: new TextEncoder().encode("original\n"),
+        },
+      ],
+    });
+
+    const driftedWorktree = await harness.createWorktree({
+      operationId: "worktree-guard-drift-1",
+      registrationId: "check-guard-drift-1",
+      sourceRegistrationId: "repo-drift-main",
+      role: "named-check",
+      checkId: "fixture-pass",
+      candidateCommit: repository.post!.headCommit,
+      candidateTree: repository.post!.headTree,
+    });
+    expect(driftedWorktree.outcome).toBe("applied");
+    const driftPath = __testOnlyDescribeFixtureHarnessV1(
+      harness,
+    ).registrations.find(
+      (entry) => entry.registrationId === "check-guard-drift-1",
+    )?.path;
+    expect(driftPath).toBeDefined();
+    writeFileSync(
+      join(driftPath!, ".git"),
+      `${readFileSync(join(driftPath!, ".git"), "utf8")}# drift\n`,
+      "utf8",
+    );
+    const driftRemoval = await harness.removeWorktree(
+      "cleanup-guard-drift-1",
+      "check-guard-drift-1",
+    );
+    expect(driftRemoval.outcome).toBe("blocked");
+    expect(driftRemoval.diagnostic?.code).toBe("repository-identity-drift");
+    expect(existsSync(driftPath!)).toBe(true);
+
+    await harness.close();
+    rmSync(parent, { recursive: true, force: true });
+  }, 15_000);
+
   it("creates detached verifier and named-check worktrees and detects mutation", async () => {
     const parent = mkdtempSync(join(tmpdir(), "fixture-worktrees-parent-"));
     chmodSync(parent, 0o700);

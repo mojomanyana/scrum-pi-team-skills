@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  cpSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -22,6 +23,7 @@ import {
   recoverFixtureRepositoryHarnessV1,
   type FixtureLimitsV1,
 } from "../src/adapters/git.js";
+import { runExactNamedCheckV1 } from "@scrum-pi-team-skills/runtime";
 
 const fixtureScriptPath = new URL(
   "../../runtime/test/fixtures/named-check.mjs",
@@ -97,6 +99,13 @@ function createPolicy(parent: string) {
     gitExecPath: gitExecPath(),
     namedChecks: [
       {
+        checkId: "fixture-hang",
+        executable: process.execPath,
+        argv: [fixtureScriptPath, "hang"],
+        maxDurationMs: 2_000,
+        maxOutputBytes: 1_048_576,
+      },
+      {
         checkId: "fixture-pass",
         executable: process.execPath,
         argv: [fixtureScriptPath, "pass"],
@@ -143,6 +152,7 @@ describe("git adapter", () => {
     const policy = createPolicy(parent);
     expect(isTrustedFixtureGitPolicyV1(policy)).toBe(true);
     expect(policy.namedChecks.map((entry) => entry.checkId)).toEqual([
+      "fixture-hang",
       "fixture-mutate",
       "fixture-pass",
     ]);
@@ -268,6 +278,127 @@ describe("git adapter", () => {
     await recovered.cleanup();
     rmSync(parent, { recursive: true, force: true });
   });
+
+  it("rejects duplicate same-run roots and ambiguous recovery matches", async () => {
+    const parent = createTrustedParent();
+    const policy = createPolicy(parent);
+    const options = {
+      runId: "run-dupe",
+      taskId: "task-dupe",
+      expectedBaseCommit: "a".repeat(64),
+      expectedBaseTree: "b".repeat(64),
+    };
+    const harness = await createFixtureRepositoryHarnessV1(policy, options);
+    await expect(
+      createFixtureRepositoryHarnessV1(policy, options),
+    ).rejects.toThrow(/run identity/i);
+
+    const described = __testOnlyDescribeFixtureHarnessV1(harness);
+    cpSync(described.rootPath, join(parent, "copied-root"), {
+      recursive: true,
+    });
+    await expect(
+      recoverFixtureRepositoryHarnessV1(policy, options),
+    ).rejects.toThrow(/run identity/i);
+
+    rmSync(parent, { recursive: true, force: true });
+  });
+
+  it("detects index-only mutation before a passing named check result", async () => {
+    const { parent, harness, repository } = await createHarnessWithRepository();
+    await harness.createWorktree({
+      operationId: "worktree-index-only-1",
+      registrationId: "check-index-only-1",
+      sourceRegistrationId: "repo-main",
+      role: "named-check",
+      checkId: "fixture-pass",
+      candidateCommit: repository.post!.headCommit,
+      candidateTree: repository.post!.headTree,
+    });
+    const described = __testOnlyDescribeFixtureHarnessV1(harness);
+    const checkPath = described.registrations.find(
+      (entry) => entry.registrationId === "check-index-only-1",
+    )?.path;
+    expect(checkPath).toBeDefined();
+
+    const permit = await harness.issueNamedCheckPermitV1({
+      operationId: "named-check-index-only-1",
+      registrationId: "check-index-only-1",
+      checkId: "fixture-pass",
+      attempt: 1,
+    });
+    const blobId = spawnSync(
+      gitExecutable(),
+      ["-C", checkPath!, "hash-object", "-w", "--stdin"],
+      { encoding: "utf8", input: "ghost\n" },
+    ).stdout.trim();
+    expect(blobId).toMatch(/^[a-f0-9]{64}$/);
+    expect(
+      spawnSync(
+        gitExecutable(),
+        [
+          "-C",
+          checkPath!,
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          "100644",
+          blobId,
+          "ghost.txt",
+        ],
+        { encoding: "utf8" },
+      ).status,
+    ).toBe(0);
+
+    const result = await runExactNamedCheckV1({ permit });
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.value.outcome).toBe("mutation-detected");
+      expect(result.value.diagnostic?.code).toBe("workspace-mutated");
+    }
+
+    rmSync(parent, { recursive: true, force: true });
+  });
+
+  it("cancels active named checks promptly and blocks later issuance", async () => {
+    const { parent, harness, repository } = await createHarnessWithRepository();
+    await harness.createWorktree({
+      operationId: "worktree-cancel-1",
+      registrationId: "check-cancel-1",
+      sourceRegistrationId: "repo-main",
+      role: "named-check",
+      checkId: "fixture-hang",
+      candidateCommit: repository.post!.headCommit,
+      candidateTree: repository.post!.headTree,
+    });
+
+    const startedAt = Date.now();
+    const running = harness.runNamedCheckV1({
+      operationId: "named-check-cancel-1",
+      registrationId: "check-cancel-1",
+      checkId: "fixture-hang",
+      attempt: 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await harness.cancel();
+    const result = await running;
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.value.outcome).toBe("cancelled");
+      expect(result.value.diagnostic?.code).toBe("cancelled");
+    }
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    await expect(
+      harness.issueNamedCheckPermitV1({
+        operationId: "named-check-cancel-2",
+        registrationId: "check-cancel-1",
+        checkId: "fixture-hang",
+        attempt: 2,
+      }),
+    ).rejects.toThrow(/fixture policy/i);
+
+    rmSync(parent, { recursive: true, force: true });
+  }, 20_000);
 
   it("fails named-check replay conflicts closed instead of fabricating valid results", async () => {
     const { parent, harness, repository } = await createHarnessWithRepository();
