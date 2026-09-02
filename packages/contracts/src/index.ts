@@ -19,6 +19,8 @@ export * from "./lifecycle-receipt-anchor.js";
 export * from "./controller-command-v2.js";
 export * from "./controller-snapshot-v2.js";
 export * from "./controller-transition-v2.js";
+export * from "./controller-store-v2.js";
+export * from "./controller-store-receipt-v2.js";
 
 export interface ExecutionContext {
   process: "local-pi";
