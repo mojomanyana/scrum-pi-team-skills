@@ -839,7 +839,11 @@ function headPath(runPath: string): string {
 }
 
 function operationRecordPath(runPath: string, operationId: string): string {
-  return join(operationsPath(runPath), `${operationId}.json`);
+  const operationPathDigest = digestControllerStoreValueV2(
+    "spts/controller-store-operation-path/v2",
+    { operationId },
+  );
+  return join(operationsPath(runPath), `${operationPathDigest}.json`);
 }
 
 function journalPath(runPath: string): string {

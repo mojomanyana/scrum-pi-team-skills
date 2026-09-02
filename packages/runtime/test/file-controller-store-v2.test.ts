@@ -592,6 +592,27 @@ describe("authenticated file controller store v2", () => {
     }
   });
 
+  it("derives operation-record paths from digests rather than hostile operation IDs", async () => {
+    const root = privateRoot();
+    const store = await open(root);
+    const operationId = "op/../../../../outside";
+    const snapshot = initialSnapshot();
+    const request = deriveControllerStoreCreationRequestV2(
+      namespaceDigest,
+      snapshot,
+      operationId,
+    );
+    expect(
+      ok(
+        await store.createControllerRunV2(snapshot, {
+          operationId,
+          requestDigest: request.canonicalRequestDigest,
+        }),
+      ).revision,
+    ).toBe(0);
+    expect(fileTree(root).some((path) => path.includes("outside"))).toBe(false);
+  });
+
   it("uses and releases a namespace lock while creating a run", async () => {
     const root = privateRoot();
     const store = await open(root);
