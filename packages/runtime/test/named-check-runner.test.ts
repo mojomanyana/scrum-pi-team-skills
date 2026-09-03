@@ -394,7 +394,7 @@ function createScriptedProcessAdapter(
 }
 
 beforeAll(async () => {
-  await new Promise((resolve) => setTimeout(resolve, 15_000));
+  await new Promise((resolve) => setTimeout(resolve, 60_000));
   releaseHeavySuiteLock = await acquireHeavySuiteLock(
     new URL(import.meta.url).pathname,
   );
