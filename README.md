@@ -2,6 +2,14 @@
 
 Development baseline for locally executed Pi agents supporting a Scrum team.
 
+Fixture-only Git check support lives in `packages/contracts`, `packages/agents`, and `packages/runtime`.
+
+## Fixture Git check boundary (SPTS-10 Slice 5)
+
+The Slice 5 fixture harness creates only run-owned temporary SHA-256 Git repositories, local bare remotes, detached worktrees, and exact named checks under a trusted Linux-local parent directory. Named checks are selected only by trusted policy `checkId`, spawn exact executables with `shell:false`, use fixed non-inherited environments, and retain only digests, byte counts, and redacted diagnostics.
+
+This capability is fixture-only evidence for later controller decisions. It does **not** grant production authority, does not validate evaluator provenance, does not consume Slice 4 receipts as execution authority, and does not call Pi, pi-daddy, Paca, Herdr, GitHub, hosted CI, push/fetch remote URLs, publication, merge, release, deployment, or other live external effects.
+
 Paca is the Scrum control plane and system of record. Agents are planned and supervised as local Pi processes governed by pi-daddy. The repository implements the governed manifest/planning boundary and a Linux/WSL-local foreground process host; ACP and Paca adapters remain future scope.
 
 ## Prerequisites

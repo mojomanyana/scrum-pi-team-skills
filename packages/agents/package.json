@@ -12,5 +12,9 @@
   },
   "files": [
     "dist"
-  ]
+  ],
+  "dependencies": {
+    "@scrum-pi-team-skills/contracts": "0.0.0",
+    "@scrum-pi-team-skills/runtime": "0.0.0"
+  }
 }

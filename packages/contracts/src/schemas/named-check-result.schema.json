@@ -1,0 +1,133 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "version",
+    "runId",
+    "operationId",
+    "checkId",
+    "registrationId",
+    "attempt",
+    "candidateCommit",
+    "candidateTree",
+    "workspaceTreeBefore",
+    "workspaceTreeAfter",
+    "startedAt",
+    "completedAt",
+    "elapsedMs",
+    "outcome",
+    "exitCode",
+    "signal",
+    "stdoutBytes",
+    "stderrBytes",
+    "stdoutDigest",
+    "stderrDigest",
+    "diagnostic",
+    "requestDigest",
+    "resultDigest"
+  ],
+  "properties": {
+    "contract": { "const": "spts.named-check-result" },
+    "version": { "const": "1.0.0" },
+    "runId": { "$ref": "#/$defs/safeId" },
+    "operationId": { "$ref": "#/$defs/safeId" },
+    "checkId": { "$ref": "#/$defs/safeId" },
+    "registrationId": { "$ref": "#/$defs/safeId" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 32 },
+    "candidateCommit": { "$ref": "#/$defs/objectId" },
+    "candidateTree": { "$ref": "#/$defs/objectId" },
+    "workspaceTreeBefore": { "$ref": "#/$defs/objectId" },
+    "workspaceTreeAfter": { "$ref": "#/$defs/objectId" },
+    "startedAt": { "$ref": "#/$defs/timestamp" },
+    "completedAt": { "$ref": "#/$defs/timestamp" },
+    "elapsedMs": { "type": "integer", "minimum": 0, "maximum": 900000 },
+    "outcome": {
+      "enum": [
+        "passed",
+        "failed",
+        "timed-out",
+        "cancelled",
+        "spawn-failed",
+        "mutation-detected",
+        "outcome-unknown"
+      ]
+    },
+    "exitCode": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "integer", "minimum": 0, "maximum": 255 }
+      ]
+    },
+    "signal": {
+      "anyOf": [
+        { "type": "null" },
+        { "enum": ["SIGINT", "SIGTERM", "SIGKILL"] }
+      ]
+    },
+    "stdoutBytes": { "type": "integer", "minimum": 0, "maximum": 1048576 },
+    "stderrBytes": { "type": "integer", "minimum": 0, "maximum": 1048576 },
+    "stdoutDigest": { "$ref": "#/$defs/digest" },
+    "stderrDigest": { "$ref": "#/$defs/digest" },
+    "diagnostic": {
+      "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/diagnostic" }]
+    },
+    "requestDigest": { "$ref": "#/$defs/digest" },
+    "resultDigest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "objectId": {
+      "type": "string",
+      "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "input-introspection-failed",
+            "input-limit-exceeded",
+            "contract-invalid",
+            "credential-content-denied",
+            "fixture-policy-unavailable",
+            "platform-unsupported",
+            "trusted-root-invalid",
+            "run-identity-conflict",
+            "registration-conflict",
+            "workspace-collision",
+            "repository-identity-drift",
+            "candidate-identity-drift",
+            "workspace-dirty",
+            "live-agent-ambiguous",
+            "operation-replay-conflict",
+            "limit-exhausted",
+            "cancelled",
+            "check-not-allowed",
+            "spawn-failed",
+            "check-timed-out",
+            "workspace-mutated",
+            "outcome-unknown",
+            "storage-unavailable"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 192 }
+      }
+    }
+  }
+}
